@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  orcaslicer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: orcaslicer-api
+    ports:
+      - "5000:5000"
+    volumes:
+      # Mounted volume for profiles, presets, and configuration
+      - ./config:/config
+      # Mounted volume for inputs and outputs (models, sliced G-codes)
+      - ./data:/data
+      # Mount the app code for live reload / dev simplicity
+      - ./app:/workspace/app
+    environment:
+      - TZ=Etc/UTC
+      - PYTHONUNBUFFERED=1
+    shm_size: "1gb"
+    restart: unless-stopped

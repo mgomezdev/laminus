@@ -1,0 +1,1048 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OrcaSlicer Headless Runner</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <style>
+        :root {
+            --bg-color: #080c14;
+            --panel-bg: rgba(17, 24, 39, 0.55);
+            --panel-border: rgba(255, 255, 255, 0.08);
+            --text-color: #f3f4f6;
+            --text-muted: #9ca3af;
+            --primary: #6366f1;
+            --primary-glow: rgba(99, 102, 241, 0.15);
+            --success: #10b981;
+            --success-glow: rgba(16, 185, 129, 0.15);
+            --warning: #f59e0b;
+            --error: #ef4444;
+            --terminal-bg: #030712;
+            --font-main: 'Outfit', sans-serif;
+            --font-mono: 'Fira Code', monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: var(--font-main);
+            background-color: var(--bg-color);
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.1) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.08) 0px, transparent 50%);
+            color: var(--text-color);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow-x: hidden;
+        }
+
+        header {
+            padding: 1.5rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--panel-border);
+            backdrop-filter: blur(12px);
+            background-color: rgba(8, 12, 20, 0.7);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .logo-container {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo-icon {
+            width: 38px;
+            height: 38px;
+            background: linear-gradient(135deg, var(--primary), var(--success));
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 1.25rem;
+            color: white;
+            box-shadow: 0 0 15px rgba(99, 102, 241, 0.35);
+        }
+
+        .logo-title h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            letter-spacing: -0.5px;
+            background: linear-gradient(to right, #ffffff, #cbd5e1);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .logo-title p {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.85rem;
+            background: rgba(16, 185, 129, 0.1);
+            color: var(--success);
+            padding: 6px 12px;
+            border-radius: 99px;
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            font-weight: 500;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--success);
+            border-radius: 50%;
+            box-shadow: 0 0 8px var(--success);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
+
+        main {
+            flex: 1;
+            max-width: 1200px;
+            width: 100%;
+            margin: 2.5rem auto;
+            padding: 0 1.5rem;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2.5rem;
+        }
+
+        @media (max-width: 900px) {
+            main {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background-color: var(--panel-bg);
+            border: 1px solid var(--panel-border);
+            border-radius: 18px;
+            padding: 2rem;
+            backdrop-filter: blur(20px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            transition: transform 0.3s ease, border-color 0.3s ease;
+        }
+
+        .card:hover {
+            border-color: rgba(99, 102, 241, 0.25);
+        }
+
+        .card-title {
+            font-size: 1.4rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border-bottom: 1px solid var(--panel-border);
+            padding-bottom: 0.75rem;
+        }
+
+        /* Dropzone Styling */
+        .dropzone {
+            border: 2px dashed rgba(255, 255, 255, 0.15);
+            border-radius: 12px;
+            padding: 3rem 1.5rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            background: rgba(255, 255, 255, 0.02);
+            margin-bottom: 1.5rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .dropzone:hover, .dropzone.dragover {
+            border-color: var(--primary);
+            background: var(--primary-glow);
+            box-shadow: inset 0 0 20px rgba(99, 102, 241, 0.1);
+        }
+
+        .dropzone-icon {
+            font-size: 2.5rem;
+            color: var(--text-muted);
+            margin-bottom: 1rem;
+            transition: transform 0.3s ease;
+        }
+
+        .dropzone:hover .dropzone-icon {
+            transform: translateY(-5px);
+            color: var(--primary);
+        }
+
+        .dropzone-text {
+            font-size: 1rem;
+            color: var(--text-color);
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+        }
+
+        .dropzone-subtext {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .file-info {
+            display: none;
+            align-items: center;
+            gap: 15px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--panel-border);
+            padding: 10px 15px;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+        }
+
+        .file-icon {
+            font-size: 1.8rem;
+            color: var(--primary);
+        }
+
+        .file-details {
+            flex-grow: 1;
+            overflow: hidden;
+        }
+
+        .file-name {
+            font-weight: 500;
+            font-size: 0.95rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .file-size {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .file-remove {
+            cursor: pointer;
+            color: var(--text-muted);
+            font-weight: bold;
+            transition: color 0.2s;
+        }
+
+        .file-remove:hover {
+            color: var(--error);
+        }
+
+        /* Form Controls */
+        .form-group {
+            margin-bottom: 1.25rem;
+        }
+
+        .form-label {
+            display: block;
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .form-select {
+            width: 100%;
+            background-color: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            padding: 10px 14px;
+            color: var(--text-color);
+            font-family: var(--font-main);
+            font-size: 0.95rem;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+            cursor: pointer;
+        }
+
+        .form-select:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+
+        .form-select option {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            width: 100%;
+            background: linear-gradient(135deg, var(--primary), #4f46e5);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.25);
+        }
+
+        .btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
+            background: linear-gradient(135deg, #4f46e5, var(--primary));
+        }
+
+        .btn:active:not(:disabled) {
+            transform: translateY(0);
+        }
+
+        .btn:disabled {
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--text-muted);
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+
+        /* Preset Warning Banner */
+        .warning-card {
+            background: rgba(245, 158, 11, 0.08);
+            border: 1px solid rgba(245, 158, 11, 0.2);
+            border-radius: 10px;
+            padding: 12px 16px;
+            margin-bottom: 1.5rem;
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+        }
+
+        .warning-icon {
+            font-size: 1.25rem;
+            color: var(--warning);
+            font-weight: bold;
+        }
+
+        .warning-text h4 {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #fef08a;
+            margin-bottom: 2px;
+        }
+
+        .warning-text p {
+            font-size: 0.8rem;
+            color: #f3f4f6;
+            line-height: 1.4;
+        }
+
+        .warning-text code {
+            font-family: var(--font-mono);
+            background: rgba(0, 0, 0, 0.3);
+            padding: 1px 4px;
+            border-radius: 4px;
+            color: var(--warning);
+        }
+
+        /* Console Output styling */
+        .console-container {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            min-height: 480px;
+        }
+
+        .console-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid var(--panel-border);
+            border-bottom: none;
+            border-top-left-radius: 12px;
+            border-top-right-radius: 12px;
+            padding: 10px 16px;
+            font-size: 0.85rem;
+        }
+
+        .console-dots {
+            display: flex;
+            gap: 6px;
+        }
+
+        .console-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+        .console-dot.red { background-color: var(--error); }
+        .console-dot.yellow { background-color: var(--warning); }
+        .console-dot.green { background-color: var(--success); }
+
+        .console-title {
+            font-family: var(--font-mono);
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .console-body {
+            flex-grow: 1;
+            background-color: var(--terminal-bg);
+            border: 1px solid var(--panel-border);
+            border-bottom-left-radius: 12px;
+            border-bottom-right-radius: 12px;
+            padding: 16px;
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            line-height: 1.5;
+            color: #d1d5db;
+            overflow-y: auto;
+            max-height: 420px;
+            height: 420px;
+            white-space: pre-wrap;
+            position: relative;
+        }
+
+        .console-line {
+            margin-bottom: 4px;
+        }
+
+        .console-line.system {
+            color: var(--primary);
+            font-weight: 500;
+        }
+
+        .console-line.success {
+            color: var(--success);
+            font-weight: 500;
+        }
+
+        .console-line.error {
+            color: var(--error);
+        }
+
+        .console-line.warning {
+            color: var(--warning);
+        }
+
+        .console-cursor {
+            display: inline-block;
+            width: 8px;
+            height: 15px;
+            background-color: var(--text-muted);
+            animation: blink 1s step-end infinite;
+            vertical-align: middle;
+            margin-left: 4px;
+        }
+
+        @keyframes blink {
+            from, to { background-color: transparent }
+            50% { background-color: var(--text-muted) }
+        }
+
+        /* Success & Failure States Cards */
+        .result-panel {
+            margin-top: 1.5rem;
+            display: none;
+            animation: fadeIn 0.4s ease-out forwards;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .result-card {
+            border-radius: 12px;
+            padding: 1.25rem;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .result-card.success {
+            background: rgba(16, 185, 129, 0.08);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+        }
+
+        .result-card.error {
+            background: rgba(239, 68, 68, 0.08);
+            border: 1px solid rgba(239, 68, 68, 0.2);
+        }
+
+        .result-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 600;
+            font-size: 1.1rem;
+        }
+
+        .result-header.success { color: var(--success); }
+        .result-header.error { color: var(--error); }
+
+        .result-desc {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            line-height: 1.4;
+        }
+
+        .download-btn {
+            background: linear-gradient(135deg, var(--success), #059669);
+            box-shadow: 0 4px 15px rgba(16, 185, 129, 0.25);
+        }
+
+        .download-btn:hover {
+            box-shadow: 0 6px 20px rgba(16, 185, 129, 0.4);
+            background: linear-gradient(135deg, #059669, var(--success)) !important;
+        }
+
+        footer {
+            padding: 1.5rem;
+            text-align: center;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            border-top: 1px solid var(--panel-border);
+            margin-top: auto;
+        }
+
+        footer code {
+            font-family: var(--font-mono);
+            background: rgba(255, 255, 255, 0.04);
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="logo-container">
+            <div class="logo-icon">O</div>
+            <div class="logo-title">
+                <h1>OrcaSlicer CLI Runner</h1>
+                <p>Headless G-code Generation API</p>
+            </div>
+        </div>
+        <div class="status-badge" id="api-status">
+            <div class="status-dot"></div>
+            <span>Connected</span>
+        </div>
+    </header>
+
+    <main>
+        <!-- Left Column: Settings and File Dropzone -->
+        <section class="card">
+            <h2 class="card-title">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-sliders-horizontal"><path d="M21 4h-5"/><path d="M10 4H3"/><path d="M12 4v4"/><path d="M12 0v4"/><path d="M21 12H12"/><path d="M8 12H3"/><path d="M10 8v8"/><path d="M21 20h-8"/><path d="M9 20H3"/><path d="M11 16v8"/></svg>
+                Slice Configuration
+            </h2>
+
+            <div id="no-presets-warning" class="warning-card" style="display: none;">
+                <div class="warning-icon">⚠</div>
+                <div class="warning-text">
+                    <h4>No custom presets detected</h4>
+                    <p>Copy your <code>.json</code> profiles to the mapped host folder: <code>./config/user/default/[machine/process/filament]/</code> to select custom settings.</p>
+                </div>
+            </div>
+
+            <form id="slice-form">
+                <!-- File Input / Dropzone -->
+                <div class="form-group">
+                    <label class="form-label">Select 3D Model</label>
+                    <div class="dropzone" id="dropzone">
+                        <div class="dropzone-icon">📥</div>
+                        <div class="dropzone-text">Drag & drop your STL / 3MF file here</div>
+                        <div class="dropzone-subtext">or click to browse local files</div>
+                        <input type="file" id="file-input" name="file" accept=".stl,.3mf" style="display: none;">
+                    </div>
+                    
+                    <div class="file-info" id="file-info">
+                        <div class="file-icon">📦</div>
+                        <div class="file-details">
+                            <div class="file-name" id="selected-file-name">filename.stl</div>
+                            <div class="file-size" id="selected-file-size">0.0 MB</div>
+                        </div>
+                        <div class="file-remove" id="file-remove">✖</div>
+                    </div>
+                </div>
+
+                <!-- Printer Preset Selector -->
+                <div class="form-group">
+                    <label class="form-label" for="machine-select">Printer Preset</label>
+                    <select class="form-select" id="machine-select" name="machine">
+                        <option value="">-- Use Default / Saved Settings --</option>
+                    </select>
+                </div>
+
+                <!-- Process Profile Selector -->
+                <div class="form-group">
+                    <label class="form-label" for="process-select">Print Process Profile</label>
+                    <select class="form-select" id="process-select" name="process">
+                        <option value="">-- Use Default / Saved Settings --</option>
+                    </select>
+                </div>
+
+                <!-- Filament Profile Selector -->
+                <div class="form-group">
+                    <label class="form-label" for="filament-select">Filament Profile</label>
+                    <select class="form-select" id="filament-select" name="filament">
+                        <option value="">-- Use Default / Saved Settings --</option>
+                    </select>
+                </div>
+
+                <!-- Slicing details (Plate id) -->
+                <div class="form-group">
+                    <label class="form-label" for="plate-select">Slicing Target</label>
+                    <select class="form-select" id="plate-select" name="plate">
+                        <option value="0">Slice all plates (Plate 0)</option>
+                        <option value="1">Slice Plate 1</option>
+                        <option value="2">Slice Plate 2</option>
+                    </select>
+                </div>
+
+                <button type="submit" class="btn" id="submit-btn" disabled>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-play"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                    Start Slicing Job
+                </button>
+            </form>
+        </section>
+
+        <!-- Right Column: Console terminal output -->
+        <section class="card console-container">
+            <div class="console-header">
+                <div class="console-dots">
+                    <div class="console-dot red"></div>
+                    <div class="console-dot yellow"></div>
+                    <div class="console-dot green"></div>
+                </div>
+                <div class="console-title">orcaslicer-cli@headless:~</div>
+                <div style="width: 38px"></div>
+            </div>
+            
+            <div class="console-body" id="console-output">
+                <div class="console-line system">[SYSTEM] Awaiting slice configuration...<span class="console-cursor"></span></div>
+            </div>
+
+            <!-- Result Cards (Triggered post-slice) -->
+            <div class="result-panel" id="result-panel">
+                <!-- Success State -->
+                <div class="result-card success" id="success-card" style="display: none;">
+                    <div class="result-header success">
+                        <span>✔</span> Slicing Job Completed!
+                    </div>
+                    <div class="result-desc" id="success-desc">
+                        Your G-code has been generated successfully. Click below to download the sliced file.
+                    </div>
+                    <button class="btn download-btn" id="download-btn">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-download"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x11="12" y1="12" x2="12" y2="15"/></svg>
+                        Download Sliced File (.gcode)
+                    </button>
+                </div>
+
+                <!-- Error State -->
+                <div class="result-card error" id="error-card" style="display: none;">
+                    <div class="result-header error">
+                        <span>❌</span> Slicing Job Failed
+                    </div>
+                    <div class="result-desc" id="error-desc">
+                        Slicing command aborted due to an internal OrcaSlicer configuration error. Check console logs for more details.
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>OrcaSlicer container wrapper running on <code>FastAPI</code> & <code>Xvfb</code> virtual X-Server. Mounted volume path: <code>/config</code></p>
+    </footer>
+
+    <script>
+        // DOM Elements
+        const dropzone = document.getElementById('dropzone');
+        const fileInput = document.getElementById('file-input');
+        const fileInfo = document.getElementById('file-info');
+        const selectedFileName = document.getElementById('selected-file-name');
+        const selectedFileSize = document.getElementById('selected-file-size');
+        const fileRemove = document.getElementById('file-remove');
+        
+        const machineSelect = document.getElementById('machine-select');
+        const processSelect = document.getElementById('process-select');
+        const filamentSelect = document.getElementById('filament-select');
+        const sliceForm = document.getElementById('slice-form');
+        const submitBtn = document.getElementById('submit-btn');
+        const noPresetsWarning = document.getElementById('no-presets-warning');
+        
+        const consoleOutput = document.getElementById('console-output');
+        
+        const resultPanel = document.getElementById('result-panel');
+        const successCard = document.getElementById('success-card');
+        const successDesc = document.getElementById('success-desc');
+        const downloadBtn = document.getElementById('download-btn');
+        const errorCard = document.getElementById('error-card');
+        const errorDesc = document.getElementById('error-desc');
+        
+        let selectedFile = null;
+        let activeEventSource = null;
+
+        // Fetch configurations from backend
+        async function fetchProfiles() {
+            try {
+                const response = await fetch('/api/profiles');
+                if (!response.ok) throw new Error("Failed to fetch configurations.");
+                
+                const profiles = await response.json();
+                
+                // Clear dropdowns except first default option
+                machineSelect.innerHTML = '<option value="">-- Use Default / Saved Settings --</option>';
+                processSelect.innerHTML = '<option value="">-- Use Default / Saved Settings --</option>';
+                filamentSelect.innerHTML = '<option value="">-- Use Default / Saved Settings --</option>';
+                
+                let totalProfiles = 0;
+
+                // Populate Printer Select
+                profiles.machine.forEach(p => {
+                    const opt = document.createElement('option');
+                    opt.value = p.rel_path;
+                    opt.textContent = p.name;
+                    machineSelect.appendChild(opt);
+                    totalProfiles++;
+                });
+
+                // Populate Process Select
+                profiles.process.forEach(p => {
+                    const opt = document.createElement('option');
+                    opt.value = p.rel_path;
+                    opt.textContent = p.name;
+                    processSelect.appendChild(opt);
+                    totalProfiles++;
+                });
+
+                // Populate Filament Select
+                profiles.filament.forEach(p => {
+                    const opt = document.createElement('option');
+                    opt.value = p.rel_path;
+                    opt.textContent = p.name;
+                    filamentSelect.appendChild(opt);
+                    totalProfiles++;
+                });
+
+                // Show Warning if no profiles are detected
+                if (totalProfiles === 0) {
+                    noPresetsWarning.style.display = 'flex';
+                } else {
+                    noPresetsWarning.style.display = 'none';
+                }
+
+            } catch (err) {
+                console.error("Error loading profiles:", err);
+                logToConsole(`[ERROR] Failed to load preset profiles: ${err.message}`, 'error');
+            }
+        }
+
+        // Initialize on load
+        fetchProfiles();
+
+        // Check health of container
+        async function checkHealth() {
+            try {
+                const res = await fetch('/api/health');
+                const data = await res.json();
+                if (data.status === 'healthy') {
+                    document.getElementById('api-status').innerHTML = '<div class="status-dot"></div><span>Connected</span>';
+                    document.getElementById('api-status').style.color = 'var(--success)';
+                }
+            } catch (err) {
+                document.getElementById('api-status').innerHTML = '<div class="status-dot" style="background-color: var(--error); box-shadow: 0 0 8px var(--error); animation: none;"></div><span>Offline</span>';
+                document.getElementById('api-status').style.color = 'var(--error)';
+                document.getElementById('api-status').style.borderColor = 'rgba(239, 68, 68, 0.2)';
+                document.getElementById('api-status').style.background = 'rgba(239, 68, 68, 0.1)';
+            }
+        }
+        setInterval(checkHealth, 5000);
+
+        // Helper to format bytes
+        function formatBytes(bytes, decimals = 2) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const dm = decimals < 0 ? 0 : decimals;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+        }
+
+        // Console logger helper
+        function logToConsole(text, type = '') {
+            // Remove previous cursor
+            const cursor = consoleOutput.querySelector('.console-cursor');
+            if (cursor) cursor.remove();
+
+            const line = document.createElement('div');
+            line.className = `console-line ${type}`;
+            
+            // Format timestamps or markers if needed
+            line.textContent = text;
+            
+            consoleOutput.appendChild(line);
+            
+            // Re-append cursor
+            const newCursor = document.createElement('span');
+            newCursor.className = 'console-cursor';
+            consoleOutput.appendChild(newCursor);
+
+            // Auto-scroll
+            consoleOutput.scrollTop = consoleOutput.scrollHeight;
+        }
+
+        function clearConsole() {
+            consoleOutput.innerHTML = '';
+        }
+
+        // Dropzone interactions
+        dropzone.addEventListener('click', () => fileInput.click());
+        
+        dropzone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropzone.classList.add('dragover');
+        });
+
+        dropzone.addEventListener('dragleave', () => {
+            dropzone.classList.remove('dragover');
+        });
+
+        dropzone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropzone.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) {
+                handleFileSelect(e.dataTransfer.files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (fileInput.files.length > 0) {
+                handleFileSelect(fileInput.files[0]);
+            }
+        });
+
+        function handleFileSelect(file) {
+            const ext = file.name.split('.').pop().toLowerCase();
+            if (ext !== 'stl' && ext !== '3mf') {
+                logToConsole(`[ERROR] Invalid file format: .${ext}. Only .stl and .3mf files are supported.`, 'error');
+                return;
+            }
+
+            selectedFile = file;
+            selectedFileName.textContent = file.name;
+            selectedFileSize.textContent = formatBytes(file.size);
+            
+            dropzone.style.display = 'none';
+            fileInfo.style.display = 'flex';
+            submitBtn.disabled = false;
+            
+            clearConsole();
+            logToConsole(`[SYSTEM] Loaded file: ${file.name} (${formatBytes(file.size)})`, 'system');
+            logToConsole(`[SYSTEM] Ready to slice. Please choose presets and click "Start Slicing".`);
+        }
+
+        fileRemove.addEventListener('click', () => {
+            selectedFile = null;
+            fileInput.value = '';
+            dropzone.style.display = 'block';
+            fileInfo.style.display = 'none';
+            submitBtn.disabled = true;
+            
+            clearConsole();
+            logToConsole(`[SYSTEM] File removed. Awaiting slice configuration...`, 'system');
+            
+            resultPanel.style.display = 'none';
+            successCard.style.display = 'none';
+            errorCard.style.display = 'none';
+        });
+
+        // Slice submission handler
+        sliceForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!selectedFile) return;
+
+            // Close active EventSource if any
+            if (activeEventSource) {
+                activeEventSource.close();
+            }
+
+            // UI adjustments
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = `
+                <svg style="animation: spin 1s linear infinite" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <circle cx="12" cy="12" r="10" stroke-opacity="0.25"></circle>
+                    <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"></path>
+                </svg>
+                Processing...
+            `;
+            
+            // Inject spin animation CSS dynamically if not present
+            if (!document.getElementById('spin-animation')) {
+                const style = document.createElement('style');
+                style.id = 'spin-animation';
+                style.innerHTML = `@keyframes spin { 100% { transform: rotate(360deg); } }`;
+                document.head.appendChild(style);
+            }
+
+            resultPanel.style.display = 'none';
+            successCard.style.display = 'none';
+            errorCard.style.display = 'none';
+
+            clearConsole();
+            logToConsole(`[SYSTEM] Packaging job parameters and uploading file...`, 'system');
+
+            const configObj = {
+                printer: machineSelect.value,
+                process: processSelect.value,
+                plate: parseInt(document.getElementById('plate-select').value, 10),
+                filaments: {
+                    "1": filamentSelect.value
+                }
+            };
+
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+            formData.append('config', JSON.stringify(configObj));
+
+            try {
+                // Step 1: Start slicing job (uploads file and gets job_id)
+                const startRes = await fetch('/api/slice/start', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!startRes.ok) {
+                    const errData = await startRes.json();
+                    throw new Error(errData.detail || "Failed to start slicing job.");
+                }
+
+                const jobData = await startRes.json();
+                const jobId = jobData.job_id;
+                logToConsole(`[SYSTEM] Slicing job initialized with ID: ${jobId}`, 'system');
+
+                // Step 2: Stream logs via EventSource
+                activeEventSource = new EventSource(`/api/slice/logs/${jobId}`);
+                
+                activeEventSource.onmessage = (event) => {
+                    const logMsg = event.data;
+                    
+                    if (logMsg === '__COMPLETED__') {
+                        activeEventSource.close();
+                        handleJobComplete(jobId);
+                    } else if (logMsg.startsWith('__FAILED__')) {
+                        activeEventSource.close();
+                        const reason = logMsg.replace('__FAILED__:', '').trim();
+                        handleJobFailed(reason || "OrcaSlicer process exited with errors.");
+                    } else {
+                        // Classify log outputs to style differently
+                        if (logMsg.includes('WARNING') || logMsg.includes('warning:')) {
+                            logToConsole(logMsg, 'warning');
+                        } else if (logMsg.includes('ERROR') || logMsg.includes('error:')) {
+                            logToConsole(logMsg, 'error');
+                        } else if (logMsg.includes('Executing command:') || logMsg.startsWith('[SYSTEM]')) {
+                            logToConsole(logMsg, 'system');
+                        } else if (logMsg.includes('completed successfully') || logMsg.includes('Sliced file generated:')) {
+                            logToConsole(logMsg, 'success');
+                        } else {
+                            logToConsole(logMsg);
+                        }
+                    }
+                };
+
+                activeEventSource.onerror = (err) => {
+                    console.error("SSE Connection error:", err);
+                    // Standard OrcaSlicer command execution handles stdout directly.
+                    // If SSE disconnects before complete message, we query status API
+                    activeEventSource.close();
+                    checkJobStatusFallback(jobId);
+                };
+
+            } catch (err) {
+                console.error("Slicing failed:", err);
+                handleJobFailed(err.message);
+            }
+        });
+
+        // Verify status fallback if connection drops
+        async function checkJobStatusFallback(jobId) {
+            logToConsole("[SYSTEM] Connection to live log stream closed. Querying job status...", "warning");
+            try {
+                const res = await fetch(`/api/slice/status/${jobId}`);
+                const data = await res.json();
+                if (data.status === 'completed') {
+                    handleJobComplete(jobId);
+                } else if (data.status === 'failed') {
+                    handleJobFailed(data.error || "OrcaSlicer execution failed.");
+                } else {
+                    // Still processing, poll again in 2 seconds
+                    setTimeout(() => checkJobStatusFallback(jobId), 2000);
+                }
+            } catch (err) {
+                handleJobFailed("Failed to fetch job completion status.");
+            }
+        }
+
+        function handleJobComplete(jobId) {
+            logToConsole(`[SYSTEM] Slicing job completed. G-code generated successfully!`, 'success');
+            
+            // Reset slicing button
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = `
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                Start Slicing Job
+            `;
+
+            // Display success card
+            resultPanel.style.display = 'block';
+            successCard.style.display = 'flex';
+            errorCard.style.display = 'none';
+
+            // Bind download action
+            downloadBtn.onclick = () => {
+                window.location.href = `/api/slice/download/${jobId}`;
+            };
+        }
+
+        function handleJobFailed(reason) {
+            logToConsole(`[ERROR] Slicing failed: ${reason}`, 'error');
+            
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = `
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                Start Slicing Job
+            `;
+
+            // Display error card
+            resultPanel.style.display = 'block';
+            successCard.style.display = 'none';
+            errorCard.style.display = 'flex';
+            errorDesc.textContent = `Slicing command aborted: ${reason}. Please inspect the logs above to check configuration parameters or mesh issues.`;
+        }
+    </script>
+</body>
+</html>

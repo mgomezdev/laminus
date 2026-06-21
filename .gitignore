@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OrcaSlicer runtime artifacts
+config/cache/
+config/log/
+app/cache/
+app/log/
+app/user/
+
+# Test/sample data files
+data/
+
+# Job temp dirs (runtime)
+/tmp/
