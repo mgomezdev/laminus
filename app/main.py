@@ -6,12 +6,11 @@ import glob
 import logging
 import json
 from typing import Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("orcaslicer-api")
 
@@ -21,34 +20,55 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Enable CORS for convenience
+# Fix #4: drop allow_credentials — wildcard origin + credentials violates the CORS spec
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Configuration Directory Paths
 CONFIG_DIR = "/config"
 USER_CONFIG_DIR = os.path.join(CONFIG_DIR, "user")
 DATA_DIR = "/data"
 JOBS_DIR = "/tmp/jobs"
+ARRANGE_DIR = "/tmp/arrange"  # Fix #12: named constant, was hardcoded
 
-# Ensure directories exist
+SLICE_TIMEOUT = 3600  # Fix #3: max seconds before slice subprocess is killed
+
 os.makedirs(CONFIG_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(JOBS_DIR, exist_ok=True)
+os.makedirs(ARRANGE_DIR, exist_ok=True)
 
-# Pydantic Schemas for validation
+
+def _safe_filename(filename: str) -> str:
+    """Fix #1 + #5: strip path components; reject semicolons (used as CLI list separators)."""
+    name = os.path.basename(filename)
+    if not name or name in (".", ".."):
+        raise ValueError("Invalid filename.")
+    if ";" in name:
+        raise ValueError(f"Filename must not contain semicolons: '{name}'")
+    return name
+
+
 class SliceConfig(BaseModel):
     printer: str = Field(..., description="Path or name of the printer preset JSON file.")
     process: str = Field(..., description="Path or name of the process preset JSON file.")
     plate: int = Field(0, description="Build plate ID to slice (0 for all).")
-    filaments: Dict[str, str] = Field(..., description="Mapping of extruder slots (1-indexed string keys) to filament preset JSON files.")
+    filaments: Dict[str, str] = Field(
+        ..., description="Mapping of extruder slots (1-indexed string keys) to filament preset JSON files."
+    )
 
-# Helper to initialize default config directories if they don't exist
+    # Fix #10: require at least one filament entry
+    @field_validator("filaments")
+    @classmethod
+    def filaments_not_empty(cls, v: Dict[str, str]) -> Dict[str, str]:
+        if not v:
+            raise ValueError("filaments must contain at least one slot mapping.")
+        return v
+
+
 def init_config_directories():
     default_dirs = [
         os.path.join(USER_CONFIG_DIR, "default", "machine"),
@@ -57,91 +77,100 @@ def init_config_directories():
     ]
     for d in default_dirs:
         os.makedirs(d, exist_ok=True)
-        # Add a README file in each directory to assist the user
         readme_path = os.path.join(d, "README.txt")
         if not os.path.exists(readme_path):
             folder_type = os.path.basename(d)
             with open(readme_path, "w") as f:
                 f.write(f"Drop your OrcaSlicer {folder_type} JSON profiles in this directory.\n")
-                f.write(f"They will automatically appear in the Web UI / API list of profiles.\n")
+                f.write("They will automatically appear in the Web UI / API list of profiles.\n")
+
 
 init_config_directories()
 
-# Global dict to store job states
 jobs: Dict[str, dict] = {}
 
+
+# Fix #2: cursor-based streaming — list + Event instead of list + queue.
+# The queue approach put every message into both self.logs AND the queue, so any
+# client that connected after N messages had been logged would receive those N
+# messages twice (once from the history replay, once from the queue drain).
 class JobLogger:
     def __init__(self, job_id: str):
         self.job_id = job_id
-        self.queue = asyncio.Queue()
-        self.logs = []
+        self._logs: List[str] = []
+        self._new_entry = asyncio.Event()
+        self._done = False
 
     def log(self, message: str):
-        formatted_message = message.strip()
-        if formatted_message:
-            self.logs.append(formatted_message)
-            self.queue.put_nowait(formatted_message)
+        msg = message.strip()
+        if not msg:
+            return
+        self._logs.append(msg)
+        self._new_entry.set()
+        if msg == "__COMPLETED__" or msg.startswith("__FAILED__"):
+            self._done = True
 
     async def get_stream(self):
-        # First send historical logs
-        for log in self.logs:
-            yield f"data: {log}\n\n"
-        
-        # Then stream new logs in real-time
+        cursor = 0
         while True:
-            log = await self.queue.get()
-            yield f"data: {log}\n\n"
-            if log == "__COMPLETED__" or log.startswith("__FAILED__"):
-                break
+            while cursor < len(self._logs):
+                msg = self._logs[cursor]
+                cursor += 1
+                yield f"data: {msg}\n\n"
+                if msg == "__COMPLETED__" or msg.startswith("__FAILED__"):
+                    return
+            if self._done:
+                return
+            self._new_entry.clear()
+            await self._new_entry.wait()
+
 
 def find_profiles_in_config() -> dict:
-    """Scan /config/user/ recursively for machine, process, and filament profiles."""
-    profiles = {
-        "machine": [],
-        "process": [],
-        "filament": []
-    }
-    
+    profiles = {"machine": [], "process": [], "filament": []}
     if not os.path.exists(USER_CONFIG_DIR):
         return profiles
-
-    # Scan the user directory recursively
     for root, dirs, files in os.walk(USER_CONFIG_DIR):
         dirname = os.path.basename(root)
-        if dirname in ["machine", "process", "filament"]:
+        if dirname in ("machine", "process", "filament"):
             for file in files:
                 if file.endswith(".json") and not file.startswith("."):
                     path = os.path.join(root, file)
                     rel_path = os.path.relpath(path, USER_CONFIG_DIR)
                     name = os.path.splitext(file)[0]
-                    # Also determine user folder name (e.g. 'default' or UUID)
                     parts = rel_path.split(os.sep)
                     user_sub = parts[0] if len(parts) > 1 else "default"
-                    
                     profiles[dirname].append({
                         "name": f"{user_sub} / {name}" if user_sub != "default" else name,
                         "filename": file,
                         "rel_path": rel_path,
-                        "full_path": path
+                        "full_path": path,
                     })
     return profiles
 
+
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard():
-    """Serves the dashboard index page."""
     template_path = os.path.join(os.path.dirname(__file__), "templates", "index.html")
     if not os.path.exists(template_path):
         raise HTTPException(status_code=404, detail="Frontend template index.html not found.")
-    
     with open(template_path, "r", encoding="utf-8") as f:
         html_content = f.read()
     return HTMLResponse(content=html_content)
 
+
 @app.get("/api/profiles")
 async def get_profiles():
-    """Endpoint to list available configuration profiles."""
-    init_config_directories() # Ensure directories exist
+    # Fix #13: removed redundant init_config_directories() call (runs once at startup)
     return find_profiles_in_config()
+
+
+async def _stream_subprocess_output(process: asyncio.subprocess.Process, job_logger: JobLogger):
+    while True:
+        line = await process.stdout.readline()
+        if not line:
+            break
+        job_logger.log(line.decode("utf-8", errors="replace"))
+
 
 async def run_orcaslicer_task(
     job_id: str,
@@ -150,108 +179,115 @@ async def run_orcaslicer_task(
     machine_profile: str,
     process_profile: str,
     filament_mapping: Dict[str, str],
-    plate_id: int = 0
+    plate_id: int = 0,
 ):
     job = jobs[job_id]
     job_logger = job["logger"]
     job["status"] = "slicing"
-    
+
     job_logger.log(f"Starting slice job for model: {os.path.basename(input_file_path)}")
     job_logger.log(f"Output directory: {output_dir}")
 
-    # Build the command line arguments
     cmd = [
-        "xvfb-run",
-        "-a",
-        "--server-args=-screen 0 1024x768x24",
+        "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
         "orcaslicer",
         "--datadir", CONFIG_DIR,
         "--slice", str(plate_id),
-        "--outputdir", output_dir
+        "--outputdir", output_dir,
     ]
 
-    # Find configuration profiles full path
     profiles = find_profiles_in_config()
-    
     settings_to_load = []
-    
-    # Resolve printer preset path
-    match_printer = next((p for p in profiles["machine"] if p["rel_path"] == machine_profile or p["name"] == machine_profile or p["filename"] == machine_profile), None)
+
+    match_printer = next(
+        (p for p in profiles["machine"]
+         if p["rel_path"] == machine_profile or p["name"] == machine_profile or p["filename"] == machine_profile),
+        None,
+    )
     if match_printer:
         settings_to_load.append(match_printer["full_path"])
         job_logger.log(f"Loading printer profile: {match_printer['name']}")
     else:
-        job_logger.log(f"WARNING: Printer profile '{machine_profile}' not found.")
+        # Fix #6: fail fast — running without the printer profile silently produces wrong G-code
+        job["status"] = "failed"
+        job["error"] = f"Printer profile '{machine_profile}' not found."
+        job_logger.log(f"ERROR: Printer profile '{machine_profile}' not found.")
+        job_logger.log("__FAILED__: Printer profile not found")
+        return
 
-    # Resolve process preset path
-    match_process = next((p for p in profiles["process"] if p["rel_path"] == process_profile or p["name"] == process_profile or p["filename"] == process_profile), None)
+    match_process = next(
+        (p for p in profiles["process"]
+         if p["rel_path"] == process_profile or p["name"] == process_profile or p["filename"] == process_profile),
+        None,
+    )
     if match_process:
         settings_to_load.append(match_process["full_path"])
         job_logger.log(f"Loading process profile: {match_process['name']}")
     else:
-        job_logger.log(f"WARNING: Process profile '{process_profile}' not found.")
+        job["status"] = "failed"
+        job["error"] = f"Process profile '{process_profile}' not found."
+        job_logger.log(f"ERROR: Process profile '{process_profile}' not found.")
+        job_logger.log("__FAILED__: Process profile not found")
+        return
 
     if settings_to_load:
         cmd.extend(["--load-settings", ";".join(settings_to_load)])
 
-    # Resolve filament mappings (slot -> preset)
-    slot_paths = {}
+    slot_paths: Dict[int, str] = {}
     for slot_str, fil_name in filament_mapping.items():
         try:
             slot_num = int(slot_str)
         except ValueError:
             job_logger.log(f"WARNING: Invalid filament slot key: '{slot_str}'. Must be an integer.")
             continue
-            
-        match_fil = next((p for p in profiles["filament"] if p["rel_path"] == fil_name or p["name"] == fil_name or p["filename"] == fil_name), None)
+        match_fil = next(
+            (p for p in profiles["filament"]
+             if p["rel_path"] == fil_name or p["name"] == fil_name or p["filename"] == fil_name),
+            None,
+        )
         if match_fil:
             slot_paths[slot_num] = match_fil["full_path"]
             job_logger.log(f"Mapping slot {slot_num} to filament: {match_fil['name']}")
         else:
             job_logger.log(f"WARNING: Filament profile '{fil_name}' for slot {slot_num} not found.")
 
-    # Sort slots and build G-code load list, filling in any gaps
     if slot_paths:
         max_slot = max(slot_paths.keys())
-        filament_files = []
-        fallback_path = list(slot_paths.values())[0] # use the first matched filament as fallback
-        
-        for slot in range(1, max_slot + 1):
-            path = slot_paths.get(slot, fallback_path)
-            filament_files.append(path)
-            
-        # Semicolon joined list maps to slot 1, slot 2, etc.
+        # Fix #9: prefer slot 1 as the gap-fill fallback (not arbitrary dict insertion order)
+        fallback_path = slot_paths.get(1) or next(iter(slot_paths.values()))
+        filament_files = [slot_paths.get(slot, fallback_path) for slot in range(1, max_slot + 1)]
         cmd.extend(["--load-filaments", ";".join(filament_files)])
         job_logger.log(f"Prepared filaments loading sequence: {filament_files}")
 
-    # Append input model
     cmd.append(input_file_path)
     job_logger.log(f"Executing command: {' '.join(cmd)}")
 
     try:
-        # Start async subprocess
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT
+            stderr=asyncio.subprocess.STDOUT,
         )
 
-        # Read line by line
-        while True:
-            line = await process.stdout.readline()
-            if not line:
-                break
-            text = line.decode("utf-8", errors="replace")
-            job_logger.log(text)
+        # Fix #3: enforce a maximum runtime; kill the subprocess if it exceeds it
+        try:
+            await asyncio.wait_for(_stream_subprocess_output(process, job_logger), timeout=SLICE_TIMEOUT)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            job["status"] = "failed"
+            job["error"] = f"Slicer timed out after {SLICE_TIMEOUT}s."
+            job_logger.log(f"ERROR: OrcaSlicer timed out after {SLICE_TIMEOUT} seconds.")
+            job_logger.log(f"__FAILED__: Timeout after {SLICE_TIMEOUT}s")
+            return
 
         await process.wait()
         exit_code = process.returncode
-        
+
         if exit_code == 0:
             job_logger.log("OrcaSlicer execution completed successfully.")
             output_files = glob.glob(os.path.join(output_dir, "*"))
             gcode_files = [f for f in output_files if f.endswith((".gcode", ".3mf"))]
-            
             if gcode_files:
                 job["status"] = "completed"
                 job["sliced_file"] = gcode_files[0]
@@ -267,7 +303,7 @@ async def run_orcaslicer_task(
             job["error"] = f"Slicer process exited with error code {exit_code}."
             job_logger.log(f"ERROR: OrcaSlicer exited with code {exit_code}.")
             job_logger.log(f"__FAILED__: Process exited with code {exit_code}")
-            
+
     except Exception as e:
         logger.exception("Exception occurred during slicing task")
         job["status"] = "failed"
@@ -275,40 +311,41 @@ async def run_orcaslicer_task(
         job_logger.log(f"SYSTEM ERROR: {str(e)}")
         job_logger.log("__FAILED__: System Exception")
 
+
 @app.post("/api/slice/start")
 async def start_slice(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    config: str = Form(..., description="JSON-string matching SliceConfig schema")
+    config: str = Form(..., description="JSON-string matching SliceConfig schema"),
 ):
-    """Starts a slicing job using a raw file upload and a combined JSON config string."""
     try:
         config_data = SliceConfig.model_validate_json(config)
     except Exception as e:
         raise HTTPException(
             status_code=400,
-            detail=f"Configuration parameter 'config' validation failed. Must be a valid SliceConfig JSON. Error: {str(e)}"
+            detail=f"Configuration parameter 'config' validation failed. Must be a valid SliceConfig JSON. Error: {str(e)}",
         )
 
+    # Fix #1: sanitize uploaded filename before path construction
+    try:
+        safe_name = _safe_filename(file.filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     job_id = str(uuid.uuid4())
-    
-    # Define directories
     job_dir = os.path.join(JOBS_DIR, job_id)
     input_dir = os.path.join(job_dir, "input")
     output_dir = os.path.join(job_dir, "output")
-    
+
     os.makedirs(input_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Save input file
-    input_file_path = os.path.join(input_dir, file.filename)
+
+    input_file_path = os.path.join(input_dir, safe_name)
     with open(input_file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-        
-    # Create logger for the job
+
     job_logger = JobLogger(job_id)
-    
-    # Save job details
+
     jobs[job_id] = {
         "id": job_id,
         "status": "pending",
@@ -316,10 +353,9 @@ async def start_slice(
         "output_dir": output_dir,
         "sliced_file": None,
         "error": None,
-        "logger": job_logger
+        "logger": job_logger,
     }
-    
-    # Run the slicing task in the background
+
     background_tasks.add_task(
         run_orcaslicer_task,
         job_id=job_id,
@@ -328,181 +364,185 @@ async def start_slice(
         machine_profile=config_data.printer,
         process_profile=config_data.process,
         filament_mapping=config_data.filaments,
-        plate_id=config_data.plate
+        plate_id=config_data.plate,
     )
-    
-    return {
-        "job_id": job_id,
-        "status": "pending",
-        "message": "Slicing job started in background."
-    }
+
+    return {"job_id": job_id, "status": "pending", "message": "Slicing job started in background."}
+
 
 @app.get("/api/slice/status/{job_id}")
 async def get_job_status(job_id: str):
-    """Query status of a specific slicing job."""
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found.")
-        
     job = jobs[job_id]
     return {
         "job_id": job["id"],
         "status": job["status"],
         "sliced_file": os.path.basename(job["sliced_file"]) if job["sliced_file"] else None,
-        "error": job["error"]
+        "error": job["error"],
     }
+
 
 @app.get("/api/slice/logs/{job_id}")
 async def get_job_logs(job_id: str):
-    """Stream execution logs for a slicing job in real-time using Server-Sent Events (SSE)."""
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found.")
-        
     job = jobs[job_id]
-    return StreamingResponse(
-        job["logger"].get_stream(),
-        media_type="text/event-stream"
-    )
+    return StreamingResponse(job["logger"].get_stream(), media_type="text/event-stream")
+
 
 @app.get("/api/slice/download/{job_id}")
 async def download_sliced_file(job_id: str):
-    """Downloads the G-code or 3MF generated by the slicing job."""
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found.")
-        
     job = jobs[job_id]
     if job["status"] != "completed" or not job["sliced_file"]:
         raise HTTPException(status_code=400, detail=f"Slicing job is not complete. Current status: {job['status']}")
-        
     file_path = job["sliced_file"]
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Sliced file was not found on disk.")
-        
     filename = os.path.basename(file_path)
-    return FileResponse(
-        path=file_path,
-        filename=filename,
-        media_type="application/octet-stream"
-    )
+    return FileResponse(path=file_path, filename=filename, media_type="application/octet-stream")
 
-# Cleanup task for arrangement
-def cleanup_directory(directory_path: str):
-    if os.path.exists(directory_path):
-        shutil.rmtree(directory_path)
-        logger.info(f"Cleaned up arrangement temp folder: {directory_path}")
+
+def cleanup_directory(path: str):
+    if os.path.exists(path):
+        shutil.rmtree(path)
+        logger.info(f"Cleaned up temp folder: {path}")
+
+
+def cleanup_file(path: str):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
 
 @app.post("/api/arrange")
 async def auto_arrange_3mf(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     arrange: bool = Form(True),
-    orient: bool = Form(True)
+    orient: bool = Form(True),
 ):
-    """Accepts a 3MF project file, runs auto-arrange/orient layout solving, and returns the arranged 3MF file directly."""
-    if not file.filename.endswith(".3mf") and not file.filename.endswith(".3MF"):
+    # Fix #11: case-insensitive extension check (.3MF, .3mf, .3Mf all valid)
+    if not file.filename.lower().endswith(".3mf"):
         raise HTTPException(status_code=400, detail="Arrange endpoint only supports .3mf files.")
-        
+
+    # Fix #1: sanitize filename
+    try:
+        safe_name = _safe_filename(file.filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     job_id = str(uuid.uuid4())
-    job_dir = os.path.join("/tmp/arrange", job_id)
+    job_dir = os.path.join(ARRANGE_DIR, job_id)
     input_dir = os.path.join(job_dir, "input")
     output_dir = os.path.join(job_dir, "output")
-    
+
     os.makedirs(input_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
-    
-    in_file = os.path.join(input_dir, file.filename)
-    out_file = os.path.join(output_dir, f"arranged_{file.filename}")
-    
-    # Save uploaded file
+
+    in_file = os.path.join(input_dir, safe_name)
+    out_file = os.path.join(output_dir, f"arranged_{safe_name}")
+
     with open(in_file, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-        
-    # Build command
+
     cmd = [
-        "xvfb-run",
-        "-a",
-        "--server-args=-screen 0 1024x768x24",
+        "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
         "orcaslicer",
         "--datadir", CONFIG_DIR,
-        "--export-3mf", out_file
+        "--export-3mf", out_file,
     ]
-    
+
     if arrange:
         cmd.extend(["--arrange", "1"])
     if orient:
         cmd.extend(["--orient", "1"])
-        
+
     cmd.append(in_file)
     logger.info(f"Running arrange command: {' '.join(cmd)}")
-    
+
     try:
-        # Run process synchronously (with a timeout of 30 seconds for safety)
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT
+            stderr=asyncio.subprocess.STDOUT,
         )
-        
+
         stdout, _ = await asyncio.wait_for(process.communicate(), timeout=35.0)
         exit_code = process.returncode
-        
+
         if exit_code != 0 or not os.path.exists(out_file):
             error_log = stdout.decode("utf-8", errors="replace") if stdout else "Unknown error"
             logger.error(f"Arrangement failed. Exit code {exit_code}. Log:\n{error_log}")
+            background_tasks.add_task(cleanup_directory, job_dir)
             raise HTTPException(
                 status_code=400,
-                detail=f"Slicer auto-arrange process failed. Slicer Output: {error_log[-500:]}"
+                detail=f"Slicer auto-arrange process failed. Slicer Output: {error_log[-500:]}",
             )
-            
-        # Success - Stream the file back and add cleanup job to background tasks
+
+        # Fix #8: copy output outside job_dir before scheduling cleanup so FileResponse
+        # always has a live path regardless of background task scheduling order.
+        stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_output.3mf")
+        shutil.copy2(out_file, stable_out)
+
         response = FileResponse(
-            path=out_file,
-            filename=f"arranged_{file.filename}",
-            media_type="application/octet-stream"
+            path=stable_out,
+            filename=f"arranged_{safe_name}",
+            media_type="application/octet-stream",
         )
         background_tasks.add_task(cleanup_directory, job_dir)
+        background_tasks.add_task(cleanup_file, stable_out)
         return response
-        
+
     except asyncio.TimeoutError:
         background_tasks.add_task(cleanup_directory, job_dir)
         raise HTTPException(status_code=408, detail="Slicer arrange execution timed out after 35 seconds.")
     except HTTPException:
-        background_tasks.add_task(cleanup_directory, job_dir)
         raise
     except Exception as e:
         background_tasks.add_task(cleanup_directory, job_dir)
         logger.exception("System exception during arrange operation")
         raise HTTPException(status_code=500, detail=f"System error during arrangement: {str(e)}")
 
+
 @app.post("/api/profiles/upload")
 async def upload_profile(
     type: str = Form(...),
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
 ):
-    """Uploads a preset profile JSON file directly to the config directory."""
-    if type not in ["machine", "process", "filament"]:
+    if type not in ("machine", "process", "filament"):
         raise HTTPException(status_code=400, detail="Invalid profile type. Must be machine, process, or filament.")
-        
+
     if not file.filename.endswith(".json"):
         raise HTTPException(status_code=400, detail="Profile file must be a JSON file.")
-        
+
+    # Fix #1 + #5: sanitize filename; semicolons would corrupt --load-settings / --load-filaments args
+    try:
+        safe_name = _safe_filename(file.filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     target_dir = os.path.join(USER_CONFIG_DIR, "default", type)
     os.makedirs(target_dir, exist_ok=True)
-    
-    target_file = os.path.join(target_dir, file.filename)
+
+    target_file = os.path.join(target_dir, safe_name)
     with open(target_file, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-        
+
     return {
         "status": "success",
-        "message": f"Profile uploaded successfully to {type}/{file.filename}",
-        "filename": file.filename
+        "message": f"Profile uploaded successfully to {type}/{safe_name}",
+        "filename": safe_name,
     }
+
 
 @app.get("/api/health")
 async def health_check():
-    """Simple check to verify the API container is running and responsive."""
     return {
         "status": "healthy",
         "orcaslicer_installed": os.path.exists("/usr/local/bin/orcaslicer"),
-        "config_mounted": os.path.exists(CONFIG_DIR)
+        "config_mounted": os.path.exists(CONFIG_DIR),
     }
