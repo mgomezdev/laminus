@@ -3,8 +3,10 @@ import shutil
 import asyncio
 import uuid
 import glob
+import time
 import logging
 import json
+from contextlib import asynccontextmanager
 from typing import Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
@@ -14,13 +16,41 @@ from fastapi.middleware.cors import CORSMiddleware
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("orcaslicer-api")
 
+CONFIG_DIR = "/config"
+USER_CONFIG_DIR = os.path.join(CONFIG_DIR, "user")
+DATA_DIR = "/data"
+JOBS_DIR = "/tmp/jobs"
+ARRANGE_DIR = "/tmp/arrange"
+
+SLICE_TIMEOUT = 3600       # max seconds a slice subprocess may run before being killed
+JOB_TTL = 3600             # Fix R6: seconds after creation before a completed job is evicted
+JOB_SWEEP_INTERVAL = 300   # how often the eviction sweep runs
+
+
+# Fix R6: lifespan context runs startup/shutdown logic and background eviction task
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    for d in (CONFIG_DIR, DATA_DIR, JOBS_DIR, ARRANGE_DIR):
+        os.makedirs(d, exist_ok=True)
+    init_config_directories()
+    sweep_task = asyncio.create_task(_evict_stale_jobs())
+    try:
+        yield
+    finally:
+        sweep_task.cancel()
+        try:
+            await sweep_task
+        except asyncio.CancelledError:
+            pass
+
+
 app = FastAPI(
     title="OrcaSlicer CLI Container API",
     description="A lightweight API and Web UI to slice 3D models using OrcaSlicer CLI headlessly.",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan,
 )
 
-# Fix #4: drop allow_credentials — wildcard origin + credentials violates the CORS spec
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,25 +58,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CONFIG_DIR = "/config"
-USER_CONFIG_DIR = os.path.join(CONFIG_DIR, "user")
-DATA_DIR = "/data"
-JOBS_DIR = "/tmp/jobs"
-ARRANGE_DIR = "/tmp/arrange"  # Fix #12: named constant, was hardcoded
 
-SLICE_TIMEOUT = 3600  # Fix #3: max seconds before slice subprocess is killed
-
-os.makedirs(CONFIG_DIR, exist_ok=True)
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(JOBS_DIR, exist_ok=True)
-os.makedirs(ARRANGE_DIR, exist_ok=True)
-
-
-def _safe_filename(filename: str) -> str:
-    """Fix #1 + #5: strip path components; reject semicolons (used as CLI list separators)."""
+def _safe_filename(filename: Optional[str]) -> str:
+    """Fix R1: guard against None; strip path components; reject control chars and semicolons."""
+    # Fix R1: file.filename is Optional[str] in FastAPI — None when Content-Disposition omits filename
+    if filename is None:
+        raise ValueError("Uploaded file must include a filename.")
     name = os.path.basename(filename)
     if not name or name in (".", ".."):
         raise ValueError("Invalid filename.")
+    # Fix R3: reject null bytes and newlines — both cause open() errors or log injection
+    for bad in ("\x00", "\n", "\r"):
+        if bad in name:
+            raise ValueError("Filename contains disallowed control characters.")
     if ";" in name:
         raise ValueError(f"Filename must not contain semicolons: '{name}'")
     return name
@@ -60,12 +84,19 @@ class SliceConfig(BaseModel):
         ..., description="Mapping of extruder slots (1-indexed string keys) to filament preset JSON files."
     )
 
-    # Fix #10: require at least one filament entry
     @field_validator("filaments")
     @classmethod
     def filaments_not_empty(cls, v: Dict[str, str]) -> Dict[str, str]:
         if not v:
             raise ValueError("filaments must contain at least one slot mapping.")
+        # Fix R2: validate that all slot keys are positive integers
+        for key in v:
+            try:
+                slot = int(key)
+            except ValueError:
+                raise ValueError(f"Filament slot key '{key}' must be an integer.")
+            if slot < 1:
+                raise ValueError(f"Filament slot key '{key}' must be >= 1.")
         return v
 
 
@@ -85,15 +116,23 @@ def init_config_directories():
                 f.write("They will automatically appear in the Web UI / API list of profiles.\n")
 
 
-init_config_directories()
-
 jobs: Dict[str, dict] = {}
 
 
-# Fix #2: cursor-based streaming — list + Event instead of list + queue.
-# The queue approach put every message into both self.logs AND the queue, so any
-# client that connected after N messages had been logged would receive those N
-# messages twice (once from the history replay, once from the queue drain).
+# Fix R6: periodic sweep that removes jobs older than JOB_TTL and cleans their disk dirs
+async def _evict_stale_jobs():
+    while True:
+        await asyncio.sleep(JOB_SWEEP_INTERVAL)
+        cutoff = time.monotonic() - JOB_TTL
+        stale = [jid for jid, j in list(jobs.items()) if j.get("created_at", 0) < cutoff]
+        for jid in stale:
+            j = jobs.pop(jid, None)
+            if j:
+                job_dir = os.path.join(JOBS_DIR, jid)
+                await asyncio.to_thread(cleanup_directory, job_dir)
+                logger.info(f"Evicted stale job {jid}")
+
+
 class JobLogger:
     def __init__(self, job_id: str):
         self.job_id = job_id
@@ -126,6 +165,7 @@ class JobLogger:
 
 
 def find_profiles_in_config() -> dict:
+    """Blocking sync — callers must wrap with asyncio.to_thread in async context."""
     profiles = {"machine": [], "process": [], "filament": []}
     if not os.path.exists(USER_CONFIG_DIR):
         return profiles
@@ -160,8 +200,8 @@ async def get_dashboard():
 
 @app.get("/api/profiles")
 async def get_profiles():
-    # Fix #13: removed redundant init_config_directories() call (runs once at startup)
-    return find_profiles_in_config()
+    # Fix R7: os.walk is blocking I/O — run in thread pool so the event loop stays free
+    return await asyncio.to_thread(find_profiles_in_config)
 
 
 async def _stream_subprocess_output(process: asyncio.subprocess.Process, job_logger: JobLogger):
@@ -196,7 +236,8 @@ async def run_orcaslicer_task(
         "--outputdir", output_dir,
     ]
 
-    profiles = find_profiles_in_config()
+    # Fix R7: find_profiles_in_config uses blocking os.walk — run in thread pool
+    profiles = await asyncio.to_thread(find_profiles_in_config)
     settings_to_load = []
 
     match_printer = next(
@@ -208,7 +249,6 @@ async def run_orcaslicer_task(
         settings_to_load.append(match_printer["full_path"])
         job_logger.log(f"Loading printer profile: {match_printer['name']}")
     else:
-        # Fix #6: fail fast — running without the printer profile silently produces wrong G-code
         job["status"] = "failed"
         job["error"] = f"Printer profile '{machine_profile}' not found."
         job_logger.log(f"ERROR: Printer profile '{machine_profile}' not found.")
@@ -235,11 +275,7 @@ async def run_orcaslicer_task(
 
     slot_paths: Dict[int, str] = {}
     for slot_str, fil_name in filament_mapping.items():
-        try:
-            slot_num = int(slot_str)
-        except ValueError:
-            job_logger.log(f"WARNING: Invalid filament slot key: '{slot_str}'. Must be an integer.")
-            continue
+        slot_num = int(slot_str)  # already validated >= 1 by SliceConfig.filaments_not_empty
         match_fil = next(
             (p for p in profiles["filament"]
              if p["rel_path"] == fil_name or p["name"] == fil_name or p["filename"] == fil_name),
@@ -253,7 +289,6 @@ async def run_orcaslicer_task(
 
     if slot_paths:
         max_slot = max(slot_paths.keys())
-        # Fix #9: prefer slot 1 as the gap-fill fallback (not arbitrary dict insertion order)
         fallback_path = slot_paths.get(1) or next(iter(slot_paths.values()))
         filament_files = [slot_paths.get(slot, fallback_path) for slot in range(1, max_slot + 1)]
         cmd.extend(["--load-filaments", ";".join(filament_files)])
@@ -269,7 +304,6 @@ async def run_orcaslicer_task(
             stderr=asyncio.subprocess.STDOUT,
         )
 
-        # Fix #3: enforce a maximum runtime; kill the subprocess if it exceeds it
         try:
             await asyncio.wait_for(_stream_subprocess_output(process, job_logger), timeout=SLICE_TIMEOUT)
         except asyncio.TimeoutError:
@@ -326,7 +360,6 @@ async def start_slice(
             detail=f"Configuration parameter 'config' validation failed. Must be a valid SliceConfig JSON. Error: {str(e)}",
         )
 
-    # Fix #1: sanitize uploaded filename before path construction
     try:
         safe_name = _safe_filename(file.filename)
     except ValueError as e:
@@ -341,8 +374,9 @@ async def start_slice(
     os.makedirs(output_dir, exist_ok=True)
 
     input_file_path = os.path.join(input_dir, safe_name)
+    # Fix R8: shutil.copyfileobj is blocking — run in thread pool
     with open(input_file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+        await asyncio.to_thread(shutil.copyfileobj, file.file, buffer)
 
     job_logger = JobLogger(job_id)
 
@@ -354,6 +388,7 @@ async def start_slice(
         "sliced_file": None,
         "error": None,
         "logger": job_logger,
+        "created_at": time.monotonic(),  # Fix R6: timestamp for TTL eviction
     }
 
     background_tasks.add_task(
@@ -392,7 +427,7 @@ async def get_job_logs(job_id: str):
 
 
 @app.get("/api/slice/download/{job_id}")
-async def download_sliced_file(job_id: str):
+async def download_sliced_file(job_id: str, background_tasks: BackgroundTasks):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found.")
     job = jobs[job_id]
@@ -402,7 +437,16 @@ async def download_sliced_file(job_id: str):
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Sliced file was not found on disk.")
     filename = os.path.basename(file_path)
+    # Fix R6: evict job from dict and clean up disk after download
+    background_tasks.add_task(_evict_job, job_id)
     return FileResponse(path=file_path, filename=filename, media_type="application/octet-stream")
+
+
+def _evict_job(job_id: str):
+    """Remove a job from the in-memory dict and clean its working directory."""
+    j = jobs.pop(job_id, None)
+    if j:
+        cleanup_directory(os.path.join(JOBS_DIR, job_id))
 
 
 def cleanup_directory(path: str):
@@ -425,15 +469,14 @@ async def auto_arrange_3mf(
     arrange: bool = Form(True),
     orient: bool = Form(True),
 ):
-    # Fix #11: case-insensitive extension check (.3MF, .3mf, .3Mf all valid)
-    if not file.filename.lower().endswith(".3mf"):
-        raise HTTPException(status_code=400, detail="Arrange endpoint only supports .3mf files.")
-
-    # Fix #1: sanitize filename
+    # Fix R1: _safe_filename now guards against None before any attribute access
     try:
         safe_name = _safe_filename(file.filename)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    if not safe_name.lower().endswith(".3mf"):
+        raise HTTPException(status_code=400, detail="Arrange endpoint only supports .3mf files.")
 
     job_id = str(uuid.uuid4())
     job_dir = os.path.join(ARRANGE_DIR, job_id)
@@ -446,8 +489,9 @@ async def auto_arrange_3mf(
     in_file = os.path.join(input_dir, safe_name)
     out_file = os.path.join(output_dir, f"arranged_{safe_name}")
 
+    # Fix R8: blocking file write — run in thread pool
     with open(in_file, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+        await asyncio.to_thread(shutil.copyfileobj, file.file, buffer)
 
     cmd = [
         "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
@@ -475,16 +519,17 @@ async def auto_arrange_3mf(
         exit_code = process.returncode
 
         if exit_code != 0 or not os.path.exists(out_file):
-            error_log = stdout.decode("utf-8", errors="replace") if stdout else "Unknown error"
-            logger.error(f"Arrangement failed. Exit code {exit_code}. Log:\n{error_log}")
+            # Fix R4: don't embed raw slicer output (contains internal paths) in HTTP response
+            logger.error(
+                f"Arrangement failed. Exit code {exit_code}. Log:\n"
+                + (stdout.decode("utf-8", errors="replace") if stdout else "(no output)")
+            )
             background_tasks.add_task(cleanup_directory, job_dir)
             raise HTTPException(
                 status_code=400,
-                detail=f"Slicer auto-arrange process failed. Slicer Output: {error_log[-500:]}",
+                detail=f"Slicer auto-arrange process failed (exit code {exit_code}). Check server logs for details.",
             )
 
-        # Fix #8: copy output outside job_dir before scheduling cleanup so FileResponse
-        # always has a live path regardless of background task scheduling order.
         stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_output.3mf")
         shutil.copy2(out_file, stable_out)
 
@@ -516,21 +561,22 @@ async def upload_profile(
     if type not in ("machine", "process", "filament"):
         raise HTTPException(status_code=400, detail="Invalid profile type. Must be machine, process, or filament.")
 
-    if not file.filename.endswith(".json"):
-        raise HTTPException(status_code=400, detail="Profile file must be a JSON file.")
-
-    # Fix #1 + #5: sanitize filename; semicolons would corrupt --load-settings / --load-filaments args
+    # Fix R1: _safe_filename guards against None before extension check
     try:
         safe_name = _safe_filename(file.filename)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    if not safe_name.endswith(".json"):
+        raise HTTPException(status_code=400, detail="Profile file must be a JSON file.")
+
     target_dir = os.path.join(USER_CONFIG_DIR, "default", type)
     os.makedirs(target_dir, exist_ok=True)
 
     target_file = os.path.join(target_dir, safe_name)
+    # Fix R8: blocking file write — run in thread pool
     with open(target_file, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+        await asyncio.to_thread(shutil.copyfileobj, file.file, buffer)
 
     return {
         "status": "success",
