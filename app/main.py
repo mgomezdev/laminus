@@ -244,8 +244,9 @@ async def get_profiles(
     nozzle: Optional[str] = None,
     refresh: bool = False,
 ):
-    if refresh:
-        global _catalog_task
+    if refresh and not _catalog_building:
+        global _catalog_task, _catalog_building
+        _catalog_building = True
         _catalog_task = asyncio.create_task(_build_catalog())
     if catalog is None or not catalog.is_built:
         return JSONResponse(
@@ -264,7 +265,10 @@ async def get_profiles(
 @app.get("/api/profiles/{profile_uuid}")
 async def get_profile_detail(profile_uuid: str):
     if catalog is None or not catalog.is_built:
-        return JSONResponse(status_code=503, content={"status": "building_catalog"})
+        return JSONResponse(
+            status_code=503,
+            content={"status": "building_catalog", "detail": "Catalog not ready. Retry shortly."},
+        )
     entry = catalog.get_by_uuid(profile_uuid)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"Profile UUID '{profile_uuid}' not found.")
