@@ -64,3 +64,8 @@ def test_embed_preserves_model_settings(tmp_path):
     embed_project_settings(str(src), {"from": "user"}, str(out))
     with zipfile.ZipFile(str(out)) as zf:
         assert "Metadata/model_settings.config" in zf.namelist()
+
+
+def test_empty_filaments_raises():
+    with pytest.raises(ValueError, match="filament"):
+        build_project_settings(_machine(), _process(), [])

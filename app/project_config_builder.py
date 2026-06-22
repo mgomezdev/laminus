@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import zipfile
 
 _STRIP_KEYS = {
@@ -20,6 +21,8 @@ _KNOWN_FILAMENT_KEYS = {
 
 def build_project_settings(machine: dict, process: dict, filaments: list[dict]) -> dict:
     """Merge flattened machine + process + filament presets into a project_settings dict."""
+    if not filaments:
+        raise ValueError("filaments must contain at least one filament preset")
     config: dict = {}
     config.update({k: v for k, v in machine.items() if k not in _STRIP_KEYS})
     config.update({k: v for k, v in process.items() if k not in _STRIP_KEYS})
@@ -33,7 +36,7 @@ def build_project_settings(machine: dict, process: dict, filaments: list[dict]) 
         values = []
         for fil in filaments:
             val = fil.get(key, "")
-            if isinstance(val, list):
+            while isinstance(val, list):
                 val = val[0] if val else ""
             values.append(val)
         config[key] = values
@@ -45,6 +48,8 @@ def build_project_settings(machine: dict, process: dict, filaments: list[dict]) 
 
 def embed_project_settings(src_3mf: str, project_settings: dict, dst_3mf: str) -> None:
     """Write dst_3mf as a copy of src_3mf with Metadata/project_settings.config replaced."""
+    if os.path.realpath(src_3mf) == os.path.realpath(dst_3mf):
+        raise ValueError("src_3mf and dst_3mf must be different paths")
     payload = json.dumps(project_settings, ensure_ascii=False, indent=2).encode("utf-8")
     with zipfile.ZipFile(src_3mf, "r") as src_zip:
         with zipfile.ZipFile(dst_3mf, "w", compression=zipfile.ZIP_DEFLATED) as dst_zip:
