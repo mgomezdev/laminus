@@ -286,138 +286,94 @@ async def _stream_subprocess_output(process: asyncio.subprocess.Process, job_log
         job_logger.log(line.decode("utf-8", errors="replace"))
 
 
+async def _strip_model_settings(src: str, dst: str) -> None:
+    """Write dst as a copy of src with Metadata/model_settings.config removed."""
+    import zipfile as _zf
+    def _do_strip():
+        with _zf.ZipFile(src, "r") as s:
+            with _zf.ZipFile(dst, "w", compression=_zf.ZIP_DEFLATED) as d:
+                for item in s.infolist():
+                    if item.filename != "Metadata/model_settings.config":
+                        d.writestr(item, s.read(item.filename))
+    await asyncio.to_thread(_do_strip)
+
+
 async def run_orcaslicer_task(
     job_id: str,
     input_file_path: str,
     output_dir: str,
-    machine_profile: str,
-    process_profile: str,
-    filament_mapping: Dict[str, str],
-    plate_id: int = 0,
+    plate_id: int = 1,
+    export_3mf: Optional[str] = None,
+    geometry_only_retry: bool = True,
 ):
-    job = jobs[job_id]
+    job = jobs.get(job_id)
+    if job is None:
+        return
     job_logger = job["logger"]
     job["status"] = "slicing"
+    job_logger.log(f"Starting slice: {os.path.basename(input_file_path)}")
 
-    job_logger.log(f"Starting slice job for model: {os.path.basename(input_file_path)}")
-    job_logger.log(f"Output directory: {output_dir}")
-
-    cmd = [
-        "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-        "orcaslicer",
-        "--datadir", CONFIG_DIR,
-        "--slice", str(plate_id),
-        "--outputdir", output_dir,
-    ]
-
-    # Fix R7: find_profiles_in_config uses blocking os.walk — run in thread pool
-    profiles = await asyncio.to_thread(find_profiles_in_config)
-    settings_to_load = []
-
-    match_printer = next(
-        (p for p in profiles["machine"]
-         if p["rel_path"] == machine_profile or p["name"] == machine_profile or p["filename"] == machine_profile),
-        None,
-    )
-    if match_printer:
-        settings_to_load.append(match_printer["full_path"])
-        job_logger.log(f"Loading printer profile: {match_printer['name']}")
-    else:
-        job["status"] = "failed"
-        job["error"] = f"Printer profile '{machine_profile}' not found."
-        job_logger.log(f"ERROR: Printer profile '{machine_profile}' not found.")
-        job_logger.log("__FAILED__: Printer profile not found")
-        return
-
-    match_process = next(
-        (p for p in profiles["process"]
-         if p["rel_path"] == process_profile or p["name"] == process_profile or p["filename"] == process_profile),
-        None,
-    )
-    if match_process:
-        settings_to_load.append(match_process["full_path"])
-        job_logger.log(f"Loading process profile: {match_process['name']}")
-    else:
-        job["status"] = "failed"
-        job["error"] = f"Process profile '{process_profile}' not found."
-        job_logger.log(f"ERROR: Process profile '{process_profile}' not found.")
-        job_logger.log("__FAILED__: Process profile not found")
-        return
-
-    if settings_to_load:
-        cmd.extend(["--load-settings", ";".join(settings_to_load)])
-
-    slot_paths: Dict[int, str] = {}
-    for slot_str, fil_name in filament_mapping.items():
-        slot_num = int(slot_str)  # already validated >= 1 by SliceConfig.filaments_not_empty
-        match_fil = next(
-            (p for p in profiles["filament"]
-             if p["rel_path"] == fil_name or p["name"] == fil_name or p["filename"] == fil_name),
-            None,
-        )
-        if match_fil:
-            slot_paths[slot_num] = match_fil["full_path"]
-            job_logger.log(f"Mapping slot {slot_num} to filament: {match_fil['name']}")
-        else:
-            job_logger.log(f"WARNING: Filament profile '{fil_name}' for slot {slot_num} not found.")
-
-    if slot_paths:
-        max_slot = max(slot_paths.keys())
-        fallback_path = slot_paths.get(1) or next(iter(slot_paths.values()))
-        filament_files = [slot_paths.get(slot, fallback_path) for slot in range(1, max_slot + 1)]
-        cmd.extend(["--load-filaments", ";".join(filament_files)])
-        job_logger.log(f"Prepared filaments loading sequence: {filament_files}")
-
-    cmd.append(input_file_path)
-    job_logger.log(f"Executing command: {' '.join(cmd)}")
-
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-
+    async def _attempt(slice_input: str, label: str) -> bool:
+        cmd = [
+            "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
+            "orcaslicer", "--slice", str(plate_id),
+            "--outputdir", output_dir, "--arrange", "1",
+        ]
+        if export_3mf:
+            cmd.extend(["--export-3mf", export_3mf])
+        cmd.append(slice_input)
+        job_logger.log(f"{label}: {' '.join(cmd)}")
         try:
-            await asyncio.wait_for(_stream_subprocess_output(process, job_logger), timeout=SLICE_TIMEOUT)
-        except asyncio.TimeoutError:
-            process.kill()
+            process = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                await asyncio.wait_for(_stream_subprocess_output(process, job_logger), timeout=SLICE_TIMEOUT)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                job_logger.log(f"ERROR: Timed out after {SLICE_TIMEOUT}s")
+                return False
             await process.wait()
-            job["status"] = "failed"
-            job["error"] = f"Slicer timed out after {SLICE_TIMEOUT}s."
-            job_logger.log(f"ERROR: OrcaSlicer timed out after {SLICE_TIMEOUT} seconds.")
-            job_logger.log(f"__FAILED__: Timeout after {SLICE_TIMEOUT}s")
-            return
+            return process.returncode == 0
+        except Exception as exc:
+            job_logger.log(f"SYSTEM ERROR: {exc}")
+            logger.exception("Subprocess error in job %s", job_id)
+            return False
 
-        await process.wait()
-        exit_code = process.returncode
+    success = await _attempt(input_file_path, "Attempt 1")
 
-        if exit_code == 0:
-            job_logger.log("OrcaSlicer execution completed successfully.")
-            output_files = glob.glob(os.path.join(output_dir, "*"))
-            gcode_files = [f for f in output_files if f.endswith((".gcode", ".3mf"))]
-            if gcode_files:
-                job["status"] = "completed"
-                job["sliced_file"] = gcode_files[0]
-                job_logger.log(f"Sliced file generated: {os.path.basename(gcode_files[0])}")
-                job_logger.log("__COMPLETED__")
-            else:
-                job["status"] = "failed"
-                job["error"] = "No G-code or 3MF output file was generated by the slicer."
-                job_logger.log("ERROR: No output files found in output directory.")
-                job_logger.log("__FAILED__: Output files missing")
+    if not success and geometry_only_retry:
+        job_logger.log("Attempt 1 failed - retrying with model_settings stripped")
+        geo_path = input_file_path.replace(".3mf", "_geo.3mf")
+        try:
+            await _strip_model_settings(input_file_path, geo_path)
+            success = await _attempt(geo_path, "Attempt 2 (geometry-only)")
+        except Exception as exc:
+            job_logger.log(f"ERROR stripping model_settings: {exc}")
+
+    if success:
+        if export_3mf:
+            target = os.path.join(output_dir, export_3mf)
+            found = target if os.path.exists(target) else None
+        else:
+            gcodes = sorted(glob.glob(os.path.join(output_dir, "*.gcode")))
+            found = gcodes[0] if gcodes else None
+
+        if found:
+            job["status"] = "completed"
+            job["sliced_file"] = found
+            job_logger.log(f"Output: {os.path.basename(found)}")
+            job_logger.log("__COMPLETED__")
         else:
             job["status"] = "failed"
-            job["error"] = f"Slicer process exited with error code {exit_code}."
-            job_logger.log(f"ERROR: OrcaSlicer exited with code {exit_code}.")
-            job_logger.log(f"__FAILED__: Process exited with code {exit_code}")
-
-    except Exception as e:
-        logger.exception("Exception occurred during slicing task")
+            job["error"] = "OrcaSlicer succeeded but no output file found."
+            job_logger.log("ERROR: No output file found.")
+            job_logger.log("__FAILED__: Missing output file")
+    else:
         job["status"] = "failed"
-        job["error"] = str(e)
-        job_logger.log(f"SYSTEM ERROR: {str(e)}")
-        job_logger.log("__FAILED__: System Exception")
+        job["error"] = "OrcaSlicer slice process failed. See logs."
+        job_logger.log("__FAILED__: OrcaSlicer returned non-zero")
 
 
 @app.post("/api/slice/start")
@@ -519,6 +475,49 @@ async def start_slice(
     return {"job_id": job_id, "status": "pending", "message": "Slicing job started."}
 
 
+@app.post("/api/slice/prepared")
+async def slice_prepared(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    plate: int = Form(...),
+    export_3mf: Optional[str] = Form(None),
+    geometry_only_retry: bool = Form(True),
+):
+    if plate < 1:
+        raise HTTPException(status_code=422, detail="plate must be >= 1.")
+    try:
+        safe_name = _safe_filename(file.filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not safe_name.lower().endswith(".3mf"):
+        raise HTTPException(status_code=422, detail="Only .3mf files accepted here.")
+
+    job_id = str(uuid.uuid4())
+    job_dir = os.path.join(JOBS_DIR, job_id)
+    input_dir = os.path.join(job_dir, "input")
+    output_dir = os.path.join(job_dir, "output")
+    os.makedirs(input_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
+
+    input_path = os.path.join(input_dir, safe_name)
+    with open(input_path, "wb") as buf:
+        await asyncio.to_thread(shutil.copyfileobj, file.file, buf)
+
+    job_logger = JobLogger(job_id)
+    jobs[job_id] = {
+        "id": job_id, "status": "pending",
+        "input_file": input_path, "output_dir": output_dir,
+        "sliced_file": None, "output_format": "gcode_3mf" if export_3mf else "gcode",
+        "error": None, "logger": job_logger, "created_at": time.monotonic(),
+    }
+    background_tasks.add_task(
+        run_orcaslicer_task,
+        job_id=job_id, input_file_path=input_path, output_dir=output_dir,
+        plate_id=plate, export_3mf=export_3mf, geometry_only_retry=geometry_only_retry,
+    )
+    return {"job_id": job_id, "status": "pending", "message": "Slice job started."}
+
+
 @app.get("/api/slice/status/{job_id}")
 async def get_job_status(job_id: str):
     if job_id not in jobs:
@@ -527,6 +526,7 @@ async def get_job_status(job_id: str):
     return {
         "job_id": job["id"],
         "status": job["status"],
+        "output_format": job.get("output_format", "gcode"),
         "sliced_file": os.path.basename(job["sliced_file"]) if job["sliced_file"] else None,
         "error": job["error"],
     }
