@@ -13,6 +13,9 @@ from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPExcept
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.profile_catalog import ProfileCatalog
+import json as _json
+from app.project_config_builder import build_project_settings, embed_project_settings
+from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("orcaslicer-api")
@@ -421,14 +424,52 @@ async def run_orcaslicer_task(
 async def start_slice(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    config: str = Form(..., description="JSON-string matching SliceConfig schema"),
+    manufacturer: str = Form(...),
+    model: str = Form(...),
+    nozzle: str = Form(...),
+    process_uuid: str = Form(...),
+    filament_uuids: str = Form(..., description='JSON array, e.g. ["uuid1"]'),
+    plate: int = Form(...),
+    export_3mf: Optional[str] = Form(None),
+    geometry_only_retry: bool = Form(True),
 ):
+    if catalog is None or not catalog.is_built:
+        raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
+
     try:
-        config_data = SliceConfig.model_validate_json(config)
-    except Exception as e:
+        fil_uuid_list: list[str] = _json.loads(filament_uuids)
+        if not isinstance(fil_uuid_list, list) or not fil_uuid_list:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="filament_uuids must be a non-empty JSON array.")
+
+    if plate < 1:
+        raise HTTPException(status_code=422, detail="plate must be >= 1.")
+
+    machine_entry = catalog.get_machine(manufacturer, model, nozzle)
+    if machine_entry is None:
         raise HTTPException(
-            status_code=400,
-            detail=f"Configuration parameter 'config' validation failed. Must be a valid SliceConfig JSON. Error: {str(e)}",
+            status_code=422,
+            detail=f"No machine profile found for manufacturer='{manufacturer}' model='{model}' nozzle='{nozzle}'.",
+        )
+
+    process_entry = catalog.get_by_uuid(process_uuid)
+    if process_entry is None or process_entry.get("type") != "process":
+        raise HTTPException(status_code=422, detail=f"Process UUID '{process_uuid}' not found.")
+
+    filament_entries = []
+    for fuid in fil_uuid_list:
+        fe = catalog.get_by_uuid(fuid)
+        if fe is None or fe.get("type") != "filament":
+            raise HTTPException(status_code=422, detail=f"Filament UUID '{fuid}' not found.")
+        filament_entries.append(fe)
+
+    machine_name = machine_entry["name"]
+    compat = process_entry.get("compatible_printers", [])
+    if compat and machine_name not in compat:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Process '{process_entry['name']}' is not compatible with '{machine_name}'.",
         )
 
     try:
@@ -440,40 +481,42 @@ async def start_slice(
     job_dir = os.path.join(JOBS_DIR, job_id)
     input_dir = os.path.join(job_dir, "input")
     output_dir = os.path.join(job_dir, "output")
-
     os.makedirs(input_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
 
-    input_file_path = os.path.join(input_dir, safe_name)
-    # Fix R8: shutil.copyfileobj is blocking — run in thread pool
-    with open(input_file_path, "wb") as buffer:
-        await asyncio.to_thread(shutil.copyfileobj, file.file, buffer)
+    raw_path = os.path.join(input_dir, safe_name)
+    with open(raw_path, "wb") as buf:
+        await asyncio.to_thread(shutil.copyfileobj, file.file, buf)
+
+    if safe_name.lower().endswith(".stl"):
+        base_3mf = os.path.join(input_dir, os.path.splitext(safe_name)[0] + ".3mf")
+        await asyncio.to_thread(_stl_to_3mf, raw_path, base_3mf)
+    else:
+        base_3mf = raw_path
+
+    machine_resolved = machine_entry.get("_resolved", machine_entry)
+    process_resolved = process_entry.get("_resolved", process_entry)
+    filament_resolved_list = [fe.get("_resolved", fe) for fe in filament_entries]
+
+    project_cfg = await asyncio.to_thread(
+        build_project_settings, machine_resolved, process_resolved, filament_resolved_list
+    )
+    prepared_3mf = os.path.join(input_dir, "prepared.3mf")
+    await asyncio.to_thread(embed_project_settings, base_3mf, project_cfg, prepared_3mf)
 
     job_logger = JobLogger(job_id)
-
     jobs[job_id] = {
-        "id": job_id,
-        "status": "pending",
-        "input_file": input_file_path,
-        "output_dir": output_dir,
-        "sliced_file": None,
-        "error": None,
-        "logger": job_logger,
-        "created_at": time.monotonic(),  # Fix R6: timestamp for TTL eviction
+        "id": job_id, "status": "pending",
+        "input_file": prepared_3mf, "output_dir": output_dir,
+        "sliced_file": None, "output_format": "gcode_3mf" if export_3mf else "gcode",
+        "error": None, "logger": job_logger, "created_at": time.monotonic(),
     }
-
     background_tasks.add_task(
         run_orcaslicer_task,
-        job_id=job_id,
-        input_file_path=input_file_path,
-        output_dir=output_dir,
-        machine_profile=config_data.printer,
-        process_profile=config_data.process,
-        filament_mapping=config_data.filaments,
-        plate_id=config_data.plate,
+        job_id=job_id, input_file_path=prepared_3mf, output_dir=output_dir,
+        plate_id=plate, export_3mf=export_3mf, geometry_only_retry=geometry_only_retry,
     )
-
-    return {"job_id": job_id, "status": "pending", "message": "Slicing job started in background."}
+    return {"job_id": job_id, "status": "pending", "message": "Slicing job started."}
 
 
 @app.get("/api/slice/status/{job_id}")
