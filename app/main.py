@@ -675,28 +675,30 @@ async def upload_profile(
     file: UploadFile = File(...),
 ):
     if type not in ("machine", "process", "filament"):
-        raise HTTPException(status_code=400, detail="Invalid profile type. Must be machine, process, or filament.")
+        raise HTTPException(status_code=400, detail="type must be machine, process, or filament.")
 
-    # Fix R1: _safe_filename guards against None before extension check
     try:
         safe_name = _safe_filename(file.filename)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     if not safe_name.endswith(".json"):
-        raise HTTPException(status_code=400, detail="Profile file must be a JSON file.")
+        raise HTTPException(status_code=400, detail="Profile file must be a .json file.")
 
     target_dir = os.path.join(USER_CONFIG_DIR, "default", type)
     os.makedirs(target_dir, exist_ok=True)
-
     target_file = os.path.join(target_dir, safe_name)
-    # Fix R8: blocking file write — run in thread pool
     with open(target_file, "wb") as buffer:
         await asyncio.to_thread(shutil.copyfileobj, file.file, buffer)
 
+    if not _catalog_building:
+        global _catalog_task, _catalog_building
+        _catalog_building = True
+        _catalog_task = asyncio.create_task(_build_catalog())
+
     return {
         "status": "success",
-        "message": f"Profile uploaded successfully to {type}/{safe_name}",
+        "message": f"Profile uploaded to {type}/{safe_name}. Catalog rebuild started.",
         "filename": safe_name,
     }
 
