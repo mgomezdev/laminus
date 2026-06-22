@@ -1,4 +1,4 @@
-import json, os, pytest
+import json, pytest
 from app.profile_catalog import resolve_inheritance
 
 def test_resolve_flat_profile(tmp_path):
@@ -31,3 +31,4 @@ def test_resolve_missing_parent_returns_child(tmp_path):
     child.write_text(json.dumps({"name": "Child", "inherits": "Ghost", "layer_height": 0.2}))
     result = resolve_inheritance(str(child), search_roots=[str(tmp_path)])
     assert result["layer_height"] == 0.2
+    assert "inherits" not in result

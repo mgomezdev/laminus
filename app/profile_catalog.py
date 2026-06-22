@@ -42,7 +42,7 @@ def resolve_inheritance(
     if parent_name:
         parent_path = _find_file_by_name(parent_name, search_roots)
         if parent_path:
-            parent_data = resolve_inheritance(parent_path, search_roots, _visited)
+            parent_data = resolve_inheritance(parent_path, search_roots, set(_visited))
             merged = {**parent_data, **data}
         else:
             logger.warning("Parent profile '%s' not found - skipping", parent_name)
