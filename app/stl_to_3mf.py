@@ -1,6 +1,7 @@
 """Convert a bare STL (binary or ASCII) into a minimal valid 3MF."""
 from __future__ import annotations
 
+import os
 import struct
 import zipfile
 
@@ -11,7 +12,16 @@ _RELS = '<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://sc
 
 def _is_binary(path: str) -> bool:
     with open(path, "rb") as f:
-        return not f.read(80).startswith(b"solid")
+        header = f.read(80)
+        if not header.startswith(b"solid"):
+            return True
+        count_bytes = f.read(4)
+        if len(count_bytes) < 4:
+            return False
+        count = struct.unpack("<I", count_bytes)[0]
+    expected_size = 80 + 4 + count * 50
+    actual_size = os.path.getsize(path)
+    return actual_size == expected_size
 
 
 def _parse_binary(path: str) -> list[tuple]:
@@ -34,10 +44,11 @@ def _parse_ascii(path: str) -> list[tuple]:
             line = line.strip()
             if line.startswith("vertex"):
                 parts = line.split()
-                verts.append((float(parts[1]), float(parts[2]), float(parts[3])))
-                if len(verts) == 3:
-                    tris.append(tuple(verts))
-                    verts = []
+                if len(parts) >= 4:
+                    verts.append((float(parts[1]), float(parts[2]), float(parts[3])))
+                    if len(verts) == 3:
+                        tris.append(tuple(verts))
+                        verts = []
     return tris
 
 

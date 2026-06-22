@@ -26,8 +26,12 @@ def test_binary_stl_produces_valid_3mf(tmp_path):
     dst = str(tmp_path / "out.3mf")
     stl_to_3mf(_binary_stl(tmp_path), dst)
     with zipfile.ZipFile(dst) as zf:
-        assert any("3dmodel.model" in n for n in zf.namelist())
-        assert "[Content_Types].xml" in zf.namelist()
+        names = zf.namelist()
+        assert "[Content_Types].xml" in names
+        assert "_rels/.rels" in names
+        assert "3D/3dmodel.model" in names
+        xml = zf.read("3D/3dmodel.model").decode()
+        assert "<vertex" in xml and "<triangle" in xml
 
 def test_ascii_stl_produces_valid_3mf(tmp_path):
     dst = str(tmp_path / "out.3mf")
@@ -42,3 +46,21 @@ def test_vertex_count_matches_triangles(tmp_path):
     with zipfile.ZipFile(dst) as zf:
         xml = zf.read("3D/3dmodel.model").decode()
     assert xml.count("<vertex ") == 6
+
+def test_binary_stl_with_solid_header(tmp_path):
+    """Binary STLs whose header starts with 'solid' must not be treated as ASCII."""
+    path = str(tmp_path / "tricky.stl")
+    with open(path, "wb") as f:
+        header = b"solid fake model name" + b"\x00" * (80 - len(b"solid fake model name"))
+        f.write(header)
+        f.write(struct.pack("<I", 1))  # 1 triangle
+        f.write(struct.pack("<fff", 0, 0, 1))  # normal
+        f.write(struct.pack("<fff", 0, 0, 0))  # v1
+        f.write(struct.pack("<fff", 1, 0, 0))  # v2
+        f.write(struct.pack("<fff", 0, 1, 0))  # v3
+        f.write(struct.pack("<H", 0))  # attr
+    dst = str(tmp_path / "out.3mf")
+    stl_to_3mf(path, dst)
+    with zipfile.ZipFile(dst) as zf:
+        xml = zf.read("3D/3dmodel.model").decode()
+    assert xml.count("<vertex ") == 3
