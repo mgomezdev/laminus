@@ -64,8 +64,8 @@ def _build_model_xml(tris: list[tuple]) -> str:
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n'
         '  <resources><object id="1" type="model"><mesh>\n'
-        f'    <vertices>\n{chr(10).join(vlines)}\n    </vertices>\n'
-        f'    <triangles>\n{chr(10).join(tlines)}\n    </triangles>\n'
+        f'    <vertices>\n{"\n".join(vlines)}\n    </vertices>\n'
+        f'    <triangles>\n{"\n".join(tlines)}\n    </triangles>\n'
         '  </mesh></object></resources>\n'
         '  <build><item objectid="1"/></build>\n</model>'
     )

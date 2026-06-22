@@ -13,7 +13,6 @@ from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPExcept
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.profile_catalog import ProfileCatalog
-import json as _json
 from app.project_config_builder import build_project_settings, embed_project_settings
 from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf
 
@@ -71,6 +70,13 @@ async def lifespan(app: FastAPI):
             await sweep_task
         except asyncio.CancelledError:
             pass
+
+
+def _trigger_catalog_rebuild() -> None:
+    global _catalog_task, _catalog_building
+    if not _catalog_building:
+        _catalog_building = True
+        _catalog_task = asyncio.create_task(_build_catalog())
 
 
 async def _build_catalog():
@@ -247,11 +253,9 @@ async def get_profiles(
     nozzle: Optional[str] = None,
     refresh: bool = False,
 ):
-    if refresh and not _catalog_building:
-        global _catalog_task, _catalog_building
-        _catalog_building = True
-        _catalog_task = asyncio.create_task(_build_catalog())
-    if catalog is None or not catalog.is_built:
+    if refresh:
+        _trigger_catalog_rebuild()
+    if catalog is None:
         return JSONResponse(
             status_code=503,
             content={"status": "building_catalog", "detail": "Catalog not ready. Retry shortly."},
@@ -267,7 +271,7 @@ async def get_profiles(
 
 @app.get("/api/profiles/{profile_uuid}")
 async def get_profile_detail(profile_uuid: str):
-    if catalog is None or not catalog.is_built:
+    if catalog is None:
         return JSONResponse(
             status_code=503,
             content={"status": "building_catalog", "detail": "Catalog not ready. Retry shortly."},
@@ -391,11 +395,11 @@ async def start_slice(
     export_3mf: Optional[str] = Form(None),
     geometry_only_retry: bool = Form(True),
 ):
-    if catalog is None or not catalog.is_built:
+    if catalog is None:
         raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
 
     try:
-        fil_uuid_list: list[str] = _json.loads(filament_uuids)
+        fil_uuid_list: list[str] = json.loads(filament_uuids)
         if not isinstance(fil_uuid_list, list) or not fil_uuid_list:
             raise ValueError
     except (ValueError, TypeError):
@@ -691,10 +695,7 @@ async def upload_profile(
     with open(target_file, "wb") as buffer:
         await asyncio.to_thread(shutil.copyfileobj, file.file, buffer)
 
-    if not _catalog_building:
-        global _catalog_task, _catalog_building
-        _catalog_building = True
-        _catalog_task = asyncio.create_task(_build_catalog())
+    _trigger_catalog_rebuild()
 
     return {
         "status": "success",
