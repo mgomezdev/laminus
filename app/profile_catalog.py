@@ -97,3 +97,147 @@ def resolve_inheritance(
     result = dict(data)
     result.pop("inherits", None)
     return result
+
+
+SYSTEM_PROFILE_TYPES = ("machine", "process", "filament")
+
+_STRIP_META = {"inherits", "compatible_printers", "compatible_printers_condition",
+               "is_custom_defined", "from", "instantiation"}
+
+
+def _display_name(name: str) -> str:
+    at = name.find(" @")
+    return name[:at].strip() if at != -1 else name.strip()
+
+
+class ProfileCatalog:
+    """Scanned, inheritance-resolved, UUID-annotated profile catalog."""
+
+    def __init__(self, system_dir: str, user_dir: str):
+        self._system_dir = system_dir
+        self._user_dir = user_dir
+        self._by_uuid: dict[str, dict] = {}
+        self._catalog: dict[str, list[dict]] = {"machine": [], "process": [], "filament": []}
+        self._built = False
+
+    def build(self) -> None:
+        catalog: dict[str, list[dict]] = {"machine": [], "process": [], "filament": []}
+        by_uuid: dict[str, dict] = {}
+        search_roots = [self._system_dir, self._user_dir]
+
+        for source, root in [("system", self._system_dir), ("user", self._user_dir)]:
+            if not os.path.isdir(root):
+                continue
+            for dirpath, _dirs, files in os.walk(root):
+                ptype = os.path.basename(dirpath)
+                if ptype not in SYSTEM_PROFILE_TYPES:
+                    continue
+                for filename in files:
+                    if not filename.endswith(".json") or filename.startswith("."):
+                        continue
+                    filepath = os.path.join(dirpath, filename)
+                    rel_path = os.path.relpath(filepath, root).replace("\\", "/")
+                    try:
+                        resolved = resolve_inheritance(filepath, search_roots)
+                    except Exception as exc:
+                        logger.warning("Skipping '%s': %s", filepath, exc)
+                        continue
+                    entry = self._make_entry(resolved, ptype, source, rel_path)
+                    catalog[ptype].append(entry)
+                    by_uuid[entry["uuid"]] = entry
+
+        self._catalog = catalog
+        self._by_uuid = by_uuid
+        self._built = True
+        logger.info("Catalog built: %s", {k: len(v) for k, v in catalog.items()})
+
+    def _make_entry(self, resolved: dict, ptype: str, source: str, rel_path: str) -> dict:
+        name: str = resolved.get("name", os.path.splitext(os.path.basename(rel_path))[0])
+
+        if ptype == "machine":
+            parsed = parse_machine_name(name)
+            manufacturer, model, nozzle = parsed if parsed else (None, None, None)
+            entry_uuid = (
+                make_machine_uuid(manufacturer, model, nozzle)
+                if parsed else make_profile_uuid(source, rel_path)
+            )
+            return {
+                "uuid": entry_uuid, "type": "machine", "name": name, "source": source,
+                "rel_path": rel_path, "manufacturer": manufacturer, "model": model, "nozzle": nozzle,
+                "nozzle_diameter": resolved.get("nozzle_diameter"),
+                "bed_size_x": resolved.get("bed_size_x"), "bed_size_y": resolved.get("bed_size_y"),
+                "extruder_count": resolved.get("extruder_count", 1),
+                "_resolved": resolved,
+            }
+
+        if ptype == "filament":
+            colour_raw = resolved.get("filament_colour", "#FFFFFF")
+            colour = colour_raw[0] if isinstance(colour_raw, list) else colour_raw
+            return {
+                "uuid": make_profile_uuid(source, rel_path), "type": "filament",
+                "name": name, "display_name": _display_name(name), "source": source,
+                "rel_path": rel_path,
+                "filament_type": resolved.get("filament_type", ""),
+                "filament_colour": colour,
+                "filament_vendor": resolved.get("filament_vendor", ""),
+                "filament_diameter": resolved.get("filament_diameter", 1.75),
+                "filament_density": resolved.get("filament_density"),
+                "nozzle_temperature": resolved.get("nozzle_temperature"),
+                "nozzle_temperature_range_low": resolved.get("nozzle_temperature_range_low"),
+                "nozzle_temperature_range_high": resolved.get("nozzle_temperature_range_high"),
+                "bed_temperature": resolved.get("bed_temperature"),
+                "bed_temperature_initial_layer": resolved.get("bed_temperature_initial_layer"),
+                "compatible_printers": resolved.get("compatible_printers", []),
+                "_resolved": resolved,
+            }
+
+        return {
+            "uuid": make_profile_uuid(source, rel_path), "type": "process",
+            "name": name, "source": source, "rel_path": rel_path,
+            "layer_height": resolved.get("layer_height"),
+            "speed": resolved.get("speed"),
+            "compatible_printers": resolved.get("compatible_printers", []),
+            "_resolved": resolved,
+        }
+
+    def get_by_uuid(self, uid: str) -> Optional[dict]:
+        return self._by_uuid.get(uid)
+
+    def get_machine(self, manufacturer: str, model: str, nozzle: str) -> Optional[dict]:
+        entry = self._by_uuid.get(make_machine_uuid(manufacturer, model, nozzle))
+        if entry:
+            return entry
+        for m in self._catalog["machine"]:
+            if m.get("manufacturer") == manufacturer and m.get("model") == model and m.get("nozzle") == nozzle:
+                return m
+        return None
+
+    def as_dict(
+        self,
+        manufacturer: Optional[str] = None,
+        model: Optional[str] = None,
+        nozzle: Optional[str] = None,
+    ) -> dict:
+        result = {ptype: [self._public(e) for e in entries] for ptype, entries in self._catalog.items()}
+        if manufacturer and model and nozzle:
+            machine_entry = self.get_machine(manufacturer, model, nozzle)
+            machine_name = machine_entry["name"] if machine_entry else None
+            for ptype in ("process", "filament"):
+                result[ptype] = [
+                    e for e in result[ptype]
+                    if not e.get("compatible_printers")
+                    or (machine_name and machine_name in e["compatible_printers"])
+                ]
+        return result
+
+    @property
+    def is_built(self) -> bool:
+        return self._built
+
+    @property
+    def counts(self) -> dict:
+        return {k: len(v) for k, v in self._catalog.items()}
+
+    @staticmethod
+    def _public(entry: dict) -> dict:
+        return {k: v for k, v in entry.items() if not k.startswith("_")}

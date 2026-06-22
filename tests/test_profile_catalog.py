@@ -63,3 +63,56 @@ def test_parse_machine_name_multi_word_model():
 
 def test_parse_machine_name_no_match_returns_none():
     assert parse_machine_name("Custom Handbuilt Printer") is None
+
+
+from app.profile_catalog import ProfileCatalog
+
+def test_catalog_build_counts(profile_tree):
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    data = cat.as_dict()
+    assert len(data["machine"]) == 2
+    assert len(data["process"]) == 2
+    assert len(data["filament"]) == 1
+
+def test_catalog_machine_has_tuple_fields(profile_tree):
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    p1s = next(m for m in cat.as_dict()["machine"] if "P1S" in m["name"])
+    assert p1s["manufacturer"] == "Bambu Lab"
+    assert p1s["model"] == "P1S"
+    assert p1s["nozzle"] == "0.4"
+    assert "uuid" in p1s
+
+def test_catalog_filament_display_name(profile_tree):
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    fil = cat.as_dict()["filament"][0]
+    assert fil["display_name"] == "Bambu PLA Basic"
+    assert fil["source"] == "system"
+
+def test_catalog_process_inheritance_resolved(profile_tree):
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    standard = next(p for p in cat.as_dict()["process"] if "Standard" in p["name"])
+    assert standard["layer_height"] == 0.2
+    assert standard["speed"] == 50
+
+def test_get_by_uuid(profile_tree):
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    fil = cat.as_dict()["filament"][0]
+    assert cat.get_by_uuid(fil["uuid"]) is not None
+
+def test_get_machine_by_tuple(profile_tree):
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    m = cat.get_machine("Bambu Lab", "P1S", "0.4")
+    assert m is not None and m["bed_size_x"] == 256
+
+def test_filter_by_machine_tuple(profile_tree):
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    data = cat.as_dict(manufacturer="Bambu Lab", model="P1S", nozzle="0.4")
+    for p in data["process"]:
+        assert not p.get("compatible_printers") or "Bambu Lab P1S 0.4 nozzle" in p["compatible_printers"]
