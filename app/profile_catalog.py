@@ -126,6 +126,7 @@ class ProfileCatalog:
         search_roots = [self._system_dir, self._user_dir]
 
         for source, root in [("system", self._system_dir), ("user", self._user_dir)]:
+            # system first, user second — user entries overwrite system entries by UUID
             if not os.path.isdir(root):
                 continue
             for dirpath, _dirs, files in os.walk(root):
@@ -173,14 +174,20 @@ class ProfileCatalog:
         if ptype == "filament":
             colour_raw = resolved.get("filament_colour", "#FFFFFF")
             colour = colour_raw[0] if isinstance(colour_raw, list) else colour_raw
+            ft_raw = resolved.get("filament_type", "")
+            filament_type = ft_raw[0] if isinstance(ft_raw, list) else ft_raw
+            fd_raw = resolved.get("filament_diameter", 1.75)
+            filament_diameter = fd_raw[0] if isinstance(fd_raw, list) else fd_raw
+            fv_raw = resolved.get("filament_vendor", "")
+            filament_vendor = fv_raw[0] if isinstance(fv_raw, list) else fv_raw
             return {
                 "uuid": make_profile_uuid(source, rel_path), "type": "filament",
                 "name": name, "display_name": _display_name(name), "source": source,
                 "rel_path": rel_path,
-                "filament_type": resolved.get("filament_type", ""),
+                "filament_type": filament_type,
                 "filament_colour": colour,
-                "filament_vendor": resolved.get("filament_vendor", ""),
-                "filament_diameter": resolved.get("filament_diameter", 1.75),
+                "filament_vendor": filament_vendor,
+                "filament_diameter": filament_diameter,
                 "filament_density": resolved.get("filament_density"),
                 "nozzle_temperature": resolved.get("nozzle_temperature"),
                 "nozzle_temperature_range_low": resolved.get("nozzle_temperature_range_low"),
