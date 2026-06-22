@@ -32,3 +32,34 @@ def test_resolve_missing_parent_returns_child(tmp_path):
     result = resolve_inheritance(str(child), search_roots=[str(tmp_path)])
     assert result["layer_height"] == 0.2
     assert "inherits" not in result
+
+from app.profile_catalog import make_profile_uuid, make_machine_uuid, parse_machine_name
+
+def test_make_profile_uuid_is_stable():
+    u1 = make_profile_uuid("system", "Bambu Lab/filament/Bambu PLA Basic.json")
+    u2 = make_profile_uuid("system", "Bambu Lab/filament/Bambu PLA Basic.json")
+    assert u1 == u2
+
+def test_make_profile_uuid_differs_by_source():
+    assert make_profile_uuid("system", "foo/bar.json") != make_profile_uuid("user", "foo/bar.json")
+
+def test_make_machine_uuid_is_stable():
+    assert make_machine_uuid("Bambu Lab", "P1S", "0.4") == make_machine_uuid("Bambu Lab", "P1S", "0.4")
+
+def test_make_machine_uuid_differs_by_nozzle():
+    assert make_machine_uuid("Bambu Lab", "P1S", "0.4") != make_machine_uuid("Bambu Lab", "P1S", "0.6")
+
+def test_parse_machine_name_standard():
+    mfr, model, nozzle = parse_machine_name("Bambu Lab P1S 0.4 nozzle")
+    assert mfr == "Bambu Lab"
+    assert model == "P1S"
+    assert nozzle == "0.4"
+
+def test_parse_machine_name_multi_word_model():
+    mfr, model, nozzle = parse_machine_name("Creality Ender-3 V2 0.4 nozzle")
+    assert mfr == "Creality"
+    assert model == "Ender-3 V2"
+    assert nozzle == "0.4"
+
+def test_parse_machine_name_no_match_returns_none():
+    assert parse_machine_name("Custom Handbuilt Printer") is None

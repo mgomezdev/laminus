@@ -22,6 +22,45 @@ def _find_file_by_name(name: str, search_roots: list[str]) -> Optional[str]:
     return None
 
 
+def make_profile_uuid(source: str, rel_path: str) -> str:
+    """Stable UUID for process/filament profiles derived from source and path."""
+    return str(uuid.uuid5(_CATALOG_NS, f"{source}:{rel_path}"))
+
+
+def make_machine_uuid(manufacturer: str, model: str, nozzle: str) -> str:
+    """Stable UUID for machine profiles derived from the (manufacturer, model, nozzle) tuple."""
+    return str(uuid.uuid5(_CATALOG_NS, f"{manufacturer}|{model}|{nozzle}"))
+
+
+_MACHINE_NAME_RE = re.compile(
+    r"^(?P<mfr>\S.*?)\s+(?P<model>\S+(?:\s+\S+)*?)\s+(?P<nozzle>\d+\.\d+)\s+nozzle\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_machine_name(name: str) -> Optional[Tuple[str, str, str]]:
+    """Parse 'Manufacturer Model X.Y nozzle' into (manufacturer, model, nozzle) or None."""
+    m = _MACHINE_NAME_RE.match(name.strip())
+    if not m:
+        return None
+    full_prefix = f"{m.group('mfr')} {m.group('model')}"
+    nozzle = m.group("nozzle")
+    tokens = full_prefix.split()
+    mfr_tokens: list[str] = []
+    model_tokens: list[str] = []
+    for tok in tokens:
+        if model_tokens or re.search(r"[\d\-]", tok):
+            model_tokens.append(tok)
+        else:
+            mfr_tokens.append(tok)
+    if not mfr_tokens:
+        mfr_tokens = [tokens[0]]
+        model_tokens = tokens[1:]
+    if not model_tokens:
+        return None
+    return " ".join(mfr_tokens), " ".join(model_tokens), nozzle
+
+
 def resolve_inheritance(
     filepath: str,
     search_roots: list[str],
