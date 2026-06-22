@@ -334,8 +334,9 @@ async def run_orcaslicer_task(
                 await process.wait()
                 job_logger.log(f"ERROR: Timed out after {SLICE_TIMEOUT}s")
                 return False
-            await process.wait()
-            return process.returncode == 0
+            else:
+                await process.wait()
+                return process.returncode == 0
         except Exception as exc:
             job_logger.log(f"SYSTEM ERROR: {exc}")
             logger.exception("Subprocess error in job %s", job_id)
@@ -345,7 +346,8 @@ async def run_orcaslicer_task(
 
     if not success and geometry_only_retry:
         job_logger.log("Attempt 1 failed - retrying with model_settings stripped")
-        geo_path = input_file_path.replace(".3mf", "_geo.3mf")
+        base, ext = os.path.splitext(input_file_path)
+        geo_path = base + "_geo" + ext
         try:
             await _strip_model_settings(input_file_path, geo_path)
             success = await _attempt(geo_path, "Attempt 2 (geometry-only)")
