@@ -22,17 +22,37 @@ DATA_DIR = "/data"
 JOBS_DIR = "/tmp/jobs"
 ARRANGE_DIR = "/tmp/arrange"
 
-SLICE_TIMEOUT = 3600       # max seconds a slice subprocess may run before being killed
 JOB_TTL = 3600             # Fix R6: seconds after creation before a completed job is evicted
 JOB_SWEEP_INTERVAL = 300   # how often the eviction sweep runs
+
+from app.profile_catalog import ProfileCatalog
+
+SYSTEM_PROFILES_DIR = os.environ.get("SYSTEM_PROFILES_DIR", "/opt/orcaslicer/resources/profiles")
+SLICE_TIMEOUT = int(os.environ.get("SLICE_TIMEOUT_SECONDS", "600"))
+
+catalog: Optional[ProfileCatalog] = None
+_catalog_building: bool = False
+_orcaslicer_version: Optional[str] = None
 
 
 # Fix R6: lifespan context runs startup/shutdown logic and background eviction task
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global catalog, _catalog_building, _orcaslicer_version
     for d in (CONFIG_DIR, DATA_DIR, JOBS_DIR, ARRANGE_DIR):
         os.makedirs(d, exist_ok=True)
     init_config_directories()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "orcaslicer", "--version",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        _orcaslicer_version = stdout.decode("utf-8", errors="replace").strip().splitlines()[0]
+    except Exception:
+        _orcaslicer_version = None
+    _catalog_building = True
+    asyncio.create_task(_build_catalog())
     sweep_task = asyncio.create_task(_evict_stale_jobs())
     try:
         yield
@@ -42,6 +62,19 @@ async def lifespan(app: FastAPI):
             await sweep_task
         except asyncio.CancelledError:
             pass
+
+
+async def _build_catalog():
+    global catalog, _catalog_building
+    try:
+        cat = ProfileCatalog(system_dir=SYSTEM_PROFILES_DIR, user_dir=USER_CONFIG_DIR)
+        await asyncio.to_thread(cat.build)
+        catalog = cat
+        logger.info("Profile catalog ready: %s", cat.counts)
+    except Exception:
+        logger.exception("Catalog build failed")
+    finally:
+        _catalog_building = False
 
 
 app = FastAPI(
@@ -587,8 +620,14 @@ async def upload_profile(
 
 @app.get("/api/health")
 async def health_check():
+    active = sum(1 for j in jobs.values() if j["status"] == "slicing")
     return {
         "status": "healthy",
         "orcaslicer_installed": os.path.exists("/usr/local/bin/orcaslicer"),
+        "orcaslicer_version": _orcaslicer_version,
         "config_mounted": os.path.exists(CONFIG_DIR),
+        "system_profiles_available": os.path.isdir(SYSTEM_PROFILES_DIR),
+        "catalog_loaded": catalog is not None and catalog.is_built,
+        "catalog_profile_count": catalog.counts if (catalog and catalog.is_built) else None,
+        "active_jobs": active,
     }
