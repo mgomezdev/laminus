@@ -238,9 +238,37 @@ async def get_dashboard():
 
 
 @app.get("/api/profiles")
-async def get_profiles():
-    # Fix R7: os.walk is blocking I/O — run in thread pool so the event loop stays free
-    return await asyncio.to_thread(find_profiles_in_config)
+async def get_profiles(
+    manufacturer: Optional[str] = None,
+    model: Optional[str] = None,
+    nozzle: Optional[str] = None,
+    refresh: bool = False,
+):
+    if refresh:
+        global _catalog_task
+        _catalog_task = asyncio.create_task(_build_catalog())
+    if catalog is None or not catalog.is_built:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "building_catalog", "detail": "Catalog not ready. Retry shortly."},
+        )
+    tuple_params = [p for p in (manufacturer, model, nozzle) if p is not None]
+    if tuple_params and len(tuple_params) != 3:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide all three of manufacturer, model, and nozzle together, or none.",
+        )
+    return catalog.as_dict(manufacturer=manufacturer, model=model, nozzle=nozzle)
+
+
+@app.get("/api/profiles/{profile_uuid}")
+async def get_profile_detail(profile_uuid: str):
+    if catalog is None or not catalog.is_built:
+        return JSONResponse(status_code=503, content={"status": "building_catalog"})
+    entry = catalog.get_by_uuid(profile_uuid)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Profile UUID '{profile_uuid}' not found.")
+    return catalog._public(entry)
 
 
 async def _stream_subprocess_output(process: asyncio.subprocess.Process, job_logger: JobLogger):
