@@ -24,7 +24,7 @@ def _find_file_by_name(name: str, search_roots: list[str]) -> Optional[str]:
 
 def make_profile_uuid(source: str, rel_path: str) -> str:
     """Stable UUID for process/filament profiles derived from source and path."""
-    return str(uuid.uuid5(_CATALOG_NS, f"{source}:{rel_path}"))
+    return str(uuid.uuid5(_CATALOG_NS, f"{source}\x00{rel_path}"))
 
 
 def make_machine_uuid(manufacturer: str, model: str, nozzle: str) -> str:
@@ -57,7 +57,12 @@ def parse_machine_name(name: str) -> Optional[Tuple[str, str, str]]:
         mfr_tokens = [tokens[0]]
         model_tokens = tokens[1:]
     if not model_tokens:
-        return None
+        if len(mfr_tokens) >= 2:
+            # All-alpha name: treat first token as manufacturer, rest as model
+            model_tokens = mfr_tokens[1:]
+            mfr_tokens = mfr_tokens[:1]
+        else:
+            return None
     return " ".join(mfr_tokens), " ".join(model_tokens), nozzle
 
 
