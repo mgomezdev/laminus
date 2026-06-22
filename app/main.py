@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from app.profile_catalog import ProfileCatalog
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("orcaslicer-api")
@@ -25,20 +26,19 @@ ARRANGE_DIR = "/tmp/arrange"
 JOB_TTL = 3600             # Fix R6: seconds after creation before a completed job is evicted
 JOB_SWEEP_INTERVAL = 300   # how often the eviction sweep runs
 
-from app.profile_catalog import ProfileCatalog
-
 SYSTEM_PROFILES_DIR = os.environ.get("SYSTEM_PROFILES_DIR", "/opt/orcaslicer/resources/profiles")
 SLICE_TIMEOUT = int(os.environ.get("SLICE_TIMEOUT_SECONDS", "600"))
 
 catalog: Optional[ProfileCatalog] = None
 _catalog_building: bool = False
 _orcaslicer_version: Optional[str] = None
+_catalog_task: Optional[asyncio.Task] = None
 
 
 # Fix R6: lifespan context runs startup/shutdown logic and background eviction task
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global catalog, _catalog_building, _orcaslicer_version
+    global catalog, _catalog_building, _orcaslicer_version, _catalog_task
     for d in (CONFIG_DIR, DATA_DIR, JOBS_DIR, ARRANGE_DIR):
         os.makedirs(d, exist_ok=True)
     init_config_directories()
@@ -47,12 +47,18 @@ async def lifespan(app: FastAPI):
             "orcaslicer", "--version",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-        _orcaslicer_version = stdout.decode("utf-8", errors="replace").strip().splitlines()[0]
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        except (asyncio.TimeoutError, Exception):
+            proc.kill()
+            await proc.wait()
+            raise
+        lines = stdout.decode("utf-8", errors="replace").strip().splitlines()
+        _orcaslicer_version = lines[0] if lines else None
     except Exception:
         _orcaslicer_version = None
     _catalog_building = True
-    asyncio.create_task(_build_catalog())
+    _catalog_task = asyncio.create_task(_build_catalog())
     sweep_task = asyncio.create_task(_evict_stale_jobs())
     try:
         yield
@@ -620,7 +626,7 @@ async def upload_profile(
 
 @app.get("/api/health")
 async def health_check():
-    active = sum(1 for j in jobs.values() if j["status"] == "slicing")
+    active = sum(1 for j in list(jobs.values()) if j["status"] == "slicing")
     return {
         "status": "healthy",
         "orcaslicer_installed": os.path.exists("/usr/local/bin/orcaslicer"),
