@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from typing import Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from app.profile_catalog import ProfileCatalog
 from app.project_config_builder import build_project_settings, embed_project_settings
@@ -25,8 +25,10 @@ DATA_DIR = "/data"
 JOBS_DIR = "/tmp/jobs"
 ARRANGE_DIR = "/tmp/arrange"
 
-JOB_TTL = 3600             # Fix R6: seconds after creation before a completed job is evicted
-JOB_SWEEP_INTERVAL = 300   # how often the eviction sweep runs
+JOB_TTL = int(os.environ.get("JOB_TTL_SECONDS", "3600"))
+JOB_SWEEP_INTERVAL = int(os.environ.get("JOB_SWEEP_INTERVAL_SECONDS", "300"))
+MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "4"))
+THUMBNAIL_TIMEOUT = 120
 
 SYSTEM_PROFILES_DIR = os.environ.get("SYSTEM_PROFILES_DIR", "/opt/orcaslicer/resources/profiles")
 SLICE_TIMEOUT = int(os.environ.get("SLICE_TIMEOUT_SECONDS", "600"))
@@ -94,9 +96,25 @@ async def _build_catalog():
 
 app = FastAPI(
     title="OrcaSlicer CLI Container API",
-    description="A lightweight API and Web UI to slice 3D models using OrcaSlicer CLI headlessly.",
+    description=(
+        "Headless 3D model slicing via OrcaSlicer CLI running inside a Docker container.\n\n"
+        "**Agent workflow:**\n"
+        "1. `GET /api/health` — wait until `catalog_loaded: true`\n"
+        "2. `GET /api/profiles` — discover machine/process/filament UUIDs\n"
+        "3. `POST /api/slice/start` — upload model + UUIDs, receive `job_id`\n"
+        "4. `GET /api/slice/status/{job_id}` — poll until `completed` or `failed`\n"
+        "5. `GET /api/slice/download/{job_id}` — retrieve GCode (evicts job)\n\n"
+        "Alternatively, use `POST /api/slice/prepared` when the 3MF already embeds "
+        "print settings."
+    ),
     version="1.0.0",
     lifespan=lifespan,
+    openapi_tags=[
+        {"name": "health", "description": "Service readiness and version information"},
+        {"name": "profiles", "description": "Machine, process, and filament preset catalog"},
+        {"name": "slice", "description": "Slice job lifecycle: start → poll → download"},
+        {"name": "arrange", "description": "Synchronous plate arrangement (no job lifecycle)"},
+    ],
 )
 
 app.add_middleware(
@@ -246,7 +264,19 @@ async def get_dashboard():
     return HTMLResponse(content=html_content)
 
 
-@app.get("/api/profiles")
+@app.get(
+    "/api/profiles",
+    tags=["profiles"],
+    summary="List profiles in the catalog",
+    description=(
+        "Returns all machine, process, and filament presets.\n\n"
+        "**Filtering:** supply all three of `manufacturer`, `model`, and `nozzle` together "
+        "to receive only the matching machine plus compatible process/filament presets.\n\n"
+        "**Refresh:** pass `refresh=true` to trigger a background catalog rebuild. "
+        "The response reflects the *current* catalog; call again after ~5 s for new profiles.\n\n"
+        "Returns **503** while the catalog is initialising — retry shortly."
+    ),
+)
 async def get_profiles(
     manufacturer: Optional[str] = None,
     model: Optional[str] = None,
@@ -269,7 +299,17 @@ async def get_profiles(
     return catalog.as_dict(manufacturer=manufacturer, model=model, nozzle=nozzle)
 
 
-@app.get("/api/profiles/{profile_uuid}")
+@app.get(
+    "/api/profiles/{profile_uuid}",
+    tags=["profiles"],
+    summary="Get full detail for one profile",
+    description=(
+        "Returns the complete public fields for a single profile entry identified by its "
+        "stable UUID. Useful for inspecting `compatible_printers`, `layer_height`, filament "
+        "temperatures, and similar fields before building a slice job.\n\n"
+        "Returns **503** while the catalog is initialising."
+    ),
+)
 async def get_profile_detail(profile_uuid: str):
     if catalog is None:
         return JSONResponse(
@@ -382,7 +422,24 @@ async def run_orcaslicer_task(
         job_logger.log("__FAILED__: OrcaSlicer returned non-zero")
 
 
-@app.post("/api/slice/start")
+@app.post(
+    "/api/slice/start",
+    tags=["slice"],
+    summary="Start a slice job (UUID-based profile resolution)",
+    description=(
+        "Upload a 3MF or STL and specify print settings by UUID. "
+        "The API resolves profiles, builds `project_settings.config`, embeds it into the 3MF, "
+        "then launches OrcaSlicer in the background.\n\n"
+        "- `filament_uuids` must be a JSON-encoded array string, e.g. `'[\"uuid1\"]'`\n"
+        "- `plate` is 1-based (use `1` for single-plate models)\n"
+        "- STL files are automatically converted to 3MF before slicing\n"
+        "- When `geometry_only_retry=true` (default), the API retries with "
+        "`model_settings.config` stripped if the first attempt fails\n\n"
+        "Returns **503** when the profile catalog is not yet ready.\n\n"
+        "After this call, poll `GET /api/slice/status/{job_id}` until `status` is "
+        "`completed` or `failed`, then download via `GET /api/slice/download/{job_id}`."
+    ),
+)
 async def start_slice(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -397,6 +454,10 @@ async def start_slice(
 ):
     if catalog is None:
         raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
+
+    active_count = sum(1 for j in jobs.values() if j["status"] == "slicing")
+    if active_count >= MAX_CONCURRENT_JOBS:
+        raise HTTPException(status_code=503, detail=f"Too many active jobs ({active_count}/{MAX_CONCURRENT_JOBS}). Retry later.")
 
     try:
         fil_uuid_list: list[str] = json.loads(filament_uuids)
@@ -481,7 +542,19 @@ async def start_slice(
     return {"job_id": job_id, "status": "pending", "message": "Slicing job started."}
 
 
-@app.post("/api/slice/prepared")
+@app.post(
+    "/api/slice/prepared",
+    tags=["slice"],
+    summary="Slice a pre-configured 3MF (no profile resolution)",
+    description=(
+        "Accepts a `.3mf` that already contains `Metadata/project_settings.config` "
+        "(e.g., exported from OrcaSlicer or produced by `POST /api/slice/start`). "
+        "No catalog lookup is performed.\n\n"
+        "Use this when supplying a fully-configured multi-plate 3MF. "
+        "The `model_settings.config` inside the 3MF controls plate assignments.\n\n"
+        "Geometry-only retry works the same as in `POST /api/slice/start`."
+    ),
+)
 async def slice_prepared(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -491,6 +564,11 @@ async def slice_prepared(
 ):
     if plate < 1:
         raise HTTPException(status_code=422, detail="plate must be >= 1.")
+
+    active_count = sum(1 for j in jobs.values() if j["status"] == "slicing")
+    if active_count >= MAX_CONCURRENT_JOBS:
+        raise HTTPException(status_code=503, detail=f"Too many active jobs ({active_count}/{MAX_CONCURRENT_JOBS}). Retry later.")
+
     try:
         safe_name = _safe_filename(file.filename)
     except ValueError as e:
@@ -524,7 +602,108 @@ async def slice_prepared(
     return {"job_id": job_id, "status": "pending", "message": "Slice job started."}
 
 
-@app.get("/api/slice/status/{job_id}")
+@app.post(
+    "/api/slice/thumbnail",
+    tags=["slice"],
+    summary="Render a plate thumbnail (synchronous)",
+    description=(
+        "Runs OrcaSlicer with `--arrange 0` to extract a plate thumbnail PNG without "
+        "disturbing geometry. Returns the PNG bytes directly.\n\n"
+        "Synchronous — blocks up to 120 seconds. No job tracking.\n\n"
+        "Returns **422** on OrcaSlicer failure, timeout, or missing PNG output."
+    ),
+)
+async def slice_thumbnail(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    plate: int = Form(...),
+):
+    if plate < 1:
+        raise HTTPException(status_code=422, detail={"error": "plate must be >= 1."})
+    try:
+        safe_name = _safe_filename(file.filename)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"error": str(e)})
+    if not safe_name.lower().endswith(".3mf"):
+        raise HTTPException(status_code=422, detail={"error": "Only .3mf files accepted."})
+
+    job_id = str(uuid.uuid4())
+    job_dir = os.path.join(ARRANGE_DIR, f"thumb_{job_id}")
+    input_dir = os.path.join(job_dir, "input")
+    output_dir = os.path.join(job_dir, "output")
+    os.makedirs(input_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
+
+    in_file = os.path.join(input_dir, safe_name)
+    out_3mf = os.path.join(output_dir, "thumb.3mf")
+
+    with open(in_file, "wb") as buf:
+        await asyncio.to_thread(shutil.copyfileobj, file.file, buf)
+
+    cmd = [
+        "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
+        "orcaslicer", "--slice", str(plate), "--arrange", "0",
+        "--export-3mf", out_3mf, in_file,
+    ]
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=THUMBNAIL_TIMEOUT)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            background_tasks.add_task(cleanup_directory, job_dir)
+            raise HTTPException(status_code=422, detail={"error": f"Timed out after {THUMBNAIL_TIMEOUT}s"})
+
+        if process.returncode != 0 or not os.path.exists(out_3mf):
+            log_text = stdout.decode("utf-8", errors="replace") if stdout else ""
+            logger.error("Thumbnail failed. Exit %s. Log: %s", process.returncode, log_text)
+            background_tasks.add_task(cleanup_directory, job_dir)
+            raise HTTPException(status_code=422, detail={"error": f"OrcaSlicer exited {process.returncode}"})
+
+        def _extract_png(archive: str, plate_idx: int) -> Optional[bytes]:
+            import zipfile as _zf
+            with _zf.ZipFile(archive, "r") as zf:
+                names = zf.namelist()
+                for candidate in (f"Metadata/plate_{plate_idx}.png", "Metadata/plate_1.png"):
+                    if candidate in names:
+                        return zf.read(candidate)
+            return None
+
+        png_bytes = await asyncio.to_thread(_extract_png, out_3mf, plate)
+        background_tasks.add_task(cleanup_directory, job_dir)
+
+        if png_bytes is None:
+            raise HTTPException(status_code=422, detail={"error": "No plate PNG found in OrcaSlicer output"})
+
+        return Response(content=png_bytes, media_type="image/png")
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        background_tasks.add_task(cleanup_directory, job_dir)
+        logger.exception("Thumbnail error")
+        raise HTTPException(status_code=422, detail={"error": str(exc)})
+
+
+@app.get(
+    "/api/slice/status/{job_id}",
+    tags=["slice"],
+    summary="Poll slice job status",
+    description=(
+        "Returns current job status. Poll every 2–5 seconds until `status` is "
+        "`completed` or `failed`.\n\n"
+        "`output_format` is `gcode` by default; `gcode_3mf` when `export_3mf` was set "
+        "(download returns the `.3mf`).\n\n"
+        "Jobs are evicted after download or after 1 hour. A 404 on a previously valid "
+        "`job_id` means the job has already been cleaned up."
+    ),
+)
 async def get_job_status(job_id: str):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -538,7 +717,20 @@ async def get_job_status(job_id: str):
     }
 
 
-@app.get("/api/slice/logs/{job_id}")
+@app.get(
+    "/api/slice/logs/{job_id}",
+    tags=["slice"],
+    summary="Stream slice job logs (Server-Sent Events)",
+    description=(
+        "Returns a Server-Sent Events stream of OrcaSlicer stdout lines.\n\n"
+        "Each event: `data: <log line>\\r\\n\\r\\n`\n\n"
+        "Terminal events:\n"
+        "- `data: __COMPLETED__` — job finished successfully; stream ends\n"
+        "- `data: __FAILED__: <reason>` — job failed; stream ends\n\n"
+        "Most agents can skip this and poll `GET /api/slice/status` instead."
+    ),
+    response_class=StreamingResponse,
+)
 async def get_job_logs(job_id: str):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -546,7 +738,18 @@ async def get_job_logs(job_id: str):
     return StreamingResponse(job["logger"].get_stream(), media_type="text/event-stream")
 
 
-@app.get("/api/slice/download/{job_id}")
+@app.get(
+    "/api/slice/download/{job_id}",
+    tags=["slice"],
+    summary="Download sliced output file",
+    description=(
+        "Returns the sliced output as `application/octet-stream`. Call only when "
+        "`status` is `completed`.\n\n"
+        "**Warning:** downloading evicts the job immediately — there is no second download.\n\n"
+        "The filename extension indicates format: `.gcode` (default) or `.3mf` "
+        "(when `export_3mf` was set during job creation)."
+    ),
+)
 async def download_sliced_file(job_id: str, background_tasks: BackgroundTasks):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -582,7 +785,17 @@ def cleanup_file(path: str):
         pass
 
 
-@app.post("/api/arrange")
+@app.post(
+    "/api/arrange",
+    tags=["arrange"],
+    summary="Auto-arrange and orient objects in a 3MF (synchronous)",
+    description=(
+        "Runs OrcaSlicer's plate-packing and auto-orientation on a `.3mf` and streams "
+        "the rearranged `.3mf` back directly. **Blocks for up to 35 seconds** — "
+        "no job lifecycle, no polling needed.\n\n"
+        "Use this to pack multiple models onto a build plate before slicing."
+    ),
+)
 async def auto_arrange_3mf(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -673,7 +886,20 @@ async def auto_arrange_3mf(
         raise HTTPException(status_code=500, detail=f"System error during arrangement: {str(e)}")
 
 
-@app.post("/api/profiles/upload")
+@app.post(
+    "/api/profiles/upload",
+    tags=["profiles"],
+    summary="Upload a user profile JSON",
+    description=(
+        "Upload a flat OrcaSlicer preset JSON into the user config volume. "
+        "The file is placed under `/config/user/default/{type}/` and a catalog rebuild is "
+        "triggered in the background.\n\n"
+        "The file must have a `.json` extension and must be a fully-flattened preset "
+        "(no `inherits` chain). Use `flatten_profiles.py` inside the container to flatten "
+        "a system profile.\n\n"
+        "After uploading, wait ~5 s and call `GET /api/profiles` to confirm the profile appears."
+    ),
+)
 async def upload_profile(
     type: str = Form(...),
     file: UploadFile = File(...),
@@ -704,7 +930,16 @@ async def upload_profile(
     }
 
 
-@app.get("/api/health")
+@app.get(
+    "/api/health",
+    tags=["health"],
+    summary="Service health check",
+    description=(
+        "Returns service readiness information. Check `catalog_loaded` before calling "
+        "profile or slice endpoints — while the catalog is building (right after container "
+        "start), `catalog_loaded` is `false` and those endpoints return 503."
+    ),
+)
 async def health_check():
     active = sum(1 for j in list(jobs.values()) if j["status"] == "slicing")
     return {
@@ -716,4 +951,5 @@ async def health_check():
         "catalog_loaded": catalog is not None and catalog.is_built,
         "catalog_profile_count": catalog.counts if (catalog and catalog.is_built) else None,
         "active_jobs": active,
+        "thumbnail_endpoint": True,
     }
