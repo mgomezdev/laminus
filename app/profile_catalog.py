@@ -130,8 +130,13 @@ class ProfileCatalog:
             if not os.path.isdir(root):
                 continue
             for dirpath, _dirs, files in os.walk(root):
-                ptype = os.path.basename(dirpath)
-                if ptype not in SYSTEM_PROFILE_TYPES:
+                # OrcaSlicer vendors nest machine/process/filament profiles in
+                # subdirectories (e.g. Elegoo/machine/ECC/).  Find the nearest
+                # ancestor whose name matches a profile type rather than only
+                # looking at the immediate parent directory.
+                path_parts = os.path.relpath(dirpath, root).replace("\\", "/").split("/")
+                ptype = next((p for p in path_parts if p in SYSTEM_PROFILE_TYPES), None)
+                if ptype is None:
                     continue
                 for filename in files:
                     if not filename.endswith(".json") or filename.startswith("."):

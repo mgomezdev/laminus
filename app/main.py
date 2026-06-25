@@ -299,6 +299,53 @@ async def get_profiles(
     return catalog.as_dict(manufacturer=manufacturer, model=model, nozzle=nozzle)
 
 
+class MergedConfigRequest(BaseModel):
+    machine_uuid: str
+    process_uuid: str
+    filament_uuids: list[str]
+
+
+@app.post(
+    "/api/profiles/merged-config",
+    tags=["profiles"],
+    summary="Return merged project config for a set of profile UUIDs",
+    description=(
+        "Resolves inheritance chains for the given machine, process, and filament UUIDs "
+        "and returns the merged `project_settings.config` dict identical to what would be "
+        "embedded in a 3MF before slicing. Use this to inspect resolved settings without "
+        "triggering a slice.\n\n"
+        "Returns **503** while the catalog is initialising."
+    ),
+)
+async def get_merged_config(body: MergedConfigRequest):
+    if catalog is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "building_catalog", "detail": "Catalog not ready. Retry shortly."},
+        )
+    machine_entry = catalog.get_by_uuid(body.machine_uuid)
+    if machine_entry is None or machine_entry.get("type") != "machine":
+        raise HTTPException(status_code=422, detail=f"Machine UUID '{body.machine_uuid}' not found.")
+    process_entry = catalog.get_by_uuid(body.process_uuid)
+    if process_entry is None or process_entry.get("type") != "process":
+        raise HTTPException(status_code=422, detail=f"Process UUID '{body.process_uuid}' not found.")
+    if not body.filament_uuids:
+        raise HTTPException(status_code=422, detail="filament_uuids must be a non-empty list.")
+    filament_entries = []
+    for fuid in body.filament_uuids:
+        fe = catalog.get_by_uuid(fuid)
+        if fe is None or fe.get("type") != "filament":
+            raise HTTPException(status_code=422, detail=f"Filament UUID '{fuid}' not found.")
+        filament_entries.append(fe)
+    machine_resolved = machine_entry.get("_resolved", machine_entry)
+    process_resolved = process_entry.get("_resolved", process_entry)
+    filament_resolved_list = [fe.get("_resolved", fe) for fe in filament_entries]
+    config = await asyncio.to_thread(
+        build_project_settings, machine_resolved, process_resolved, filament_resolved_list
+    )
+    return JSONResponse(content=config)
+
+
 @app.get(
     "/api/profiles/{profile_uuid}",
     tags=["profiles"],
@@ -443,14 +490,16 @@ async def run_orcaslicer_task(
 async def start_slice(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    manufacturer: str = Form(...),
-    model: str = Form(...),
-    nozzle: str = Form(...),
+    machine_uuid: Optional[str] = Form(None),
+    manufacturer: Optional[str] = Form(None),
+    model: Optional[str] = Form(None),
+    nozzle: Optional[str] = Form(None),
     process_uuid: str = Form(...),
     filament_uuids: str = Form(..., description='JSON array, e.g. ["uuid1"]'),
     plate: int = Form(...),
     export_3mf: Optional[str] = Form(None),
     geometry_only_retry: bool = Form(True),
+    extra_config: Optional[str] = Form(None, description='JSON object merged into project settings after resolution'),
 ):
     if catalog is None:
         raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
@@ -469,11 +518,22 @@ async def start_slice(
     if plate < 1:
         raise HTTPException(status_code=422, detail="plate must be >= 1.")
 
-    machine_entry = catalog.get_machine(manufacturer, model, nozzle)
-    if machine_entry is None:
+    # Machine lookup: prefer stable UUID, fall back to (manufacturer, model, nozzle) tuple.
+    if machine_uuid:
+        machine_entry = catalog.get_by_uuid(machine_uuid)
+        if machine_entry is None or machine_entry.get("type") != "machine":
+            raise HTTPException(status_code=422, detail=f"Machine UUID '{machine_uuid}' not found in catalog.")
+    elif all(x is not None for x in (manufacturer, model, nozzle)):
+        machine_entry = catalog.get_machine(manufacturer, model, nozzle)
+        if machine_entry is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"No machine profile found for manufacturer='{manufacturer}' model='{model}' nozzle='{nozzle}'.",
+            )
+    else:
         raise HTTPException(
             status_code=422,
-            detail=f"No machine profile found for manufacturer='{manufacturer}' model='{model}' nozzle='{nozzle}'.",
+            detail="Provide machine_uuid OR all three of manufacturer, model, and nozzle.",
         )
 
     process_entry = catalog.get_by_uuid(process_uuid)
@@ -524,6 +584,14 @@ async def start_slice(
     project_cfg = await asyncio.to_thread(
         build_project_settings, machine_resolved, process_resolved, filament_resolved_list
     )
+    if extra_config:
+        try:
+            overrides = json.loads(extra_config)
+            if not isinstance(overrides, dict):
+                raise ValueError
+            project_cfg.update(overrides)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=422, detail="extra_config must be a JSON object.")
     prepared_3mf = os.path.join(input_dir, "prepared.3mf")
     await asyncio.to_thread(embed_project_settings, base_3mf, project_cfg, prepared_3mf)
 
@@ -783,6 +851,229 @@ def cleanup_file(path: str):
         os.remove(path)
     except OSError:
         pass
+
+
+@app.post(
+    "/api/pack",
+    tags=["arrange"],
+    summary="Pack N STLs onto as many beds as needed (synchronous)",
+    description=(
+        "Accepts between 1 and 50 `.stl` files plus explicit bed dimensions (mm). "
+        "Combines all meshes into a single 3MF with the bed dimensions embedded, "
+        "then runs OrcaSlicer `--arrange 1 --orient 1` to distribute them across "
+        "as many plates as required.\n\n"
+        "Returns the resulting multi-plate `.3mf` as `application/octet-stream`. "
+        "**Blocks for up to 120 seconds** — no job lifecycle, no polling.\n\n"
+        "Returns **400** if OrcaSlicer fails or produces no output. "
+        "Returns **408** on timeout."
+    ),
+)
+async def pack_stls(
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    bed_x: float = Form(...),
+    bed_y: float = Form(...),
+):
+    if not files:
+        raise HTTPException(status_code=422, detail="At least one STL file is required.")
+    if len(files) > 50:
+        raise HTTPException(status_code=422, detail="Maximum 50 STL files per request.")
+    if bed_x <= 0 or bed_y <= 0:
+        raise HTTPException(status_code=422, detail="bed_x and bed_y must be positive.")
+
+    # Validate filenames
+    safe_names: list[str] = []
+    for f in files:
+        try:
+            name = _safe_filename(f.filename)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if not name.lower().endswith(".stl"):
+            raise HTTPException(status_code=422, detail=f"Only .stl files accepted; got: {name}")
+        safe_names.append(name)
+
+    job_id = str(uuid.uuid4())
+    job_dir = os.path.join(ARRANGE_DIR, f"pack_{job_id}")
+    input_dir = os.path.join(job_dir, "input")
+    output_dir = os.path.join(job_dir, "output")
+    os.makedirs(input_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Write uploaded STLs to disk
+    stl_paths: list[str] = []
+    for f, name in zip(files, safe_names):
+        dest = os.path.join(input_dir, name)
+        with open(dest, "wb") as buf:
+            await asyncio.to_thread(shutil.copyfileobj, f.file, buf)
+        stl_paths.append(dest)
+
+    # Build a combined 3MF with all meshes + bed dimensions embedded
+    combined_3mf = os.path.join(input_dir, "combined.3mf")
+    try:
+        await asyncio.to_thread(_build_pack_3mf, stl_paths, bed_x, bed_y, combined_3mf)
+    except Exception as e:
+        background_tasks.add_task(cleanup_directory, job_dir)
+        raise HTTPException(status_code=400, detail=f"Failed to build combined 3MF: {e}")
+
+    out_file = os.path.join(output_dir, "packed.3mf")
+    cmd = [
+        "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
+        "orcaslicer",
+        "--datadir", CONFIG_DIR,
+        "--arrange", "1",
+        "--orient", "1",
+        "--export-3mf", out_file,
+        combined_3mf,
+    ]
+    logger.info("Running pack command: %s", " ".join(cmd))
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=120.0)
+        exit_code = process.returncode
+
+        if exit_code != 0 or not os.path.exists(out_file):
+            logger.error(
+                "Pack failed. Exit %d. Log:\n%s",
+                exit_code,
+                stdout.decode("utf-8", errors="replace") if stdout else "(no output)",
+            )
+            background_tasks.add_task(cleanup_directory, job_dir)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Slicer pack failed (exit {exit_code}). Check server logs.",
+            )
+
+        stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_packed.3mf")
+        shutil.copy2(out_file, stable_out)
+        background_tasks.add_task(cleanup_directory, job_dir)
+        background_tasks.add_task(cleanup_file, stable_out)
+        return FileResponse(
+            path=stable_out,
+            filename="packed.3mf",
+            media_type="application/octet-stream",
+        )
+
+    except asyncio.TimeoutError:
+        background_tasks.add_task(cleanup_directory, job_dir)
+        raise HTTPException(status_code=408, detail="Pack operation timed out after 120 seconds.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        background_tasks.add_task(cleanup_directory, job_dir)
+        logger.exception("System error during pack operation")
+        raise HTTPException(status_code=500, detail=f"System error: {e}")
+
+
+def _build_pack_3mf(stl_paths: list[str], bed_x: float, bed_y: float, out_path: str) -> None:
+    """Build a single 3MF containing all STL meshes and bed dimensions in project_settings."""
+    import struct
+    import zipfile as _zf
+
+    def _is_binary(path: str) -> bool:
+        with open(path, "rb") as f:
+            header = f.read(80)
+            if not header.startswith(b"solid"):
+                return True
+            count_bytes = f.read(4)
+            if len(count_bytes) < 4:
+                return False
+            count = struct.unpack("<I", count_bytes)[0]
+        return os.path.getsize(path) == 80 + 4 + count * 50
+
+    def _parse_binary(path: str) -> list:
+        tris = []
+        with open(path, "rb") as f:
+            f.read(80)
+            count = struct.unpack("<I", f.read(4))[0]
+            for _ in range(count):
+                f.read(12)
+                verts = [struct.unpack("<fff", f.read(12)) for _ in range(3)]
+                f.read(2)
+                tris.append(tuple(verts))
+        return tris
+
+    def _parse_ascii(path: str) -> list:
+        tris, verts = [], []
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("vertex"):
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        verts.append((float(parts[1]), float(parts[2]), float(parts[3])))
+                        if len(verts) == 3:
+                            tris.append(tuple(verts))
+                            verts = []
+        return tris
+
+    def _object_xml(obj_id: int, tris: list) -> str:
+        vlines, tlines = [], []
+        idx = 0
+        for tri in tris:
+            for x, y, z in tri:
+                vlines.append(f'          <vertex x="{x}" y="{y}" z="{z}"/>')
+            tlines.append(f'          <triangle v1="{idx}" v2="{idx+1}" v3="{idx+2}"/>')
+            idx += 3
+        vblock = "\n".join(vlines)
+        tblock = "\n".join(tlines)
+        return (
+            f'  <object id="{obj_id}" type="model"><mesh>\n'
+            f'    <vertices>\n{vblock}\n    </vertices>\n'
+            f'    <triangles>\n{tblock}\n    </triangles>\n'
+            f'  </mesh></object>\n'
+        )
+
+    objects_xml = ""
+    build_items = ""
+    for i, stl_path in enumerate(stl_paths, start=1):
+        tris = _parse_binary(stl_path) if _is_binary(stl_path) else _parse_ascii(stl_path)
+        objects_xml += _object_xml(i, tris)
+        build_items += f'  <item objectid="{i}"/>\n'
+
+    model_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<model unit="millimeter" xml:lang="en-US"'
+        ' xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n'
+        f'<resources>\n{objects_xml}</resources>\n'
+        f'<build>\n{build_items}</build>\n'
+        '</model>'
+    )
+
+    import json as _json
+    project_settings = _json.dumps({
+        "printable_area": [
+            "0x0", f"{bed_x}x0", f"{bed_x}x{bed_y}", f"0x{bed_y}",
+        ],
+        "printable_height": "300",
+        "from": "user",
+    }, indent=2)
+
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>'
+        '<Default Extension="config" ContentType="application/octet-stream"/>'
+        '</Types>'
+    )
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Target="/3D/3dmodel.model" Id="rel0"'
+        ' Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>'
+        '</Relationships>'
+    )
+
+    with _zf.ZipFile(out_path, "w", compression=_zf.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", content_types)
+        zf.writestr("_rels/.rels", rels)
+        zf.writestr("3D/3dmodel.model", model_xml.encode("utf-8"))
+        zf.writestr("Metadata/project_settings.config", project_settings.encode("utf-8"))
 
 
 @app.post(
