@@ -32,6 +32,7 @@ THUMBNAIL_TIMEOUT = 120
 
 SYSTEM_PROFILES_DIR = os.environ.get("SYSTEM_PROFILES_DIR", "/opt/orcaslicer/resources/profiles")
 SLICE_TIMEOUT = int(os.environ.get("SLICE_TIMEOUT_SECONDS", "600"))
+ARRANGE_TIMEOUT = int(os.environ.get("ARRANGE_TIMEOUT_SECONDS", "120"))
 
 catalog: Optional[ProfileCatalog] = None
 _catalog_building: bool = False
@@ -1082,9 +1083,10 @@ def _build_pack_3mf(stl_paths: list[str], bed_x: float, bed_y: float, out_path: 
     summary="Auto-arrange and orient objects in a 3MF (synchronous)",
     description=(
         "Runs OrcaSlicer's plate-packing and auto-orientation on a `.3mf` and streams "
-        "the rearranged `.3mf` back directly. **Blocks for up to 35 seconds** — "
-        "no job lifecycle, no polling needed.\n\n"
-        "Use this to pack multiple models onto a build plate before slicing."
+        "the rearranged `.3mf` back directly. **Blocks for up to `ARRANGE_TIMEOUT_SECONDS` seconds** "
+        "(default 120) — no job lifecycle, no polling needed.\n\n"
+        "Use this to pack multiple models onto build plates before slicing. "
+        "Preserves `Metadata/model_settings.config` (extruder/slot assignments) from the input 3MF."
     ),
 )
 async def auto_arrange_3mf(
@@ -1139,7 +1141,7 @@ async def auto_arrange_3mf(
             stderr=asyncio.subprocess.STDOUT,
         )
 
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=35.0)
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=float(ARRANGE_TIMEOUT))
         exit_code = process.returncode
 
         if exit_code != 0 or not os.path.exists(out_file):
@@ -1168,7 +1170,7 @@ async def auto_arrange_3mf(
 
     except asyncio.TimeoutError:
         background_tasks.add_task(cleanup_directory, job_dir)
-        raise HTTPException(status_code=408, detail="Slicer arrange execution timed out after 35 seconds.")
+        raise HTTPException(status_code=408, detail=f"Slicer arrange execution timed out after {ARRANGE_TIMEOUT} seconds.")
     except HTTPException:
         raise
     except Exception as e:
