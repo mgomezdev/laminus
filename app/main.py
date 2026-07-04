@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("orcaslicer-api")
 
 CONFIG_DIR = "/config"
-USER_CONFIG_DIR = os.path.join(CONFIG_DIR, "user")
+USER_CONFIG_DIR = os.environ.get("USER_CONFIG_DIR", os.path.join(CONFIG_DIR, "user"))
 DATA_DIR = "/data"
 JOBS_DIR = "/tmp/jobs"
 ARRANGE_DIR = "/tmp/arrange"
@@ -174,13 +174,19 @@ def init_config_directories():
         os.path.join(USER_CONFIG_DIR, "default", "filament"),
     ]
     for d in default_dirs:
-        os.makedirs(d, exist_ok=True)
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            continue  # read-only bind mount — directories already exist
         readme_path = os.path.join(d, "README.txt")
         if not os.path.exists(readme_path):
             folder_type = os.path.basename(d)
-            with open(readme_path, "w") as f:
-                f.write(f"Drop your OrcaSlicer {folder_type} JSON profiles in this directory.\n")
-                f.write("They will automatically appear in the Web UI / API list of profiles.\n")
+            try:
+                with open(readme_path, "w") as f:
+                    f.write(f"Drop your OrcaSlicer {folder_type} JSON profiles in this directory.\n")
+                    f.write("They will automatically appear in the Web UI / API list of profiles.\n")
+            except OSError:
+                pass  # read-only bind mount
 
 
 jobs: Dict[str, dict] = {}
