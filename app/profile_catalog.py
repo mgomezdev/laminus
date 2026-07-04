@@ -22,6 +22,21 @@ def _find_file_by_name(name: str, search_roots: list[str]) -> Optional[str]:
     return None
 
 
+def _build_name_index(roots: list[str]) -> dict[str, str]:
+    """Single-pass index of all JSON profile names → absolute paths (first root wins)."""
+    index: dict[str, str] = {}
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirs, files in os.walk(root):
+            for filename in files:
+                if filename.endswith(".json") and not filename.startswith("."):
+                    stem = os.path.splitext(filename)[0]
+                    if stem not in index:
+                        index[stem] = os.path.join(dirpath, filename)
+    return index
+
+
 def make_profile_uuid(source: str, rel_path: str) -> str:
     """Stable UUID for process/filament profiles derived from source and path."""
     return str(uuid.uuid5(_CATALOG_NS, f"{source}\x00{rel_path}"))
@@ -36,11 +51,16 @@ _MACHINE_NAME_RE = re.compile(
     r"^(?P<mfr>\S.*?)\s+(?P<model>\S+(?:\s+\S+)*?)\s+(?P<nozzle>\d+\.\d+)\s+nozzle\s*$",
     re.IGNORECASE,
 )
+# Snapmaker uses "Brand Model (X.Y nozzle)" with parentheses
+_MACHINE_NAME_PAREN_RE = re.compile(
+    r"^(?P<mfr>\S.*?)\s+(?P<model>\S+(?:\s+\S+)*?)\s+\((?P<nozzle>\d+\.\d+)\s+nozzle\)\s*$",
+    re.IGNORECASE,
+)
 
 
 def parse_machine_name(name: str) -> Optional[Tuple[str, str, str]]:
-    """Parse 'Manufacturer Model X.Y nozzle' into (manufacturer, model, nozzle) or None."""
-    m = _MACHINE_NAME_RE.match(name.strip())
+    """Parse 'Manufacturer Model X.Y nozzle' (or parenthesised variant) into (manufacturer, model, nozzle) or None."""
+    m = _MACHINE_NAME_RE.match(name.strip()) or _MACHINE_NAME_PAREN_RE.match(name.strip())
     if not m:
         return None
     full_prefix = f"{m.group('mfr')} {m.group('model')}"
@@ -70,11 +90,15 @@ def resolve_inheritance(
     filepath: str,
     search_roots: list[str],
     _visited: Optional[set[str]] = None,
+    _name_index: Optional[dict[str, str]] = None,
+    _resolved_cache: Optional[dict[str, dict]] = None,
 ) -> dict:
     """Return fully merged (flattened) profile dict. Child values override parent."""
     if _visited is None:
         _visited = set()
     real = os.path.realpath(filepath)
+    if _resolved_cache is not None and real in _resolved_cache:
+        return _resolved_cache[real]
     if real in _visited:
         raise ValueError(f"Circular inheritance detected at '{filepath}'")
     _visited.add(real)
@@ -84,18 +108,26 @@ def resolve_inheritance(
 
     parent_name: Optional[str] = data.get("inherits")
     if parent_name:
-        parent_path = _find_file_by_name(parent_name, search_roots)
+        parent_path = (
+            _name_index.get(parent_name) if _name_index is not None
+            else _find_file_by_name(parent_name, search_roots)
+        )
         if parent_path:
-            parent_data = resolve_inheritance(parent_path, search_roots, set(_visited))
+            parent_data = resolve_inheritance(
+                parent_path, search_roots, set(_visited), _name_index, _resolved_cache,
+            )
             merged = {**parent_data, **data}
         else:
             logger.warning("Parent profile '%s' not found - skipping", parent_name)
             merged = dict(data)
         merged.pop("inherits", None)
-        return merged
+        result = merged
+    else:
+        result = dict(data)
+        result.pop("inherits", None)
 
-    result = dict(data)
-    result.pop("inherits", None)
+    if _resolved_cache is not None:
+        _resolved_cache[real] = result
     return result
 
 
@@ -119,11 +151,18 @@ class ProfileCatalog:
         self._by_uuid: dict[str, dict] = {}
         self._catalog: dict[str, list[dict]] = {"machine": [], "process": [], "filament": []}
         self._built = False
+        self._dict_cache: dict | None = None
 
     def build(self) -> None:
         catalog: dict[str, list[dict]] = {"machine": [], "process": [], "filament": []}
         by_uuid: dict[str, dict] = {}
         search_roots = [self._system_dir, self._user_dir]
+
+        # Pre-build name→path index and resolved-profile cache so parent lookups
+        # are O(1) and shared base profiles are loaded only once (critical for
+        # large profile directories mounted via Docker volume on Windows/WSL2).
+        name_index = _build_name_index(search_roots)
+        resolved_cache: dict[str, dict] = {}
 
         for source, root in [("system", self._system_dir), ("user", self._user_dir)]:
             # system first, user second — user entries overwrite system entries by UUID
@@ -144,7 +183,10 @@ class ProfileCatalog:
                     filepath = os.path.join(dirpath, filename)
                     rel_path = os.path.relpath(filepath, root).replace("\\", "/")
                     try:
-                        resolved = resolve_inheritance(filepath, search_roots)
+                        resolved = resolve_inheritance(
+                            filepath, search_roots,
+                            _name_index=name_index, _resolved_cache=resolved_cache,
+                        )
                     except Exception as exc:
                         logger.warning("Skipping '%s': %s", filepath, exc)
                         continue
@@ -154,6 +196,7 @@ class ProfileCatalog:
 
         self._catalog = catalog
         self._by_uuid = by_uuid
+        self._dict_cache = None  # invalidate on rebuild
         self._built = True
         logger.info("Catalog built: %s", {k: len(v) for k, v in catalog.items()})
 
@@ -230,7 +273,14 @@ class ProfileCatalog:
         model: Optional[str] = None,
         nozzle: Optional[str] = None,
     ) -> dict:
-        result = {ptype: [self._public(e) for e in entries] for ptype, entries in self._catalog.items()}
+        if manufacturer or model or nozzle:
+            # filtered view — not cached
+            result = {ptype: [self._public(e) for e in entries] for ptype, entries in self._catalog.items()}
+        elif self._dict_cache is not None:
+            return self._dict_cache
+        else:
+            result = {ptype: [self._public(e) for e in entries] for ptype, entries in self._catalog.items()}
+            self._dict_cache = result
         if manufacturer and model and nozzle:
             machine_entry = self.get_machine(manufacturer, model, nozzle)
             machine_name = machine_entry["name"] if machine_entry else None

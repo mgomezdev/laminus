@@ -1242,6 +1242,7 @@ async def health_check():
         "config_mounted": os.path.exists(CONFIG_DIR),
         "system_profiles_available": os.path.isdir(SYSTEM_PROFILES_DIR),
         "catalog_loaded": catalog is not None and catalog.is_built,
+        "catalog_building": _catalog_building,
         "catalog_profile_count": catalog.counts if (catalog and catalog.is_built) else None,
         "active_jobs": active,
         "thumbnail_endpoint": True,
