@@ -1,0 +1,7 @@
+{
+    "type": "filament",
+    "name": "Elegoo PETG @ECC",
+    "inherits": "Elegoo PETG @ECC",
+    "from": "user",
+    "instantiation": "true"
+}

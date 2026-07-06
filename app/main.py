@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSO
 from fastapi.middleware.cors import CORSMiddleware
 from app.profile_catalog import ProfileCatalog
 from app.project_config_builder import build_project_settings, embed_project_settings
-from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf
+from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf, inject_stls_into_3mf as _inject_stls_into_3mf, strip_application_version as _strip_app_version
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("orcaslicer-api")
@@ -38,6 +38,8 @@ catalog: Optional[ProfileCatalog] = None
 _catalog_building: bool = False
 _orcaslicer_version: Optional[str] = None
 _catalog_task: Optional[asyncio.Task] = None
+# Template cache: maps (machine_uuid, process_uuid, filament_uuids_key) → 3MF bytes
+_template_cache: Dict[str, bytes] = {}
 
 
 # Fix R6: lifespan context runs startup/shutdown logic and background eviction task
@@ -83,11 +85,12 @@ def _trigger_catalog_rebuild() -> None:
 
 
 async def _build_catalog():
-    global catalog, _catalog_building
+    global catalog, _catalog_building, _template_cache
     try:
         cat = ProfileCatalog(system_dir=SYSTEM_PROFILES_DIR, user_dir=USER_CONFIG_DIR)
         await asyncio.to_thread(cat.build)
         catalog = cat
+        _template_cache.clear()
         logger.info("Profile catalog ready: %s", cat.counts)
     except Exception:
         logger.exception("Catalog build failed")
@@ -439,6 +442,16 @@ async def run_orcaslicer_task(
             job_logger.log(f"SYSTEM ERROR: {exc}")
             logger.exception("Subprocess error in job %s", job_id)
             return False
+
+    # OrcaSlicer 2.3.2 on Linux segfaults when the 3MF's Application metadata
+    # contains a version string (e.g. "BambuStudio-2.3.2"). Strip it first.
+    if input_file_path.lower().endswith(".3mf"):
+        fixed_path = input_file_path[:-4] + "_fixed.3mf"
+        try:
+            await asyncio.to_thread(_strip_app_version, input_file_path, fixed_path)
+            input_file_path = fixed_path
+        except Exception as exc:
+            job_logger.log(f"WARNING: could not strip Application version: {exc}")
 
     success = await _attempt(input_file_path, "Attempt 1")
 
@@ -865,30 +878,34 @@ def cleanup_file(path: str):
     tags=["arrange"],
     summary="Pack N STLs onto as many beds as needed (synchronous)",
     description=(
-        "Accepts between 1 and 50 `.stl` files plus explicit bed dimensions (mm). "
-        "Combines all meshes into a single 3MF with the bed dimensions embedded, "
-        "then runs OrcaSlicer `--arrange 1 --orient 1` to distribute them across "
-        "as many plates as required.\n\n"
+        "Distributes STL geometry across build plates via OrcaSlicer `--arrange 1 --orient 1`.\n\n"
+        "**Two ways to supply print settings:**\n\n"
+        "1. **Template file** — upload a `.3mf` whose `Metadata/project_settings.config` "
+        "carries the printer/bed configuration (`template` field).\n\n"
+        "2. **Profile UUIDs** — supply `machine_uuid`, `process_uuid`, and `filament_uuids` "
+        "(JSON array string). The container resolves profiles from its catalog and builds the "
+        "settings internally. This mode requires no template management by the caller and "
+        "automatically tracks the installed OrcaSlicer version's profile catalog.\n\n"
         "Returns the resulting multi-plate `.3mf` as `application/octet-stream`. "
-        "**Blocks for up to 120 seconds** — no job lifecycle, no polling.\n\n"
-        "Returns **400** if OrcaSlicer fails or produces no output. "
-        "Returns **408** on timeout."
+        "**Blocks for up to 120 seconds.**\n\n"
+        "Returns **400** if OrcaSlicer fails, **408** on timeout, **503** if the catalog "
+        "is not yet ready (UUID mode only)."
     ),
 )
 async def pack_stls(
     background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
-    bed_x: float = Form(...),
-    bed_y: float = Form(...),
+    template: Optional[UploadFile] = File(None, description=".3mf with Metadata/project_settings.config"),
+    machine_uuid: Optional[str] = Form(None),
+    process_uuid: Optional[str] = Form(None),
+    filament_uuids: Optional[str] = Form(None, description='JSON array, e.g. ["uuid1"]'),
 ):
     if not files:
         raise HTTPException(status_code=422, detail="At least one STL file is required.")
     if len(files) > 50:
         raise HTTPException(status_code=422, detail="Maximum 50 STL files per request.")
-    if bed_x <= 0 or bed_y <= 0:
-        raise HTTPException(status_code=422, detail="bed_x and bed_y must be positive.")
 
-    # Validate filenames
+    # Validate STL filenames
     safe_names: list[str] = []
     for f in files:
         try:
@@ -906,7 +923,106 @@ async def pack_stls(
     os.makedirs(input_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
 
-    # Write uploaded STLs to disk
+    # --- Resolve template ---
+    if template is not None:
+        # Caller-supplied template file
+        try:
+            template_name = _safe_filename(template.filename)
+        except ValueError as e:
+            background_tasks.add_task(cleanup_directory, job_dir)
+            raise HTTPException(status_code=400, detail=str(e))
+        if not template_name.lower().endswith(".3mf"):
+            background_tasks.add_task(cleanup_directory, job_dir)
+            raise HTTPException(status_code=422, detail="template must be a .3mf file.")
+        template_path = os.path.join(input_dir, template_name)
+        with open(template_path, "wb") as buf:
+            await asyncio.to_thread(shutil.copyfileobj, template.file, buf)
+
+    elif machine_uuid and process_uuid and filament_uuids:
+        # UUID-based: resolve profiles from catalog and build template (cached)
+        if catalog is None:
+            background_tasks.add_task(cleanup_directory, job_dir)
+            raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
+        try:
+            fil_uuid_list: list[str] = json.loads(filament_uuids)
+            if not isinstance(fil_uuid_list, list) or not fil_uuid_list:
+                raise ValueError
+        except (ValueError, TypeError):
+            background_tasks.add_task(cleanup_directory, job_dir)
+            raise HTTPException(status_code=422, detail="filament_uuids must be a non-empty JSON array.")
+
+        cache_key = f"{machine_uuid}|{process_uuid}|{','.join(sorted(fil_uuid_list))}"
+        cached_bytes = _template_cache.get(cache_key)
+
+        if cached_bytes is None:
+            machine_entry = catalog.get_by_uuid(machine_uuid)
+            if machine_entry is None or machine_entry.get("type") != "machine":
+                background_tasks.add_task(cleanup_directory, job_dir)
+                raise HTTPException(status_code=422, detail=f"Machine UUID '{machine_uuid}' not found.")
+            proc_entry = catalog.get_by_uuid(process_uuid)
+            if proc_entry is None or proc_entry.get("type") != "process":
+                background_tasks.add_task(cleanup_directory, job_dir)
+                raise HTTPException(status_code=422, detail=f"Process UUID '{process_uuid}' not found.")
+            fil_entries = []
+            for fuid in fil_uuid_list:
+                fe = catalog.get_by_uuid(fuid)
+                if fe is None or fe.get("type") != "filament":
+                    background_tasks.add_task(cleanup_directory, job_dir)
+                    raise HTTPException(status_code=422, detail=f"Filament UUID '{fuid}' not found.")
+                fil_entries.append(fe)
+
+            project_cfg = await asyncio.to_thread(
+                build_project_settings,
+                machine_entry.get("_resolved", machine_entry),
+                proc_entry.get("_resolved", proc_entry),
+                [fe.get("_resolved", fe) for fe in fil_entries],
+            )
+
+            def _build_template_bytes(cfg: dict) -> bytes:
+                import io, zipfile as _zf, json as _j
+                ct = (
+                    '<?xml version="1.0" encoding="UTF-8"?>\n'
+                    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                    '<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>'
+                    '</Types>'
+                )
+                rels = (
+                    '<?xml version="1.0" encoding="UTF-8"?>\n'
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                    '<Relationship Target="/3D/3dmodel.model" Id="rel0"'
+                    ' Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>'
+                    '</Relationships>'
+                )
+                buf = io.BytesIO()
+                with _zf.ZipFile(buf, "w", compression=_zf.ZIP_DEFLATED) as zf:
+                    zf.writestr("[Content_Types].xml", ct)
+                    zf.writestr("_rels/.rels", rels)
+                    # Only embed bed dimensions: full cfg triggers OrcaSlicer's machine
+                    # lookup which overrides printable_area with the active machine's value.
+                    zf.writestr("Metadata/project_settings.config",
+                                _j.dumps({"printable_area": cfg["printable_area"],
+                                          "printable_height": cfg["printable_height"]}, ensure_ascii=False))
+                return buf.getvalue()
+
+            cached_bytes = await asyncio.to_thread(_build_template_bytes, project_cfg)
+            _template_cache[cache_key] = cached_bytes
+            logger.info("Template cached for key %s (%d bytes)", cache_key[:40], len(cached_bytes))
+        else:
+            logger.debug("Template cache hit for key %s", cache_key[:40])
+
+        template_path = os.path.join(input_dir, "settings_template.3mf")
+        with open(template_path, "wb") as buf:
+            buf.write(cached_bytes)
+
+    else:
+        background_tasks.add_task(cleanup_directory, job_dir)
+        raise HTTPException(
+            status_code=422,
+            detail="Provide 'template' (a .3mf file) OR all three of 'machine_uuid', 'process_uuid', 'filament_uuids'.",
+        )
+
+    # Write uploaded STLs
     stl_paths: list[str] = []
     for f, name in zip(files, safe_names):
         dest = os.path.join(input_dir, name)
@@ -914,10 +1030,13 @@ async def pack_stls(
             await asyncio.to_thread(shutil.copyfileobj, f.file, buf)
         stl_paths.append(dest)
 
-    # Build a combined 3MF with all meshes + bed dimensions embedded
+    # Inject STL geometry into the template (preserves project_settings.config)
     combined_3mf = os.path.join(input_dir, "combined.3mf")
     try:
-        await asyncio.to_thread(_build_pack_3mf, stl_paths, bed_x, bed_y, combined_3mf)
+        await asyncio.to_thread(_inject_stls_into_3mf, template_path, stl_paths, combined_3mf)
+    except ValueError as e:
+        background_tasks.add_task(cleanup_directory, job_dir)
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         background_tasks.add_task(cleanup_directory, job_dir)
         raise HTTPException(status_code=400, detail=f"Failed to build combined 3MF: {e}")
@@ -975,112 +1094,6 @@ async def pack_stls(
         logger.exception("System error during pack operation")
         raise HTTPException(status_code=500, detail=f"System error: {e}")
 
-
-def _build_pack_3mf(stl_paths: list[str], bed_x: float, bed_y: float, out_path: str) -> None:
-    """Build a single 3MF containing all STL meshes and bed dimensions in project_settings."""
-    import struct
-    import zipfile as _zf
-
-    def _is_binary(path: str) -> bool:
-        with open(path, "rb") as f:
-            header = f.read(80)
-            if not header.startswith(b"solid"):
-                return True
-            count_bytes = f.read(4)
-            if len(count_bytes) < 4:
-                return False
-            count = struct.unpack("<I", count_bytes)[0]
-        return os.path.getsize(path) == 80 + 4 + count * 50
-
-    def _parse_binary(path: str) -> list:
-        tris = []
-        with open(path, "rb") as f:
-            f.read(80)
-            count = struct.unpack("<I", f.read(4))[0]
-            for _ in range(count):
-                f.read(12)
-                verts = [struct.unpack("<fff", f.read(12)) for _ in range(3)]
-                f.read(2)
-                tris.append(tuple(verts))
-        return tris
-
-    def _parse_ascii(path: str) -> list:
-        tris, verts = [], []
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("vertex"):
-                    parts = line.split()
-                    if len(parts) >= 4:
-                        verts.append((float(parts[1]), float(parts[2]), float(parts[3])))
-                        if len(verts) == 3:
-                            tris.append(tuple(verts))
-                            verts = []
-        return tris
-
-    def _object_xml(obj_id: int, tris: list) -> str:
-        vlines, tlines = [], []
-        idx = 0
-        for tri in tris:
-            for x, y, z in tri:
-                vlines.append(f'          <vertex x="{x}" y="{y}" z="{z}"/>')
-            tlines.append(f'          <triangle v1="{idx}" v2="{idx+1}" v3="{idx+2}"/>')
-            idx += 3
-        vblock = "\n".join(vlines)
-        tblock = "\n".join(tlines)
-        return (
-            f'  <object id="{obj_id}" type="model"><mesh>\n'
-            f'    <vertices>\n{vblock}\n    </vertices>\n'
-            f'    <triangles>\n{tblock}\n    </triangles>\n'
-            f'  </mesh></object>\n'
-        )
-
-    objects_xml = ""
-    build_items = ""
-    for i, stl_path in enumerate(stl_paths, start=1):
-        tris = _parse_binary(stl_path) if _is_binary(stl_path) else _parse_ascii(stl_path)
-        objects_xml += _object_xml(i, tris)
-        build_items += f'  <item objectid="{i}"/>\n'
-
-    model_xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<model unit="millimeter" xml:lang="en-US"'
-        ' xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n'
-        f'<resources>\n{objects_xml}</resources>\n'
-        f'<build>\n{build_items}</build>\n'
-        '</model>'
-    )
-
-    import json as _json
-    project_settings = _json.dumps({
-        "printable_area": [
-            "0x0", f"{bed_x}x0", f"{bed_x}x{bed_y}", f"0x{bed_y}",
-        ],
-        "printable_height": "300",
-        "from": "user",
-    }, indent=2)
-
-    content_types = (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-        '<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>'
-        '<Default Extension="config" ContentType="application/octet-stream"/>'
-        '</Types>'
-    )
-    rels = (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        '<Relationship Target="/3D/3dmodel.model" Id="rel0"'
-        ' Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>'
-        '</Relationships>'
-    )
-
-    with _zf.ZipFile(out_path, "w", compression=_zf.ZIP_DEFLATED) as zf:
-        zf.writestr("[Content_Types].xml", content_types)
-        zf.writestr("_rels/.rels", rels)
-        zf.writestr("3D/3dmodel.model", model_xml.encode("utf-8"))
-        zf.writestr("Metadata/project_settings.config", project_settings.encode("utf-8"))
 
 
 @app.post(

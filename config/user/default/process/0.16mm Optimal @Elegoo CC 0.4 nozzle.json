@@ -1,0 +1,7 @@
+{
+    "type": "process",
+    "name": "0.16mm Optimal @Elegoo CC 0.4 nozzle",
+    "inherits": "0.16mm Optimal @Elegoo CC 0.4 nozzle",
+    "from": "user",
+    "instantiation": "true"
+}

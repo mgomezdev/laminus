@@ -44,7 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Download and extract OrcaSlicer AppImage (Ubuntu 24.04 Build)
 # Extracting bypasses the need for FUSE inside the Docker container
 RUN mkdir -p /opt/orcaslicer \
-    && curl -L -o /opt/OrcaSlicer.AppImage https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v2.3.2/OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.3.2.AppImage \
+    && curl -L -o /opt/OrcaSlicer.AppImage https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v2.4.1/OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.4.1.AppImage \
     && chmod +x /opt/OrcaSlicer.AppImage \
     && cd /opt \
     && ./OrcaSlicer.AppImage --appimage-extract \
