@@ -1,0 +1,7 @@
+{
+    "type": "filament",
+    "name": "Elegoo PLA @ECC",
+    "inherits": "Elegoo PLA @ECC",
+    "from": "user",
+    "instantiation": "true"
+}
