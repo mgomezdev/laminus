@@ -15,8 +15,15 @@ services:
       - ./data:/data
       # Mount the app code for live reload / dev simplicity
       - ./app:/workspace/app
+      # Named volume caches the OrcaSlicer install across restarts.
+      # Re-downloaded only when ORCA_VERSION changes.
+      - orca-slicer:/opt/orcaslicer
     environment:
       - TZ=Etc/UTC
       - PYTHONUNBUFFERED=1
+      - ORCA_VERSION=${ORCA_VERSION:-2.4.1}
     shm_size: "1gb"
     restart: unless-stopped
+
+volumes:
+  orca-slicer:

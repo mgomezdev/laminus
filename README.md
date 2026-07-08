@@ -10,13 +10,27 @@ docker-compose up -d
 
 The API is available at `http://localhost:5000`. Drop your OrcaSlicer preset JSON files into `./config/user/default/{machine,process,filament}/` and they will be picked up automatically.
 
+## Configuration
+
+### `ORCA_VERSION`
+
+The OrcaSlicer AppImage is **not baked into the Docker image**. On first container start, `entrypoint.sh` downloads the AppImage for the version specified by `ORCA_VERSION`, extracts it, and caches it in the `orca-slicer` named volume. Subsequent restarts skip the download as long as the version on disk matches `ORCA_VERSION`.
+
+To upgrade OrcaSlicer without rebuilding the image, set `ORCA_VERSION` to the new version and restart the container. The entrypoint detects the version mismatch, downloads the new release, and replaces the cached install.
+
+```bash
+# .env or shell export
+ORCA_VERSION=2.4.1   # default
+```
+
 ## Volumes
 
-| Host path | Container path | Purpose |
-|-----------|---------------|---------|
+| Source | Container path | Purpose |
+|--------|---------------|---------|
 | `./config` | `/config` | OrcaSlicer preset profiles |
 | `./data` | `/data` | Input models and output files |
 | `./app` | `/workspace/app` | Application code (live reload in dev) |
+| `orca-slicer` (named) | `/opt/orcaslicer` | Cached OrcaSlicer install — persists across restarts |
 
 ## API Reference
 
@@ -89,3 +103,4 @@ curl http://localhost:5000/api/health
 - The arrange endpoint is synchronous with a 35-second timeout.
 - OrcaSlicer requires a virtual display; the container uses `xvfb-run` automatically.
 - `shm_size: 1gb` in `docker-compose.yml` is required for OrcaSlicer's renderer.
+- First container start requires an internet connection to download the OrcaSlicer AppImage (~300 MB). Subsequent starts use the cached volume and are instant.
