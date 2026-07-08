@@ -873,19 +873,53 @@ def cleanup_file(path: str):
         pass
 
 
+def _build_bed_template_bytes(printable_area: list, printable_height: float) -> bytes:
+    """Minimal 3MF carrying only bed dimensions for use as a pack template.
+
+    Only printable_area and printable_height are embedded; a full project config
+    would trigger OrcaSlicer's machine lookup and override the bed size.
+    """
+    import io, zipfile as _zf
+    ct = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>'
+        '</Types>'
+    )
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Target="/3D/3dmodel.model" Id="rel0"'
+        ' Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>'
+        '</Relationships>'
+    )
+    buf = io.BytesIO()
+    with _zf.ZipFile(buf, "w", compression=_zf.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", ct)
+        zf.writestr("_rels/.rels", rels)
+        zf.writestr("Metadata/project_settings.config",
+                    json.dumps({"printable_area": printable_area,
+                                "printable_height": printable_height}, ensure_ascii=False))
+    return buf.getvalue()
+
+
 @app.post(
     "/api/pack",
     tags=["arrange"],
     summary="Pack N STLs onto as many beds as needed (synchronous)",
     description=(
         "Distributes STL geometry across build plates via OrcaSlicer `--arrange 1 --orient 1`.\n\n"
-        "**Two ways to supply print settings:**\n\n"
+        "**Three ways to supply print settings (mutually exclusive):**\n\n"
         "1. **Template file** — upload a `.3mf` whose `Metadata/project_settings.config` "
         "carries the printer/bed configuration (`template` field).\n\n"
         "2. **Profile UUIDs** — supply `machine_uuid`, `process_uuid`, and `filament_uuids` "
         "(JSON array string). The container resolves profiles from its catalog and builds the "
         "settings internally. This mode requires no template management by the caller and "
         "automatically tracks the installed OrcaSlicer version's profile catalog.\n\n"
+        "3. **Explicit bed dimensions** — supply `bed_x`, `bed_y`, and `bed_z` (all in mm). "
+        "Orca constructs a minimal template from these dimensions and packs accordingly. "
+        "No profile catalog or template file needed.\n\n"
         "Returns the resulting multi-plate `.3mf` as `application/octet-stream`. "
         "**Blocks for up to 120 seconds.**\n\n"
         "Returns **400** if OrcaSlicer fails, **408** on timeout, **503** if the catalog "
@@ -899,6 +933,9 @@ async def pack_stls(
     machine_uuid: Optional[str] = Form(None),
     process_uuid: Optional[str] = Form(None),
     filament_uuids: Optional[str] = Form(None, description='JSON array, e.g. ["uuid1"]'),
+    bed_x: Optional[float] = Form(None, description="Bed X dimension in mm (alternative to template / UUIDs)"),
+    bed_y: Optional[float] = Form(None, description="Bed Y dimension in mm"),
+    bed_z: Optional[float] = Form(None, description="Bed Z (height) in mm"),
 ):
     if not files:
         raise HTTPException(status_code=422, detail="At least one STL file is required.")
@@ -978,34 +1015,11 @@ async def pack_stls(
                 [fe.get("_resolved", fe) for fe in fil_entries],
             )
 
-            def _build_template_bytes(cfg: dict) -> bytes:
-                import io, zipfile as _zf, json as _j
-                ct = (
-                    '<?xml version="1.0" encoding="UTF-8"?>\n'
-                    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-                    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-                    '<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>'
-                    '</Types>'
-                )
-                rels = (
-                    '<?xml version="1.0" encoding="UTF-8"?>\n'
-                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-                    '<Relationship Target="/3D/3dmodel.model" Id="rel0"'
-                    ' Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>'
-                    '</Relationships>'
-                )
-                buf = io.BytesIO()
-                with _zf.ZipFile(buf, "w", compression=_zf.ZIP_DEFLATED) as zf:
-                    zf.writestr("[Content_Types].xml", ct)
-                    zf.writestr("_rels/.rels", rels)
-                    # Only embed bed dimensions: full cfg triggers OrcaSlicer's machine
-                    # lookup which overrides printable_area with the active machine's value.
-                    zf.writestr("Metadata/project_settings.config",
-                                _j.dumps({"printable_area": cfg["printable_area"],
-                                          "printable_height": cfg["printable_height"]}, ensure_ascii=False))
-                return buf.getvalue()
-
-            cached_bytes = await asyncio.to_thread(_build_template_bytes, project_cfg)
+            cached_bytes = await asyncio.to_thread(
+                _build_bed_template_bytes,
+                project_cfg["printable_area"],
+                project_cfg["printable_height"],
+            )
             _template_cache[cache_key] = cached_bytes
             logger.info("Template cached for key %s (%d bytes)", cache_key[:40], len(cached_bytes))
         else:
@@ -1015,11 +1029,20 @@ async def pack_stls(
         with open(template_path, "wb") as buf:
             buf.write(cached_bytes)
 
+    elif bed_x is not None and bed_y is not None and bed_z is not None:
+        if bed_x <= 0 or bed_y <= 0 or bed_z <= 0:
+            background_tasks.add_task(cleanup_directory, job_dir)
+            raise HTTPException(status_code=422, detail="bed_x, bed_y, and bed_z must all be positive.")
+        area = [f"0x0", f"{bed_x}x0", f"{bed_x}x{bed_y}", f"0x{bed_y}"]
+        template_path = os.path.join(input_dir, "settings_template.3mf")
+        with open(template_path, "wb") as buf:
+            buf.write(_build_bed_template_bytes(area, bed_z))
+
     else:
         background_tasks.add_task(cleanup_directory, job_dir)
         raise HTTPException(
             status_code=422,
-            detail="Provide 'template' (a .3mf file) OR all three of 'machine_uuid', 'process_uuid', 'filament_uuids'.",
+            detail="Provide 'template' (a .3mf file) OR 'machine_uuid'/'process_uuid'/'filament_uuids' OR 'bed_x'/'bed_y'/'bed_z'.",
         )
 
     # Write uploaded STLs
