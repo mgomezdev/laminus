@@ -13,7 +13,8 @@ else
     echo "[orca] Installing OrcaSlicer v${ORCA_VERSION}..."
     APPIMAGE_URL="https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v${ORCA_VERSION}/OrcaSlicer_Linux_AppImage_Ubuntu2404_V${ORCA_VERSION}.AppImage"
 
-    rm -rf "$ORCA_INSTALL_DIR"
+    # Clear contents but not the directory itself (it's a named-volume mount point)
+    find "${ORCA_INSTALL_DIR}" -mindepth 1 -delete 2>/dev/null || true
     mkdir -p "$ORCA_INSTALL_DIR"
 
     curl -fsSL -o /tmp/OrcaSlicer.AppImage "$APPIMAGE_URL"
