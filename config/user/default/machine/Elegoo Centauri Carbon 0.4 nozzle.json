@@ -168,6 +168,8 @@
     ],
     "thumbnails_format": "PNG",
     "nozzle_type": "hardened_steel",
+    "before_layer_change_gcode": ";BEFORE_LAYER_CHANGE\n;[layer_z]\nG92 E0",
+    "use_relative_e_distances": "1",
     "layer_change_gcode": "SET_PRINT_STATS_INFO TOTAL_LAYER=[total_layer_count] CURRENT_LAYER={layer_num+1}",
     "machine_pause_gcode": "M600",
     "setting_id": "LyL8izVzYFaXHlPb",
