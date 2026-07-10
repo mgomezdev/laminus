@@ -17,7 +17,7 @@ from app.project_config_builder import build_project_settings, embed_project_set
 from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf, inject_stls_into_3mf as _inject_stls_into_3mf, strip_application_version as _strip_app_version
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("orcaslicer-api")
+logger = logging.getLogger("laminus")
 
 CONFIG_DIR = "/config"
 USER_CONFIG_DIR = os.environ.get("USER_CONFIG_DIR", os.path.join(CONFIG_DIR, "user"))
@@ -49,6 +49,7 @@ async def lifespan(app: FastAPI):
     for d in (CONFIG_DIR, DATA_DIR, JOBS_DIR, ARRANGE_DIR):
         os.makedirs(d, exist_ok=True)
     init_config_directories()
+    _load_jobs_on_startup()
     try:
         proc = await asyncio.create_subprocess_exec(
             "orcaslicer", "--version",
@@ -87,11 +88,21 @@ def _trigger_catalog_rebuild() -> None:
 async def _build_catalog():
     global catalog, _catalog_building, _template_cache
     try:
+        cache_key = await asyncio.to_thread(_catalog_cache_key)
+        cached = await asyncio.to_thread(
+            ProfileCatalog.load_from_cache, _CATALOG_CACHE_FILE, cache_key,
+            SYSTEM_PROFILES_DIR, USER_CONFIG_DIR,
+        )
+        if cached is not None:
+            catalog = cached
+            logger.info("Profile catalog loaded from cache: %s", cached.counts)
+            return
         cat = ProfileCatalog(system_dir=SYSTEM_PROFILES_DIR, user_dir=USER_CONFIG_DIR)
         await asyncio.to_thread(cat.build)
         catalog = cat
         _template_cache.clear()
         logger.info("Profile catalog ready: %s", cat.counts)
+        await asyncio.to_thread(cat.save_to_cache, _CATALOG_CACHE_FILE, cache_key)
     except Exception:
         logger.exception("Catalog build failed")
     finally:
@@ -193,6 +204,67 @@ def init_config_directories():
 
 
 jobs: Dict[str, dict] = {}
+
+_JOBS_FILE = os.path.join(DATA_DIR, "jobs.json")
+_CATALOG_CACHE_FILE = os.path.join(DATA_DIR, "catalog_cache.json")
+
+
+def _catalog_cache_key() -> str:
+    """Hash of ORCA_VERSION + sorted (relpath, mtime, size) for user config dir."""
+    import hashlib
+    h = hashlib.md5(os.environ.get("ORCA_VERSION", "").encode())
+    if os.path.isdir(USER_CONFIG_DIR):
+        entries = []
+        for root, _dirs, files in os.walk(USER_CONFIG_DIR):
+            for fn in files:
+                p = os.path.join(root, fn)
+                try:
+                    st = os.stat(p)
+                    entries.append((os.path.relpath(p, USER_CONFIG_DIR), st.st_mtime, st.st_size))
+                except OSError:
+                    pass
+        for entry in sorted(entries):
+            h.update(str(entry).encode())
+    return h.hexdigest()
+
+
+def _save_jobs() -> None:
+    """Persist serialisable job metadata to disk (best-effort)."""
+    serialisable = {
+        jid: {"id": jid, "status": j["status"], "error": j.get("error"), "created_at": j.get("_wall_created_at")}
+        for jid, j in jobs.items()
+    }
+    try:
+        tmp = _JOBS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(serialisable, f)
+        os.replace(tmp, _JOBS_FILE)
+    except OSError:
+        pass
+
+
+def _load_jobs_on_startup() -> None:
+    """Load persisted jobs; fail any that were in-progress when Laminus last stopped."""
+    try:
+        with open(_JOBS_FILE, encoding="utf-8") as f:
+            saved = json.load(f)
+    except (OSError, ValueError):
+        return
+    for jid, j in saved.items():
+        if j.get("status") in ("pending", "slicing"):
+            j["status"] = "failed"
+            j["error"] = "Laminus restarted while job was in progress"
+        # Restore as a minimal stub — no logger, no disk files (they're gone)
+        jobs[jid] = {
+            "id": jid,
+            "status": j["status"],
+            "error": j.get("error"),
+            "sliced_file": None,
+            "logger": None,
+            "created_at": 0,
+            "_wall_created_at": j.get("created_at"),
+            "_stub": True,  # ponytail: stub jobs are status-only, download will 404
+        }
 
 
 # Fix R6: periodic sweep that removes jobs older than JOB_TTL and cleans their disk dirs
@@ -412,6 +484,7 @@ async def run_orcaslicer_task(
         return
     job_logger = job["logger"]
     job["status"] = "slicing"
+    _save_jobs()
     job_logger.log(f"Starting slice: {os.path.basename(input_file_path)}")
 
     async def _attempt(slice_input: str, label: str) -> bool:
@@ -476,16 +549,19 @@ async def run_orcaslicer_task(
         if found:
             job["status"] = "completed"
             job["sliced_file"] = found
+            _save_jobs()
             job_logger.log(f"Output: {os.path.basename(found)}")
             job_logger.log("__COMPLETED__")
         else:
             job["status"] = "failed"
             job["error"] = "OrcaSlicer succeeded but no output file found."
+            _save_jobs()
             job_logger.log("ERROR: No output file found.")
             job_logger.log("__FAILED__: Missing output file")
     else:
         job["status"] = "failed"
         job["error"] = "OrcaSlicer slice process failed. See logs."
+        _save_jobs()
         job_logger.log("__FAILED__: OrcaSlicer returned non-zero")
 
 
@@ -616,12 +692,15 @@ async def start_slice(
     await asyncio.to_thread(embed_project_settings, base_3mf, project_cfg, prepared_3mf)
 
     job_logger = JobLogger(job_id)
+    _wall_now = time.time()
     jobs[job_id] = {
         "id": job_id, "status": "pending",
         "input_file": prepared_3mf, "output_dir": output_dir,
         "sliced_file": None, "output_format": "gcode_3mf" if export_3mf else "gcode",
         "error": None, "logger": job_logger, "created_at": time.monotonic(),
+        "_wall_created_at": _wall_now,
     }
+    _save_jobs()
     background_tasks.add_task(
         run_orcaslicer_task,
         job_id=job_id, input_file_path=prepared_3mf, output_dir=output_dir,
@@ -681,7 +760,9 @@ async def slice_prepared(
         "input_file": input_path, "output_dir": output_dir,
         "sliced_file": None, "output_format": "gcode_3mf" if export_3mf else "gcode",
         "error": None, "logger": job_logger, "created_at": time.monotonic(),
+        "_wall_created_at": time.time(),
     }
+    _save_jobs()
     background_tasks.add_task(
         run_orcaslicer_task,
         job_id=job_id, input_file_path=input_path, output_dir=output_dir,
