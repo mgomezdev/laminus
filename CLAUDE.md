@@ -24,7 +24,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 5000 --reload
 
 **Flatten a system profile into a standalone user profile (run inside the container):**
 ```bash
-docker exec orcaslicer-api python3 /workspace/flatten_profiles.py \
+docker exec laminus python3 /workspace/flatten_profiles.py \
   "/opt/orcaslicer/resources/profiles/Creality/machine/Creality Ender-3 0.4 nozzle.json" \
   "/config/user/default/machine/Creality Ender-3 0.4 nozzle.json" \
   "machine"

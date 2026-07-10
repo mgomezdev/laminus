@@ -28,7 +28,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ninjabuffalo/orca
+          images: ninjabuffalo/laminus
           tags: |
             type=raw,value=latest
             type=sha,prefix=sha-

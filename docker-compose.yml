@@ -1,11 +1,11 @@
 version: '3.8'
 
 services:
-  orcaslicer:
+  laminus:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: orcaslicer-api
+    container_name: laminus
     ports:
       - "5000:5000"
     volumes:
@@ -17,7 +17,7 @@ services:
       - ./app:/workspace/app
       # Named volume caches the OrcaSlicer install across restarts.
       # Re-downloaded only when ORCA_VERSION changes.
-      - orca-slicer:/opt/orcaslicer
+      - laminus-slicer:/opt/orcaslicer
     environment:
       - TZ=Etc/UTC
       - PYTHONUNBUFFERED=1
@@ -26,4 +26,4 @@ services:
     restart: unless-stopped
 
 volumes:
-  orca-slicer:
+  laminus-slicer:

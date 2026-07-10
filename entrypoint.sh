@@ -8,9 +8,9 @@ ORCA_VERSION_FILE="${ORCA_INSTALL_DIR}/.version"
 # Install OrcaSlicer only when the version on disk doesn't match the requested one.
 # The install dir is expected to be a named volume so the download is cached across restarts.
 if [ -f "$ORCA_VERSION_FILE" ] && [ "$(cat "$ORCA_VERSION_FILE")" = "$ORCA_VERSION" ]; then
-    echo "[orca] OrcaSlicer v${ORCA_VERSION} already installed, skipping download."
+    echo "[laminus] OrcaSlicer v${ORCA_VERSION} already installed, skipping download."
 else
-    echo "[orca] Installing OrcaSlicer v${ORCA_VERSION}..."
+    echo "[laminus] Installing OrcaSlicer v${ORCA_VERSION}..."
     APPIMAGE_URL="https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v${ORCA_VERSION}/OrcaSlicer_Linux_AppImage_Ubuntu2404_V${ORCA_VERSION}.AppImage"
 
     # Clear contents but not the directory itself (it's a named-volume mount point)
@@ -24,7 +24,7 @@ else
     rm -rf /tmp/squashfs-root /tmp/OrcaSlicer.AppImage
 
     echo "$ORCA_VERSION" > "$ORCA_VERSION_FILE"
-    echo "[orca] OrcaSlicer v${ORCA_VERSION} installed."
+    echo "[laminus] OrcaSlicer v${ORCA_VERSION} installed."
 fi
 
 # Symlink may be absent if the volume was freshly mounted; always (re)create it.
