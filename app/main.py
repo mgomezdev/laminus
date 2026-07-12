@@ -110,25 +110,72 @@ async def _build_catalog():
 
 
 app = FastAPI(
-    title="OrcaSlicer CLI Container API",
+    title="Laminus — OrcaSlicer Sidecar API",
     description=(
-        "Headless 3D model slicing via OrcaSlicer CLI running inside a Docker container.\n\n"
-        "**Agent workflow:**\n"
-        "1. `GET /api/health` — wait until `catalog_loaded: true`\n"
-        "2. `GET /api/profiles` — discover machine/process/filament UUIDs\n"
-        "3. `POST /api/slice/start` — upload model + UUIDs, receive `job_id`\n"
-        "4. `GET /api/slice/status/{job_id}` — poll until `completed` or `failed`\n"
-        "5. `GET /api/slice/download/{job_id}` — retrieve GCode (evicts job)\n\n"
-        "Alternatively, use `POST /api/slice/prepared` when the 3MF already embeds "
-        "print settings."
+        "Headless 3D model slicing via OrcaSlicer CLI running inside a Docker container. "
+        "Laminus is a sidecar service used by Themis; it is not intended to be called directly "
+        "by end-users in normal operation.\n\n"
+        "## Typical agent workflow\n\n"
+        "1. **`GET /api/health`** — wait until `catalog_loaded: true` before making any other calls.\n"
+        "2. **`GET /api/profiles`** — discover machine / process / filament UUIDs for your printer "
+        "and material. Filter by `manufacturer`, `model`, and `nozzle` to narrow results.\n"
+        "3. **`POST /api/slice/start`** — upload the model (`.3mf` or `.stl`) with the resolved "
+        "UUIDs. The response contains a `job_id`.\n"
+        "4. **`GET /api/slice/status/{job_id}`** — poll every 2–5 s until `status` is `completed` "
+        "or `failed`.\n"
+        "5. **`GET /api/slice/download/{job_id}`** — retrieve the GCode (or `.3mf` when "
+        "`export_3mf` was requested). Downloading evicts the job immediately.\n\n"
+        "Alternatively, use **`POST /api/slice/prepared`** when the 3MF already embeds print "
+        "settings from a previous OrcaSlicer session — no profile resolution is needed.\n\n"
+        "## Packing / arrangement\n\n"
+        "Use **`POST /api/pack`** to distribute STL geometry across build plates before slicing. "
+        "Three modes: supply a template `.3mf`, profile UUIDs (preferred — catalog-aware), or "
+        "explicit bed dimensions. The packed `.3mf` is returned directly (synchronous, up to "
+        "120 s).\n\n"
+        "## Error conventions\n\n"
+        "- **422** — caller-side validation failure (bad UUIDs, missing required fields, etc.).\n"
+        "- **503** — Laminus is not yet ready; the catalog is still building. "
+        "Retry after `GET /api/health` reports `catalog_loaded: true`.\n"
+        "- **400 / 408 / 500** — OrcaSlicer-side failures; check server logs for details."
     ),
     version="1.0.0",
     lifespan=lifespan,
     openapi_tags=[
-        {"name": "health", "description": "Service readiness and version information"},
-        {"name": "profiles", "description": "Machine, process, and filament preset catalog"},
-        {"name": "slice", "description": "Slice job lifecycle: start → poll → download"},
-        {"name": "arrange", "description": "Synchronous plate arrangement (no job lifecycle)"},
+        {
+            "name": "health",
+            "description": (
+                "Service readiness and version information. Always check `/api/health` first — "
+                "profile and slice endpoints return **503** while `catalog_loading` is `true`."
+            ),
+        },
+        {
+            "name": "profiles",
+            "description": (
+                "Machine, process, and filament preset catalog derived from the OrcaSlicer "
+                "AppImage's bundled profiles plus any user-uploaded profiles in `/config/user/`. "
+                "Profiles are identified by stable UUIDs derived from their (manufacturer, model, "
+                "nozzle) tuple (machine) or (source, rel_path) (process/filament), so UUIDs "
+                "remain constant across catalog rebuilds as long as the profile files don't move."
+            ),
+        },
+        {
+            "name": "slice",
+            "description": (
+                "Asynchronous slice job lifecycle: **start → poll → download**. "
+                "Jobs are kept in memory and evicted after download or after `JOB_TTL_SECONDS` "
+                "(default 3600). A maximum of `MAX_CONCURRENT_JOBS` (default 4) jobs may slice "
+                "simultaneously; additional requests receive **503** until a slot opens."
+            ),
+        },
+        {
+            "name": "arrange",
+            "description": (
+                "Synchronous plate arrangement and STL packing. No job tracking — responses "
+                "block until OrcaSlicer finishes (up to `ARRANGE_TIMEOUT_SECONDS`, default 120). "
+                "Use `POST /api/pack` to combine multiple STLs into a single multi-plate `.3mf`, "
+                "and `POST /api/arrange` to re-pack an existing `.3mf`."
+            ),
+        },
     ],
 )
 
@@ -179,6 +226,33 @@ class SliceConfig(BaseModel):
             if slot < 1:
                 raise ValueError(f"Filament slot key '{key}' must be >= 1.")
         return v
+
+
+class MergedConfigRequest(BaseModel):
+    machine_uuid: str = Field(
+        ...,
+        description=(
+            "Stable UUID of the machine (printer) profile. Obtain from `GET /api/profiles` "
+            "or `GET /api/profiles/{uuid}`. Machine UUIDs are derived from the "
+            "(manufacturer, model, nozzle) tuple and are stable across catalog rebuilds."
+        ),
+    )
+    process_uuid: str = Field(
+        ...,
+        description=(
+            "Stable UUID of the process (print quality) profile, e.g. `0.20mm Standard`. "
+            "Must be compatible with the supplied machine — check `compatible_printers` "
+            "in the profile detail."
+        ),
+    )
+    filament_uuids: list[str] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "List of filament profile UUIDs, one per extruder slot in slot order (slot 1 first). "
+            "Must be compatible with the machine. Single-extruder printers need exactly one entry."
+        ),
+    )
 
 
 def init_config_directories():
@@ -336,7 +410,7 @@ def find_profiles_in_config() -> dict:
     return profiles
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def get_dashboard():
     template_path = os.path.join(os.path.dirname(__file__), "templates", "index.html")
     if not os.path.exists(template_path):
@@ -351,13 +425,29 @@ async def get_dashboard():
     tags=["profiles"],
     summary="List profiles in the catalog",
     description=(
-        "Returns all machine, process, and filament presets.\n\n"
+        "Returns all machine, process, and filament presets known to this container.\n\n"
         "**Filtering:** supply all three of `manufacturer`, `model`, and `nozzle` together "
-        "to receive only the matching machine plus compatible process/filament presets.\n\n"
-        "**Refresh:** pass `refresh=true` to trigger a background catalog rebuild. "
-        "The response reflects the *current* catalog; call again after ~5 s for new profiles.\n\n"
-        "Returns **503** while the catalog is initialising — retry shortly."
+        "to receive only the matching machine preset plus all process and filament presets "
+        "that declare that machine in their `compatible_printers` list. Supplying only one "
+        "or two of the three parameters is a **422** error.\n\n"
+        "**Refresh:** pass `refresh=true` to schedule a background catalog rebuild "
+        "(e.g., after uploading new profiles via `POST /api/profiles/upload`). The response "
+        "reflects the *current* catalog immediately; the new catalog is available after ~5 s. "
+        "While rebuilding, `GET /api/health` will show `catalog_building: true`.\n\n"
+        "**Response shape:**\n"
+        "```json\n"
+        "{\n"
+        '  "machine":  [{ "uuid": "...", "name": "...", "manufacturer": "...", "model": "...", "nozzle": "..." }],\n'
+        '  "process":  [{ "uuid": "...", "name": "...", "layer_height": 0.2, "compatible_printers": [...] }],\n'
+        '  "filament": [{ "uuid": "...", "name": "...", "filament_type": "PLA", "filament_colour": "#FFFFFF", ... }]\n'
+        "}\n"
+        "```\n\n"
+        "Returns **503** while the catalog is initialising on container start."
     ),
+    responses={
+        422: {"description": "Partial filter: supply all three of manufacturer/model/nozzle or none"},
+        503: {"description": "Catalog not yet ready — retry after /api/health reports catalog_loaded: true"},
+    },
 )
 async def get_profiles(
     manufacturer: Optional[str] = None,
@@ -381,23 +471,34 @@ async def get_profiles(
     return catalog.as_dict(manufacturer=manufacturer, model=model, nozzle=nozzle)
 
 
-class MergedConfigRequest(BaseModel):
-    machine_uuid: str
-    process_uuid: str
-    filament_uuids: list[str]
-
-
 @app.post(
     "/api/profiles/merged-config",
     tags=["profiles"],
-    summary="Return merged project config for a set of profile UUIDs",
+    summary="Get merged project_settings.config for a profile set",
     description=(
-        "Resolves inheritance chains for the given machine, process, and filament UUIDs "
-        "and returns the merged `project_settings.config` dict identical to what would be "
-        "embedded in a 3MF before slicing. Use this to inspect resolved settings without "
-        "triggering a slice.\n\n"
+        "Resolves the full inheritance chains for the given machine, process, and filament "
+        "UUIDs and returns the merged `project_settings.config` dict — exactly what would be "
+        "embedded inside a `.3mf` before slicing.\n\n"
+        "**Primary use cases:**\n"
+        "- Inspect resolved print settings (temperatures, speeds, gcode) before committing to a "
+        "slice job.\n"
+        "- Allow Themis to diff embedded settings against a chosen preset to warn the user of "
+        "overrides (`POST /api/v1/jobs/check-overrides`).\n"
+        "- Verify that `layer_gcode` is populated (see OrcaSlicer -51 error) before slicing.\n\n"
+        "The response is the raw merged dict with inheritance stripped — keys like `inherits`, "
+        "`compatible_printers`, `is_custom_defined`, and `from` are removed. "
+        "Multi-filament keys are returned as arrays (one value per slot).\n\n"
         "Returns **503** while the catalog is initialising."
     ),
+    responses={
+        422: {
+            "description": (
+                "UUID not found in catalog, wrong type (e.g. process UUID used where machine expected), "
+                "or filament_uuids is empty"
+            ),
+        },
+        503: {"description": "Catalog not yet ready — retry after /api/health reports catalog_loaded: true"},
+    },
 )
 async def get_merged_config(body: MergedConfigRequest):
     if catalog is None:
@@ -433,11 +534,23 @@ async def get_merged_config(body: MergedConfigRequest):
     tags=["profiles"],
     summary="Get full detail for one profile",
     description=(
-        "Returns the complete public fields for a single profile entry identified by its "
-        "stable UUID. Useful for inspecting `compatible_printers`, `layer_height`, filament "
-        "temperatures, and similar fields before building a slice job.\n\n"
+        "Returns all public fields for a single profile entry identified by its stable UUID. "
+        "The `_resolved` (inheritance-flattened) dict is not included — use "
+        "`POST /api/profiles/merged-config` for the fully merged config.\n\n"
+        "**Fields by type:**\n\n"
+        "*Machine:* `uuid`, `name`, `manufacturer`, `model`, `nozzle`, `nozzle_diameter`, "
+        "`bed_size_x`, `bed_size_y`, `extruder_count`, `source`, `rel_path`\n\n"
+        "*Process:* `uuid`, `name`, `layer_height`, `compatible_printers`, `source`, `rel_path`\n\n"
+        "*Filament:* `uuid`, `name`, `display_name`, `filament_type`, `filament_colour`, "
+        "`filament_vendor`, `filament_diameter`, `filament_density`, `nozzle_temperature`, "
+        "`nozzle_temperature_range_low`, `nozzle_temperature_range_high`, `bed_temperature`, "
+        "`bed_temperature_initial_layer`, `compatible_printers`, `source`, `rel_path`\n\n"
         "Returns **503** while the catalog is initialising."
     ),
+    responses={
+        404: {"description": "Profile UUID not found in catalog"},
+        503: {"description": "Catalog not yet ready — retry after /api/health reports catalog_loaded: true"},
+    },
 )
 async def get_profile_detail(profile_uuid: str):
     if catalog is None:
@@ -570,18 +683,55 @@ async def run_orcaslicer_task(
     tags=["slice"],
     summary="Start a slice job (UUID-based profile resolution)",
     description=(
-        "Upload a 3MF or STL and specify print settings by UUID. "
-        "The API resolves profiles, builds `project_settings.config`, embeds it into the 3MF, "
-        "then launches OrcaSlicer in the background.\n\n"
-        "- `filament_uuids` must be a JSON-encoded array string, e.g. `'[\"uuid1\"]'`\n"
-        "- `plate` is 1-based (use `1` for single-plate models)\n"
-        "- STL files are automatically converted to 3MF before slicing\n"
-        "- When `geometry_only_retry=true` (default), the API retries with "
-        "`model_settings.config` stripped if the first attempt fails\n\n"
-        "Returns **503** when the profile catalog is not yet ready.\n\n"
-        "After this call, poll `GET /api/slice/status/{job_id}` until `status` is "
-        "`completed` or `failed`, then download via `GET /api/slice/download/{job_id}`."
+        "Upload a `.3mf` or `.stl` and specify print settings by profile UUID. "
+        "The API resolves each profile's full inheritance chain, merges machine + process + "
+        "filament into a `project_settings.config`, embeds it into the 3MF, then launches "
+        "OrcaSlicer in the background and returns a `job_id` immediately.\n\n"
+        "**Machine identification (mutually exclusive):**\n"
+        "- `machine_uuid` — preferred; stable across catalog rebuilds.\n"
+        "- `manufacturer` + `model` + `nozzle` — tuple lookup; useful when the UUID is unknown.\n\n"
+        "**Key parameters:**\n"
+        "- `filament_uuids` — JSON array string, e.g. `'[\"uuid1\"]'`; one entry per extruder "
+        "slot in slot order. Single-extruder printers need exactly one entry.\n"
+        "- `plate` — 1-based plate number to slice. Use `1` for single-plate models.\n"
+        "- `export_3mf` — optional output filename. When set, OrcaSlicer embeds the GCode "
+        "inside a `.3mf` instead of writing a standalone `.gcode` file. The download endpoint "
+        "returns the `.3mf` in this case.\n"
+        "- `geometry_only_retry` — when `true` (default), if the first slice attempt fails "
+        "OrcaSlicer retries with `Metadata/model_settings.config` stripped from the 3MF. "
+        "This resolves failures caused by stale extruder-slot assignments baked into models "
+        "exported from OrcaSlicer.\n"
+        "- `extra_config` — optional JSON object merged into the resolved "
+        "`project_settings.config` after profile resolution. Use to override individual "
+        "settings, e.g. `{\"curr_bed_type\": \"Cool Plate\"}` or "
+        "`{\"layer_height\": \"0.12\"}`.\n\n"
+        "**STL files** are automatically converted to a minimal 3MF before slicing.\n\n"
+        "**Concurrency:** at most `MAX_CONCURRENT_JOBS` (default 4) jobs may be slicing "
+        "simultaneously. When the limit is reached the request returns **503** — retry later.\n\n"
+        "**Job lifecycle after creation:**\n"
+        "```\n"
+        "pending → slicing → completed  (download available)\n"
+        "                  ↘ failed     (check error field in status response)\n"
+        "```\n"
+        "Poll `GET /api/slice/status/{job_id}` every 2–5 s, then download via "
+        "`GET /api/slice/download/{job_id}` when complete."
     ),
+    responses={
+        400: {"description": "Bad filename (null bytes, semicolons, or missing Content-Disposition filename)"},
+        422: {
+            "description": (
+                "Validation failure: plate < 1, filament_uuids is not a valid JSON array, "
+                "machine/process/filament UUID not found in catalog, profile not compatible "
+                "with the selected machine, or extra_config is not a JSON object"
+            ),
+        },
+        503: {
+            "description": (
+                "Profile catalog not yet ready (retry after catalog_loaded: true), "
+                "or too many concurrent slice jobs (retry when a slot opens)"
+            ),
+        },
+    },
 )
 async def start_slice(
     background_tasks: BackgroundTasks,
@@ -715,12 +865,29 @@ async def start_slice(
     summary="Slice a pre-configured 3MF (no profile resolution)",
     description=(
         "Accepts a `.3mf` that already contains `Metadata/project_settings.config` "
-        "(e.g., exported from OrcaSlicer or produced by `POST /api/slice/start`). "
-        "No catalog lookup is performed.\n\n"
-        "Use this when supplying a fully-configured multi-plate 3MF. "
-        "The `model_settings.config` inside the 3MF controls plate assignments.\n\n"
-        "Geometry-only retry works the same as in `POST /api/slice/start`."
+        "(e.g., exported from OrcaSlicer desktop or produced by `POST /api/slice/start` "
+        "with `export_3mf` set). No catalog lookup or profile merging is performed — "
+        "OrcaSlicer uses the embedded settings verbatim.\n\n"
+        "Use this endpoint when you already have a fully-configured 3MF and want to avoid "
+        "the overhead of profile resolution. Typical callers: Themis queue engine dispatching "
+        "pre-packed project 3MFs, or debugging with a known-good 3MF from the desktop app.\n\n"
+        "**Geometry-only retry** works the same as in `POST /api/slice/start`: when "
+        "`geometry_only_retry=true` (default) and the first slice fails, the API retries "
+        "with `Metadata/model_settings.config` stripped from the 3MF.\n\n"
+        "**`export_3mf`:** when set, OrcaSlicer embeds the sliced GCode into a `.3mf` and "
+        "the download endpoint returns that file instead of a standalone `.gcode`.\n\n"
+        "The response and job lifecycle are identical to `POST /api/slice/start`."
     ),
+    responses={
+        400: {"description": "Bad filename (null bytes, semicolons, or missing Content-Disposition filename)"},
+        422: {"description": "File is not a .3mf, or plate < 1"},
+        503: {
+            "description": (
+                "Too many concurrent slice jobs — retry when a slot opens "
+                "(check active_jobs in GET /api/health)"
+            ),
+        },
+    },
 )
 async def slice_prepared(
     background_tasks: BackgroundTasks,
@@ -774,13 +941,29 @@ async def slice_prepared(
 @app.post(
     "/api/slice/thumbnail",
     tags=["slice"],
-    summary="Render a plate thumbnail (synchronous)",
+    summary="Render a plate thumbnail PNG (synchronous)",
     description=(
-        "Runs OrcaSlicer with `--arrange 0` to extract a plate thumbnail PNG without "
-        "disturbing geometry. Returns the PNG bytes directly.\n\n"
-        "Synchronous — blocks up to 120 seconds. No job tracking.\n\n"
-        "Returns **422** on OrcaSlicer failure, timeout, or missing PNG output."
+        "Runs OrcaSlicer with `--arrange 0 --export-3mf` to render a plate thumbnail PNG "
+        "without disturbing the model's geometry or generating GCode. Returns the PNG bytes "
+        "directly with `Content-Type: image/png`.\n\n"
+        "**Blocking:** waits up to 120 seconds for OrcaSlicer to finish. No job tracking — "
+        "this is fire-and-forget from the caller's perspective.\n\n"
+        "The endpoint accepts only `.3mf` files. The 3MF must embed a valid plate (the "
+        "requested `plate` number must exist in the model). OrcaSlicer writes the PNG to "
+        "`Metadata/plate_{N}.png` inside the output 3MF; the endpoint extracts and returns "
+        "that PNG, cleaning up all temporary files afterwards.\n\n"
+        "All error conditions (OrcaSlicer failure, timeout, missing PNG output) return "
+        "**422** with a JSON detail object `{\"error\": \"...\"}` describing the cause."
     ),
+    responses={
+        422: {
+            "description": (
+                "OrcaSlicer returned non-zero, no PNG found in output, "
+                "plate < 1, bad filename, or non-.3mf file uploaded. "
+                "Also returned on timeout (the OrcaSlicer process is killed)."
+            ),
+        },
+    },
 )
 async def slice_thumbnail(
     background_tasks: BackgroundTasks,
@@ -865,13 +1048,22 @@ async def slice_thumbnail(
     tags=["slice"],
     summary="Poll slice job status",
     description=(
-        "Returns current job status. Poll every 2–5 seconds until `status` is "
-        "`completed` or `failed`.\n\n"
-        "`output_format` is `gcode` by default; `gcode_3mf` when `export_3mf` was set "
-        "(download returns the `.3mf`).\n\n"
-        "Jobs are evicted after download or after 1 hour. A 404 on a previously valid "
-        "`job_id` means the job has already been cleaned up."
+        "Returns the current status of a slice job. Poll every 2–5 seconds until `status` "
+        "is `completed` or `failed`.\n\n"
+        "**Response fields:**\n"
+        "- `job_id` — echoed back for correlation\n"
+        "- `status` — one of `pending`, `slicing`, `completed`, `failed`\n"
+        "- `output_format` — `gcode` (default) or `gcode_3mf` (when `export_3mf` was set)\n"
+        "- `sliced_file` — basename of the output file when `completed`, otherwise `null`\n"
+        "- `error` — human-readable error message when `failed`, otherwise `null`\n\n"
+        "**Job lifecycle:** `pending` → `slicing` → `completed` or `failed`\n\n"
+        "Jobs are kept for `JOB_TTL_SECONDS` (default 3600) or until downloaded. "
+        "A **404** on a previously-valid `job_id` means the job has already been evicted "
+        "— either downloaded or timed out."
     ),
+    responses={
+        404: {"description": "Job not found — never existed, already downloaded, or evicted after TTL"},
+    },
 )
 async def get_job_status(job_id: str):
     if job_id not in jobs:
@@ -891,14 +1083,23 @@ async def get_job_status(job_id: str):
     tags=["slice"],
     summary="Stream slice job logs (Server-Sent Events)",
     description=(
-        "Returns a Server-Sent Events stream of OrcaSlicer stdout lines.\n\n"
-        "Each event: `data: <log line>\\r\\n\\r\\n`\n\n"
-        "Terminal events:\n"
-        "- `data: __COMPLETED__` — job finished successfully; stream ends\n"
-        "- `data: __FAILED__: <reason>` — job failed; stream ends\n\n"
-        "Most agents can skip this and poll `GET /api/slice/status` instead."
+        "Returns a Server-Sent Events stream of OrcaSlicer stdout/stderr lines, "
+        "emitted in real time as the slicer runs.\n\n"
+        "**Event format:** `data: <log line>\\r\\n\\r\\n`\n\n"
+        "**Terminal events (stream ends after these):**\n"
+        "- `data: __COMPLETED__` — job finished successfully\n"
+        "- `data: __FAILED__: <reason>` — job failed; `<reason>` is a short label\n\n"
+        "**Usage notes:**\n"
+        "- The stream replays all buffered log lines immediately on connect, so connecting "
+        "after the job has already completed still delivers the full log history.\n"
+        "- Most callers can skip this and poll `GET /api/slice/status` instead — logs are "
+        "primarily useful for debugging slice failures.\n"
+        "- If the job is evicted before you connect, the endpoint returns **404**."
     ),
     response_class=StreamingResponse,
+    responses={
+        404: {"description": "Job not found — never existed, already downloaded, or evicted after TTL"},
+    },
 )
 async def get_job_logs(job_id: str):
     if job_id not in jobs:
@@ -912,12 +1113,25 @@ async def get_job_logs(job_id: str):
     tags=["slice"],
     summary="Download sliced output file",
     description=(
-        "Returns the sliced output as `application/octet-stream`. Call only when "
-        "`status` is `completed`.\n\n"
-        "**Warning:** downloading evicts the job immediately — there is no second download.\n\n"
-        "The filename extension indicates format: `.gcode` (default) or `.3mf` "
-        "(when `export_3mf` was set during job creation)."
+        "Returns the sliced output as `application/octet-stream`. The file extension "
+        "indicates the format:\n"
+        "- `.gcode` — standalone GCode file (default)\n"
+        "- `.3mf` — GCode embedded inside a 3MF (when `export_3mf` was set during job creation)\n\n"
+        "**⚠️ One-time download:** downloading evicts the job immediately — the in-memory "
+        "record and all temporary files on disk are deleted. There is no second download. "
+        "Only call this once you have confirmed `status == 'completed'`.\n\n"
+        "Returns **400** if the job exists but is not yet complete (wrong status). "
+        "Returns **404** if the job does not exist (never created, already downloaded, or evicted)."
     ),
+    responses={
+        400: {"description": "Job exists but is not yet complete — check status first"},
+        404: {
+            "description": (
+                "Job not found (never existed, already downloaded, or evicted after TTL), "
+                "or job is complete but the output file is missing from disk"
+            ),
+        },
+    },
 )
 async def download_sliced_file(job_id: str, background_tasks: BackgroundTasks):
     if job_id not in jobs:
@@ -988,24 +1202,56 @@ def _build_bed_template_bytes(printable_area: list, printable_height: float) -> 
 @app.post(
     "/api/pack",
     tags=["arrange"],
-    summary="Pack N STLs onto as many beds as needed (synchronous)",
+    summary="Pack N STLs onto as many plates as needed (synchronous)",
     description=(
-        "Distributes STL geometry across build plates via OrcaSlicer `--arrange 1 --orient 1`.\n\n"
-        "**Three ways to supply print settings (mutually exclusive):**\n\n"
-        "1. **Template file** — upload a `.3mf` whose `Metadata/project_settings.config` "
-        "carries the printer/bed configuration (`template` field).\n\n"
-        "2. **Profile UUIDs** — supply `machine_uuid`, `process_uuid`, and `filament_uuids` "
-        "(JSON array string). The container resolves profiles from its catalog and builds the "
-        "settings internally. This mode requires no template management by the caller and "
-        "automatically tracks the installed OrcaSlicer version's profile catalog.\n\n"
-        "3. **Explicit bed dimensions** — supply `bed_x`, `bed_y`, and `bed_z` (all in mm). "
-        "Orca constructs a minimal template from these dimensions and packs accordingly. "
-        "No profile catalog or template file needed.\n\n"
-        "Returns the resulting multi-plate `.3mf` as `application/octet-stream`. "
+        "Distributes STL geometry across build plates via OrcaSlicer `--arrange 1 --orient 1`. "
+        "Returns the resulting multi-plate `.3mf` directly as `application/octet-stream`. "
         "**Blocks for up to 120 seconds.**\n\n"
-        "Returns **400** if OrcaSlicer fails, **408** on timeout, **503** if the catalog "
-        "is not yet ready (UUID mode only)."
+        "## Bed / settings source (mutually exclusive — supply exactly one)\n\n"
+        "**1. Template file** (`template` field)\n"
+        "Upload a `.3mf` whose `Metadata/project_settings.config` carries the printer and "
+        "bed configuration. OrcaSlicer reads bed dimensions and settings from that config. "
+        "Use this when you already have a known-good 3MF template from a previous session.\n\n"
+        "**2. Profile UUIDs** (`machine_uuid` + `process_uuid` + `filament_uuids`)\n"
+        "The container resolves profiles from its catalog, builds the settings internally, "
+        "and constructs a minimal bed-only template (only `printable_area` and "
+        "`printable_height` are embedded — no full machine config that could override the "
+        "bed size). Templates for a given UUID combination are cached in memory, so repeated "
+        "calls with the same profiles are fast. This mode requires `catalog_loaded: true`.\n\n"
+        "**3. Explicit bed dimensions** (`bed_x` + `bed_y` + `bed_z`, all in mm)\n"
+        "Laminus constructs a minimal bed template from the supplied dimensions. "
+        "`bed_z` is the printable height (not the physical Z travel). "
+        "No profile catalog or template file needed — useful when you want geometry-only "
+        "packing without print settings.\n\n"
+        "## STL inputs\n\n"
+        "- `files` — one or more `.stl` files (max 50 per request)\n"
+        "- Filenames must not contain null bytes, newlines, or semicolons\n"
+        "- Duplicate filenames in the same batch are deduplicated with a numeric suffix\n\n"
+        "## Notes\n\n"
+        "- OrcaSlicer auto-orients objects (`--orient 1`) to minimise support material. "
+        "Pass orient=false to skip (not yet exposed as a parameter — file a request).\n"
+        "- The packed `.3mf` preserves `Metadata/project_settings.config` from the template "
+        "but discards any geometry or model_settings from it.\n"
+        "- All temporary files are cleaned up after the response is sent."
     ),
+    responses={
+        400: {
+            "description": (
+                "Bad filename in STL or template upload, OrcaSlicer arrange process failed "
+                "(non-zero exit or missing output file), or failed to build the combined 3MF"
+            ),
+        },
+        408: {"description": "Pack operation timed out after 120 seconds"},
+        422: {
+            "description": (
+                "No STL files provided, more than 50 STLs, non-.stl file in files list, "
+                "non-.3mf template, bed dimensions ≤ 0, invalid filament_uuids JSON, "
+                "UUID not found in catalog, or no settings source provided"
+            ),
+        },
+        500: {"description": "Unexpected system error — check server logs"},
+        503: {"description": "Profile catalog not yet ready (UUID mode only)"},
+    },
 )
 async def pack_stls(
     background_tasks: BackgroundTasks,
@@ -1016,7 +1262,7 @@ async def pack_stls(
     filament_uuids: Optional[str] = Form(None, description='JSON array, e.g. ["uuid1"]'),
     bed_x: Optional[float] = Form(None, description="Bed X dimension in mm (alternative to template / UUIDs)"),
     bed_y: Optional[float] = Form(None, description="Bed Y dimension in mm"),
-    bed_z: Optional[float] = Form(None, description="Bed Z (height) in mm"),
+    bed_z: Optional[float] = Form(None, description="Bed Z printable height in mm"),
 ):
     if not files:
         raise HTTPException(status_code=422, detail="At least one STL file is required.")
@@ -1199,18 +1445,39 @@ async def pack_stls(
         raise HTTPException(status_code=500, detail=f"System error: {e}")
 
 
-
 @app.post(
     "/api/arrange",
     tags=["arrange"],
     summary="Auto-arrange and orient objects in a 3MF (synchronous)",
     description=(
-        "Runs OrcaSlicer's plate-packing and auto-orientation on a `.3mf` and streams "
-        "the rearranged `.3mf` back directly. **Blocks for up to `ARRANGE_TIMEOUT_SECONDS` seconds** "
-        "(default 120) — no job lifecycle, no polling needed.\n\n"
-        "Use this to pack multiple models onto build plates before slicing. "
-        "Preserves `Metadata/model_settings.config` (extruder/slot assignments) from the input 3MF."
+        "Runs OrcaSlicer's plate-packing (`--arrange 1`) and auto-orientation "
+        "(`--orient 1`) on an existing `.3mf` and returns the rearranged `.3mf` directly "
+        "as `application/octet-stream`.\n\n"
+        "**Blocking:** waits up to `ARRANGE_TIMEOUT_SECONDS` (default 120 s) for OrcaSlicer "
+        "to finish. No job tracking — call completes synchronously.\n\n"
+        "**When to use this vs `POST /api/pack`:**\n"
+        "- Use `POST /api/arrange` when you already have a `.3mf` with the correct geometry "
+        "and want to repack it (e.g., after hand-editing or re-importing).\n"
+        "- Use `POST /api/pack` when starting from STL files that need to be combined into "
+        "a 3MF first.\n\n"
+        "**Settings preservation:** the input 3MF's `Metadata/project_settings.config` is "
+        "passed to OrcaSlicer via `--datadir`, which means OrcaSlicer may load its own "
+        "machine profiles from `/config`. The `Metadata/model_settings.config` (extruder/slot "
+        "assignments) from the input 3MF is preserved in the output.\n\n"
+        "All temporary files are cleaned up after the response is sent, including the "
+        "stable output copy used to serve the download."
     ),
+    responses={
+        400: {
+            "description": (
+                "Bad filename (null bytes, semicolons, or missing Content-Disposition filename), "
+                "non-.3mf file uploaded, OrcaSlicer returned non-zero exit code, "
+                "or output file missing after OrcaSlicer claims success"
+            ),
+        },
+        408: {"description": "OrcaSlicer arrange timed out — reduce model complexity or increase ARRANGE_TIMEOUT_SECONDS"},
+        500: {"description": "Unexpected system error — check server logs"},
+    },
 )
 async def auto_arrange_3mf(
     background_tasks: BackgroundTasks,
@@ -1307,14 +1574,32 @@ async def auto_arrange_3mf(
     tags=["profiles"],
     summary="Upload a user profile JSON",
     description=(
-        "Upload a flat OrcaSlicer preset JSON into the user config volume. "
-        "The file is placed under `/config/user/default/{type}/` and a catalog rebuild is "
-        "triggered in the background.\n\n"
-        "The file must have a `.json` extension and must be a fully-flattened preset "
-        "(no `inherits` chain). Use `flatten_profiles.py` inside the container to flatten "
-        "a system profile.\n\n"
-        "After uploading, wait ~5 s and call `GET /api/profiles` to confirm the profile appears."
+        "Upload a flat OrcaSlicer preset JSON into the user config volume at "
+        "`/config/user/default/{type}/`. A catalog rebuild is triggered in the background "
+        "automatically — wait ~5 s and call `GET /api/profiles` to confirm the profile "
+        "appears before using it in a slice job.\n\n"
+        "**Requirements for the JSON file:**\n"
+        "- Must have a `.json` extension\n"
+        "- Must be a *fully-flattened* preset with no `inherits` chain. If the profile "
+        "relies on a system base profile, flatten it first using `flatten_profiles.py` "
+        "inside the container: `docker exec laminus python /workspace/app/flatten_profiles.py "
+        "--profile 'Elegoo Centauri Carbon 0.4 nozzle'`\n"
+        "- `type` must be exactly `machine`, `process`, or `filament`\n\n"
+        "**Profile persistence:** the uploaded file is written to a Docker volume "
+        "(`/config/user/`). It survives container restarts but is not baked into the image. "
+        "Re-upload after replacing the container with a clean image.\n\n"
+        "**UUID stability:** user profiles receive a UUID derived from `(user, rel_path)` "
+        "so the UUID changes if the file is renamed or moved."
     ),
+    responses={
+        400: {
+            "description": (
+                "Invalid `type` (must be machine, process, or filament), "
+                "bad filename (null bytes, semicolons, path traversal), "
+                "or file does not have a .json extension"
+            ),
+        },
+    },
 )
 async def upload_profile(
     type: str = Form(...),
@@ -1351,9 +1636,24 @@ async def upload_profile(
     tags=["health"],
     summary="Service health check",
     description=(
-        "Returns service readiness information. Check `catalog_loaded` before calling "
-        "profile or slice endpoints — while the catalog is building (right after container "
-        "start), `catalog_loaded` is `false` and those endpoints return 503."
+        "Returns service readiness information. **Always call this first** — profile and "
+        "slice endpoints return **503** while `catalog_loading` is `true`.\n\n"
+        "**Response fields:**\n"
+        "- `status` — always `\"healthy\"` when the process is running\n"
+        "- `orcaslicer_installed` — whether the OrcaSlicer binary exists at "
+        "`/usr/local/bin/orcaslicer`\n"
+        "- `orcaslicer_version` — version string from `orcaslicer --version`, or `null` "
+        "if the binary is not installed or timed out\n"
+        "- `config_mounted` — whether `/config` exists (volume mount check)\n"
+        "- `system_profiles_available` — whether the OrcaSlicer AppImage's profiles "
+        "directory is present (required for catalog build)\n"
+        "- `catalog_loaded` — `true` when the profile catalog is fully built and ready; "
+        "`false` during initial startup or rebuild\n"
+        "- `catalog_building` — `true` while a catalog rebuild is in progress\n"
+        "- `catalog_profile_count` — `{machine: N, process: N, filament: N}` when loaded, "
+        "otherwise `null`\n"
+        "- `active_jobs` — number of jobs currently in `slicing` status\n"
+        "- `thumbnail_endpoint` — always `true` (feature-flag sentinel for Themis)"
     ),
 )
 async def health_check():
