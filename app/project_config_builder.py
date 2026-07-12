@@ -43,6 +43,10 @@ def build_project_settings(machine: dict, process: dict, filaments: list[dict]) 
 
     config["from"] = "user"
     config.setdefault("version", process.get("version", machine.get("version", "1.0.0")))
+    # OrcaSlicer CLI -51: if machine_start_gcode uses M83 (relative extrusion), the
+    # layer_gcode key must be present or the slicer aborts. Desktop profiles define it
+    # as an empty string; Docker AppImage profiles omit it entirely.
+    config.setdefault("layer_gcode", "")
     return config
 
 

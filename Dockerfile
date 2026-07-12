@@ -61,7 +61,7 @@ RUN chmod +x /entrypoint.sh
 # Set environment variables for OrcaSlicer execution
 ENV DISPLAY=:99
 ENV PYTHONUNBUFFERED=1
-ENV ORCA_VERSION=2.4.1
+ENV ORCA_VERSION=2.4.2
 
 # Expose port for FastAPI server
 EXPOSE 5000
