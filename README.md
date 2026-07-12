@@ -14,7 +14,7 @@ The API is available at `http://localhost:5000`. Drop your OrcaSlicer preset JSO
 
 ### `ORCA_VERSION`
 
-The OrcaSlicer AppImage is **not baked into the Docker image**. On first container start, `entrypoint.sh` downloads the AppImage for the version specified by `ORCA_VERSION`, extracts it, and caches it in the `orca-slicer` named volume. Subsequent restarts skip the download as long as the version on disk matches `ORCA_VERSION`.
+The OrcaSlicer AppImage is **not baked into the Docker image**. On first container start, `entrypoint.sh` downloads the AppImage for the version specified by `ORCA_VERSION`, extracts it, and caches it in the `laminus-slicer` named volume. Subsequent restarts skip the download as long as the version on disk matches `ORCA_VERSION`.
 
 To upgrade OrcaSlicer without rebuilding the image, set `ORCA_VERSION` to the new version and restart the container. The entrypoint detects the version mismatch, downloads the new release, and replaces the cached install.
 
@@ -30,7 +30,7 @@ ORCA_VERSION=2.4.1   # default
 | `./config` | `/config` | OrcaSlicer preset profiles |
 | `./data` | `/data` | Input models and output files |
 | `./app` | `/workspace/app` | Application code (live reload in dev) |
-| `orca-slicer` (named) | `/opt/orcaslicer` | Cached OrcaSlicer install — persists across restarts |
+| `laminus-slicer` (named) | `/opt/orcaslicer` | Cached OrcaSlicer install — persists across restarts |
 
 ## API Reference
 
@@ -75,7 +75,7 @@ curl http://localhost:5000/api/profiles
 OrcaSlicer's built-in profiles use inheritance and cannot be used directly. Use `flatten_profiles.py` inside the container to resolve the inheritance chain and write a standalone user preset:
 
 ```bash
-docker exec orcaslicer-api python3 /workspace/flatten_profiles.py \
+docker exec laminus python3 /workspace/flatten_profiles.py \
   "/opt/orcaslicer/resources/profiles/Creality/machine/Creality Ender-3 0.4 nozzle.json" \
   "/config/user/default/machine/Creality Ender-3 0.4 nozzle.json" \
   "machine"

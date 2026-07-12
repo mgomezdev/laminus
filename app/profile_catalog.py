@@ -300,6 +300,29 @@ class ProfileCatalog:
     def counts(self) -> dict:
         return {k: len(v) for k, v in self._catalog.items()}
 
+    def save_to_cache(self, path: str, cache_key: str) -> None:
+        """Write catalog state to a JSON file keyed by cache_key."""
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"cache_key": cache_key, "catalog": self._catalog, "by_uuid": self._by_uuid}, f)
+        os.replace(tmp, path)
+
+    @classmethod
+    def load_from_cache(cls, path: str, expected_key: str, system_dir: str, user_dir: str) -> "ProfileCatalog | None":
+        """Return a pre-built ProfileCatalog from cache, or None if stale/missing."""
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if data.get("cache_key") != expected_key:
+            return None
+        cat = cls(system_dir=system_dir, user_dir=user_dir)
+        cat._catalog = data["catalog"]
+        cat._by_uuid = data["by_uuid"]
+        cat._built = True
+        return cat
+
     @staticmethod
     def _public(entry: dict) -> dict:
         return {k: v for k, v in entry.items() if not k.startswith("_")}

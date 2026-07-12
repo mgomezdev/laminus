@@ -1,0 +1,250 @@
+# Laminus — Contributor Reference
+
+Laminus is the OrcaSlicer sidecar service. It provides a REST API for profile catalog management, STL slicing, and 3MF packing. Themis calls Laminus to resolve profiles and slice files; Ordinus calls Laminus (optionally) for health checks. OrcaSlicer runs as a subprocess via xvfb-run.
+
+This repo is named `orca` on disk but the service is called **Laminus**.
+
+---
+
+## Stack
+
+| Layer | Technology |
+|---|---|
+| Runtime | Python 3 / FastAPI / uvicorn |
+| OrcaSlicer | AppImage downloaded at container start, extracted via `--appimage-extract` |
+| Display | Xvfb (X virtual framebuffer) — OrcaSlicer requires X11 even headless |
+| Persistence | No database — job state in memory + `/data/jobs.json`; catalog cache in `/data/catalog_cache.json` |
+| Container | Port 5000 internal only (no host port exposed) |
+
+---
+
+## Repo Layout
+
+```
+orca/                              # service name: Laminus
+├── app/
+│   ├── main.py                    # FastAPI app — ALL routes live here
+│   ├── profile_catalog.py         # ProfileCatalog class (build, cache, lookup)
+│   ├── project_config_builder.py  # Merge presets → project_settings.config
+│   ├── stl_to_3mf.py              # STL parse/convert, 3MF injection, strip_application_version
+│   └── templates/
+│       └── index.html             # Web dashboard UI
+├── entrypoint.sh                  # Downloads/extracts OrcaSlicer AppImage on first start
+├── flatten_profiles.py            # Dev utility: inspect inheritance chains
+├── requirements.txt
+├── openapi.yaml
+└── docs/
+    ├── laminus-api-for-agents.md  # Canonical API reference with curl examples
+    ├── laminus-openapi.yaml       # OpenAPI 3.0 spec
+    └── themis-integration-requirements.md
+```
+
+---
+
+## Running Locally
+
+Laminus is designed to run in Docker (it needs OrcaSlicer, Xvfb, and specific volume layout). The recommended approach is to run it via Concordia:
+
+```bash
+# From the Concordia (omnibus) repo:
+docker compose -f docker-compose.yml -f docker-compose.local.yml up laminus
+```
+
+For local Python dev without OrcaSlicer (catalog and HTTP layer only):
+```bash
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 5000
+# Note: slice/arrange/pack endpoints will fail without OrcaSlicer
+```
+
+---
+
+## Architecture
+
+### No database
+
+Laminus has no persistent database. State lives in:
+- **In-memory:** active slice jobs dict `_jobs: dict[str, Job]` in `main.py`
+- **`/data/jobs.json`:** not used for persistence; the jobs dict is evicted by TTL sweep
+- **`/data/catalog_cache.json`:** profile catalog cache, keyed by MD5 of ORCA_VERSION + user config dir mtimes
+
+### Startup sequence (`app/main.py :: lifespan`)
+
+1. Create dirs: `/config`, `/data`, `/tmp/jobs`, `/tmp/arrange`
+2. Run `orcaslicer --version` → capture version string
+3. Launch `_build_catalog()` as background asyncio task
+4. Launch `_evict_stale_jobs()` sweep loop (evicts jobs older than `JOB_TTL_SECONDS`)
+
+### Profile catalog
+
+The catalog is built once at startup and cached. Rebuilds are triggered by `POST /api/profiles/upload` or `GET /api/profiles?refresh=true`.
+
+```
+ProfileCatalog.build()
+  → walk /opt/orcaslicer/resources/profiles   (system profiles)
+  → walk /config/user/default/                (user profiles)
+  → resolve_inheritance() per profile         (flatten inherits= chain)
+  → assign stable UUIDs:
+       machine UUID  = UUID5(namespace, "manufacturer|model|nozzle")
+       process UUID  = UUID5(namespace, "source\0rel_path")
+       filament UUID = UUID5(namespace, "source\0rel_path")
+  → save_to_cache() → /data/catalog_cache.json
+```
+
+UUID namespace: `a7f3c2e1-84b0-4d9e-b1f2-3c8a5d6e7f01`
+
+UUIDs are stable across catalog rebuilds and OrcaSlicer upgrades (as long as relative paths and machine identifiers don't change).
+
+### How OrcaSlicer is invoked
+
+Every call to OrcaSlicer goes through `xvfb-run` because OrcaSlicer requires an X11 display even in headless mode:
+
+```bash
+# Slice a prepared 3MF:
+xvfb-run -a --server-args="-screen 0 1024x768x24" \
+  orcaslicer --slice {plate} --outputdir {dir} [--export-3mf name] prepared.3mf
+
+# Arrange + orient:
+xvfb-run -a --server-args="-screen 0 1024x768x24" \
+  orcaslicer --datadir /config --arrange 1 --orient 1 \
+  --export-3mf {out_file} combined.3mf
+
+# Thumbnail only:
+xvfb-run -a --server-args="-screen 0 1024x768x24" \
+  orcaslicer --slice {plate} --arrange 0 --export-3mf thumb.3mf in.3mf
+```
+
+OrcaSlicer is not in the Docker image. `entrypoint.sh` downloads the AppImage at container start (keyed by `ORCA_VERSION`) and extracts it into the `laminus-slicer` named volume at `/opt/orcaslicer`. This only happens once; subsequent restarts reuse the extracted volume.
+
+---
+
+## API Reference
+
+All routes are in `app/main.py`. Full reference with curl examples: `docs/laminus-api-for-agents.md`.
+
+### Health
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/health` | Service readiness, catalog status, active job count |
+
+### Profiles
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/profiles` | Full catalog; `?refresh=true` triggers background rebuild |
+| `GET` | `/api/profiles/{uuid}` | Single profile detail |
+| `POST` | `/api/profiles/merged-config` | Deep-merged project_settings.config for a set of UUIDs |
+| `POST` | `/api/profiles/upload` | Upload user preset JSON, triggers catalog rebuild |
+
+### Slicing
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/slice/start` | Upload STL/3MF + profile UUIDs → returns `job_id` |
+| `POST` | `/api/slice/prepared` | Slice a pre-configured 3MF (skip profile resolution) |
+| `POST` | `/api/slice/thumbnail` | Synchronous thumbnail render (PNG), no job lifecycle |
+| `GET` | `/api/slice/status/{job_id}` | Poll: `pending→slicing→completed\|failed` |
+| `GET` | `/api/slice/logs/{job_id}` | SSE stream of OrcaSlicer stdout |
+| `GET` | `/api/slice/download/{job_id}` | Download `.gcode` or `.3mf`; evicts job on response |
+
+### Arrange & Pack
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/arrange` | Arrange + orient a 3MF via OrcaSlicer; returns rearranged 3MF |
+| `POST` | `/api/pack` | Inject N STLs into a bed template, pack across plates |
+
+`/api/pack` supports three template modes: uploaded `.3mf`, UUID-based (Laminus resolves machine settings), or explicit bed dimensions.
+
+---
+
+## Key Code Paths
+
+### 1. Slice job lifecycle
+
+```
+POST /api/slice/start
+  → validate profile UUIDs exist in catalog
+  → project_config_builder.py :: build_project_settings(machine, process, filaments)
+       → deep-merge flattened preset dicts (machine → process → per-filament)
+       → strip metadata keys (inherits, compatible_printers, etc.)
+  → stl_to_3mf.py :: stl_to_3mf() if input is STL
+  → stl_to_3mf.py :: embed_project_settings() → prepared.3mf
+  → stl_to_3mf.py :: strip_application_version() → fix OrcaSlicer 2.3/2.4 segfault
+  → asyncio.create_task(_run_slice_job())
+       → subprocess: xvfb-run orcaslicer --slice ...
+       → on complete: save .gcode to /tmp/jobs/{job_id}/
+  → return { job_id }
+```
+
+### 2. Profile merged-config (no slice)
+
+```
+POST /api/profiles/merged-config
+  body: { machine_uuid, process_uuid, filament_uuids[] }
+  → catalog.get_profile(uuid) for each
+  → project_config_builder.build_project_settings(machine, process, filaments)
+  → return merged dict
+```
+
+Themis calls this to inspect what settings a profile combination would produce.
+
+### 3. Pack STLs into 3MF
+
+```
+POST /api/pack
+  body: { stl_files, template (uuid or bed dimensions), project_settings? }
+  → stl_to_3mf.py :: inject_stls_into_3mf() → combined.3mf
+  → subprocess: xvfb-run orcaslicer --arrange 1 --orient 1 --export-3mf out.3mf combined.3mf
+  → return packed 3MF bytes
+```
+
+---
+
+## Environment Variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ORCA_VERSION` | `2.4.1` | OrcaSlicer AppImage version to download |
+| `SYSTEM_PROFILES_DIR` | `/opt/orcaslicer/resources/profiles` | System OrcaSlicer profiles |
+| `USER_CONFIG_DIR` | `/config/user` | User OrcaSlicer profiles |
+| `SLICE_TIMEOUT_SECONDS` | `600` | SIGKILL timeout for slice subprocess |
+| `ARRANGE_TIMEOUT_SECONDS` | `120` | SIGKILL timeout for arrange/pack subprocess |
+| `JOB_TTL_SECONDS` | `3600` | Age at which completed jobs are evicted |
+| `JOB_SWEEP_INTERVAL_SECONDS` | `300` | How often the eviction sweep runs |
+| `MAX_CONCURRENT_JOBS` | `4` | Max simultaneous slice jobs (503 when exceeded) |
+
+---
+
+## Adding a New Route
+
+All routes live in `app/main.py`. Add a new route function there:
+
+```python
+@app.post("/api/my-endpoint")
+async def my_endpoint(body: MyRequestModel):
+    ...
+```
+
+Use Pydantic models for request/response bodies. Keep route handlers thin — move logic into `profile_catalog.py`, `project_config_builder.py`, or `stl_to_3mf.py` as appropriate.
+
+---
+
+## No DB Migrations
+
+Laminus has no database. If you need to persist new data:
+- Add to the in-memory `_jobs` dict for job-scoped state
+- Write/read `/data/<name>.json` for configuration or cache data
+- Add a new field to the catalog cache structure (increment or invalidate the cache key)
+
+---
+
+## Known Gotchas
+
+- **xvfb-run is required.** OrcaSlicer segfaults without X11. Never call `orcaslicer` directly.
+- **OrcaSlicer not in image.** It's in the `laminus-slicer` named volume. If the volume is missing, `entrypoint.sh` re-downloads and extracts. Don't delete the volume in production.
+- **`strip_application_version()` is not optional.** OrcaSlicer 2.3.x/2.4.x on Linux segfaults when it sees `<metadata name="Application">` in 3MF files. This is called automatically in the slice pipeline.
+- **Catalog build is async and slow.** First slice request after a fresh start may fail with 503 ("catalog building") while the background build runs. This is expected — callers should poll `/api/health` until `catalog_loaded: true`.
+- **Job state is in-memory.** A Laminus restart loses all in-flight job state. Themis handles this by re-queuing jobs that were in `slicing` state at startup.
+- **Profile UUIDs are stable but path-sensitive.** If you rename a profile file, its UUID changes. Don't rename profile files without also updating any stored UUID references in Themis.

@@ -1,0 +1,891 @@
+openapi: "3.0.3"
+
+info:
+  title: OrcaSlicer CLI Container API
+  version: "1.0.0"
+  description: |
+    A containerised REST API that wraps the OrcaSlicer CLI to perform headless 3D model
+    slicing and plate arrangement.
+
+    ## Quick-start workflow for LLM agents
+
+    1. **Check readiness** — `GET /api/health`. Proceed only when `catalog_loaded` is `true`.
+    2. **Discover profiles** — `GET /api/profiles` (optionally filtered by `manufacturer`,
+       `model`, and `nozzle`). Collect `uuid` values for the machine, one process preset,
+       and one or more filament presets.
+    3. **Start a slice job** — `POST /api/slice/start` with the 3MF/STL file and the UUIDs
+       from step 2. Receive a `job_id`.
+    4. **Poll for completion** — `GET /api/slice/status/{job_id}`. Repeat until `status` is
+       `"completed"` or `"failed"`.
+    5. **Download output** — `GET /api/slice/download/{job_id}`. Returns the `.gcode` (or
+       `.3mf` when `export_3mf` was specified).
+
+    Alternatively, if you already have a fully-configured `.3mf` (plate layout, print
+    settings embedded), skip steps 2–3 and use `POST /api/slice/prepared` instead.
+
+servers:
+  - url: http://localhost:5000
+    description: Default container port
+
+tags:
+  - name: health
+    description: Service readiness and version information
+  - name: profiles
+    description: Machine, process, and filament preset catalog
+  - name: slice
+    description: Slice job lifecycle (start → poll → download)
+  - name: arrange
+    description: Synchronous plate arrangement (no job lifecycle)
+
+paths:
+
+  /api/health:
+    get:
+      tags: [health]
+      summary: Service health check
+      description: |
+        Returns readiness information. Check `catalog_loaded` before calling profile or
+        slice endpoints. While the catalog is building (right after container start),
+        `catalog_loaded` will be `false` and profile/slice calls will return 503.
+      operationId: health_check
+      responses:
+        "200":
+          description: Service is up (does not imply OrcaSlicer is usable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: healthy
+                orcaslicer_installed: true
+                orcaslicer_version: "OrcaSlicer-2.2.0"
+                config_mounted: true
+                system_profiles_available: true
+                catalog_loaded: true
+                catalog_profile_count:
+                  machine: 142
+                  process: 87
+                  filament: 310
+                active_jobs: 0
+
+  /api/profiles:
+    get:
+      tags: [profiles]
+      summary: List all profiles in the catalog
+      description: |
+        Returns every machine, process, and filament preset the catalog knows about.
+
+        **Filtering:** supply all three of `manufacturer`, `model`, and `nozzle` together
+        to receive only the matching machine plus the process and filament presets that are
+        compatible with it. Supplying only one or two of the three returns HTTP 422.
+
+        **Refresh:** pass `refresh=true` to trigger a background catalog rebuild (e.g.,
+        after uploading new profiles). The response still reflects the current catalog;
+        call again after a short delay to see the updated profiles.
+
+        Returns HTTP 503 while the catalog is initialising. Retry after a few seconds.
+      operationId: get_profiles
+      parameters:
+        - name: manufacturer
+          in: query
+          description: >
+            Printer manufacturer name, e.g. `"Bambu Lab"` or `"Creality"`.
+            Must be supplied together with `model` and `nozzle`.
+          required: false
+          schema:
+            type: string
+        - name: model
+          in: query
+          description: >
+            Printer model name, e.g. `"P1S"` or `"Ender-3"`.
+            Must be supplied together with `manufacturer` and `nozzle`.
+          required: false
+          schema:
+            type: string
+        - name: nozzle
+          in: query
+          description: >
+            Nozzle diameter as a decimal string, e.g. `"0.4"` or `"0.6"`.
+            Must be supplied together with `manufacturer` and `model`.
+          required: false
+          schema:
+            type: string
+        - name: refresh
+          in: query
+          description: >
+            When `true`, trigger a background catalog rebuild before returning. The
+            response contains the *previous* catalog; call again after ~5 seconds to
+            see updated profiles.
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Catalog contents (possibly filtered)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfilesResponse"
+        "422":
+          description: Partial machine tuple (provide all three or none)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+        "503":
+          description: Catalog is still building — retry shortly
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogBuildingError"
+
+  /api/profiles/{profile_uuid}:
+    get:
+      tags: [profiles]
+      summary: Get full detail for one profile
+      description: |
+        Returns the complete public fields for a single profile entry identified by its
+        stable UUID. Useful for inspecting `compatible_printers`, `layer_height`, filament
+        temperatures, and similar fields before building a slice job.
+
+        Returns HTTP 503 while the catalog is initialising.
+      operationId: get_profile_detail
+      parameters:
+        - name: profile_uuid
+          in: path
+          required: true
+          description: UUID returned by `GET /api/profiles`
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Profile detail
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/MachineProfile"
+                  - $ref: "#/components/schemas/ProcessProfile"
+                  - $ref: "#/components/schemas/FilamentProfile"
+        "404":
+          description: UUID not found in catalog
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+        "503":
+          description: Catalog is still building
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogBuildingError"
+
+  /api/profiles/upload:
+    post:
+      tags: [profiles]
+      summary: Upload a user profile JSON
+      description: |
+        Upload a single OrcaSlicer preset JSON into the user config volume. The file is
+        placed under `/config/user/default/{type}/`. A catalog rebuild is triggered
+        automatically in the background.
+
+        The uploaded file must:
+        - Have a `.json` extension
+        - Contain a valid OrcaSlicer preset (e.g. exported from OrcaSlicer or produced by
+          `flatten_profiles.py`)
+        - Not contain `"inherits"` chains — user presets must be fully flattened
+
+        After uploading, wait ~5 seconds and call `GET /api/profiles?refresh=false` to
+        confirm the new profile appears.
+      operationId: upload_profile
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [type, file]
+              properties:
+                type:
+                  type: string
+                  enum: [machine, process, filament]
+                  description: Which preset category this file belongs to
+                file:
+                  type: string
+                  format: binary
+                  description: The OrcaSlicer preset JSON file
+      responses:
+        "200":
+          description: Profile saved and catalog rebuild triggered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+        "400":
+          description: Invalid type, missing filename, or non-.json file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+
+  /api/slice/start:
+    post:
+      tags: [slice]
+      summary: Start a slice job (UUID-based profile resolution)
+      description: |
+        Upload a 3MF or STL file and specify print settings by UUID. The API resolves the
+        profiles, builds a `project_settings.config`, embeds it into the 3MF, then launches
+        OrcaSlicer in the background.
+
+        **STL input:** STL files are automatically converted to a minimal 3MF before
+        slicing. Binary and ASCII STL are both supported.
+
+        **Profile resolution order:**
+        1. `manufacturer` + `model` + `nozzle` → looked up in the machine catalog
+        2. `process_uuid` → must be a `"process"` type UUID
+        3. `filament_uuids` → each must be a `"filament"` type UUID; order matches
+           extruder slots (index 0 → extruder 1)
+
+        **Compatibility check:** the chosen process must list the machine name in its
+        `compatible_printers`, unless `compatible_printers` is empty (universal preset).
+
+        **Geometry-only retry:** if slicing fails, the API strips `model_settings.config`
+        from the 3MF and retries automatically (disable with `geometry_only_retry=false`).
+
+        Returns HTTP 503 when the profile catalog is not yet ready.
+
+        After this call, poll `GET /api/slice/status/{job_id}` until `status` is
+        `"completed"` or `"failed"`, then call `GET /api/slice/download/{job_id}`.
+      operationId: start_slice
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+                - manufacturer
+                - model
+                - nozzle
+                - process_uuid
+                - filament_uuids
+                - plate
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The `.3mf` or `.stl` model to slice
+                manufacturer:
+                  type: string
+                  description: Printer manufacturer, e.g. `"Bambu Lab"`
+                model:
+                  type: string
+                  description: Printer model, e.g. `"P1S"`
+                nozzle:
+                  type: string
+                  description: Nozzle diameter string, e.g. `"0.4"`
+                process_uuid:
+                  type: string
+                  format: uuid
+                  description: UUID of a `process` profile from `GET /api/profiles`
+                filament_uuids:
+                  type: string
+                  description: |
+                    JSON-encoded array of filament profile UUIDs, one per extruder slot.
+                    Example: `["550e8400-e29b-41d4-a716-446655440000"]`
+                plate:
+                  type: integer
+                  minimum: 1
+                  description: >
+                    Build plate number to slice (1-based). Use `1` for single-plate models.
+                export_3mf:
+                  type: string
+                  nullable: true
+                  description: |
+                    Optional output filename (e.g. `output.3mf`). When provided, OrcaSlicer
+                    also exports a sliced `.3mf` in addition to `.gcode`. The download
+                    endpoint returns this file when `output_format` is `"gcode_3mf"`.
+                geometry_only_retry:
+                  type: boolean
+                  default: true
+                  description: >
+                    If `true` (default), retry slicing with `model_settings.config` stripped
+                    from the input 3MF when the first attempt fails.
+      responses:
+        "200":
+          description: Job accepted and running in background
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobStarted"
+        "400":
+          description: Bad filename
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+        "422":
+          description: Invalid parameters (bad UUIDs, incompatible profiles, plate < 1, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+        "503":
+          description: Profile catalog not yet ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+
+  /api/slice/prepared:
+    post:
+      tags: [slice]
+      summary: Slice a pre-configured 3MF (no profile resolution)
+      description: |
+        Accepts a `.3mf` that already contains `Metadata/project_settings.config` (i.e.,
+        it was exported from OrcaSlicer with print settings embedded, or built by
+        `POST /api/slice/start`). No catalog lookup is performed.
+
+        This is the preferred endpoint when Themis supplies a fully-configured multi-plate
+        3MF. The `model_settings.config` inside the 3MF determines plate assignments.
+
+        **Geometry-only retry** works the same as in `POST /api/slice/start`.
+
+        Poll and download via the same status/download endpoints.
+      operationId: slice_prepared
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, plate]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: A `.3mf` file with embedded print settings
+                plate:
+                  type: integer
+                  minimum: 1
+                  description: Build plate number to slice (1-based)
+                export_3mf:
+                  type: string
+                  nullable: true
+                  description: Optional output `.3mf` filename (same semantics as `start`)
+                geometry_only_retry:
+                  type: boolean
+                  default: true
+                  description: Strip `model_settings.config` and retry on failure
+      responses:
+        "200":
+          description: Job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobStarted"
+        "400":
+          description: Bad filename or non-.3mf file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+        "422":
+          description: plate < 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+
+  /api/slice/status/{job_id}:
+    get:
+      tags: [slice]
+      summary: Poll slice job status
+      description: |
+        Returns the current status of a slice job. Poll until `status` is `"completed"` or
+        `"failed"`. A completed job has `sliced_file` set to the output filename.
+
+        Jobs are evicted from memory after download or after 1 hour, whichever comes first.
+        A 404 on a previously valid `job_id` means the job has been cleaned up.
+
+        **Recommended polling interval:** 2–5 seconds.
+      operationId: get_job_status
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Job status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobStatus"
+              examples:
+                pending:
+                  value:
+                    job_id: "550e8400-e29b-41d4-a716-446655440000"
+                    status: pending
+                    output_format: gcode
+                    sliced_file: null
+                    error: null
+                completed:
+                  value:
+                    job_id: "550e8400-e29b-41d4-a716-446655440000"
+                    status: completed
+                    output_format: gcode
+                    sliced_file: "model_plate1.gcode"
+                    error: null
+                failed:
+                  value:
+                    job_id: "550e8400-e29b-41d4-a716-446655440000"
+                    status: failed
+                    output_format: gcode
+                    sliced_file: null
+                    error: "OrcaSlicer slice process failed. See logs."
+        "404":
+          description: Job not found (evicted or never created)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+
+  /api/slice/logs/{job_id}:
+    get:
+      tags: [slice]
+      summary: Stream slice job logs (SSE)
+      description: |
+        Returns a Server-Sent Events stream of OrcaSlicer stdout lines for the given job.
+
+        **Event format:** each line is sent as `data: <text>\r\n\r\n`.
+
+        **Terminal events:**
+        - `data: __COMPLETED__` — job finished successfully; the stream ends.
+        - `data: __FAILED__: <reason>` — job failed; the stream ends.
+
+        The stream ends automatically once the terminal event is sent. Clients may close the
+        connection at any time.
+      operationId: get_job_logs
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: SSE log stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Line-by-line SSE data. Each event: `data: <log line>\r\n\r\n`.
+                  Ends with `data: __COMPLETED__` or `data: __FAILED__: <reason>`.
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+
+  /api/slice/download/{job_id}:
+    get:
+      tags: [slice]
+      summary: Download the sliced output file
+      description: |
+        Returns the sliced output as a binary file download. The content type is always
+        `application/octet-stream`.
+
+        The filename indicates the format:
+        - `.gcode` — standard GCode (default)
+        - `.3mf` — sliced 3MF (only when `export_3mf` was set during job creation)
+
+        **Important:** downloading a job evicts it from memory and deletes its temporary
+        files. There is no second download opportunity.
+
+        Only call this when `status` is `"completed"` (check `GET /api/slice/status`
+        first).
+      operationId: download_sliced_file
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Sliced file (GCode or 3MF)
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+                example: 'attachment; filename="model_plate1.gcode"'
+        "400":
+          description: Job is not yet complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+        "404":
+          description: Job not found or output file missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+
+  /api/arrange:
+    post:
+      tags: [arrange]
+      summary: Auto-arrange and orient objects in a 3MF (synchronous)
+      description: |
+        Runs OrcaSlicer's built-in arrangement and orientation passes on a `.3mf` file and
+        streams the rearranged `.3mf` back directly. No job lifecycle — this call blocks
+        until complete (35-second timeout).
+
+        Use this to pack multiple models onto a build plate before slicing.
+
+        **Input:** a `.3mf` containing one or more model objects.
+        **Output:** a new `.3mf` with objects arranged and (optionally) auto-oriented on
+        the build plate.
+      operationId: auto_arrange_3mf
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The input `.3mf` file
+                arrange:
+                  type: boolean
+                  default: true
+                  description: Run the plate arrangement pass
+                orient:
+                  type: boolean
+                  default: true
+                  description: Run the auto-orientation pass
+      responses:
+        "200":
+          description: Arranged `.3mf` file
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+                example: 'attachment; filename="arranged_model.3mf"'
+        "400":
+          description: Non-.3mf file or OrcaSlicer returned non-zero
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+        "408":
+          description: Arrangement timed out after 35 seconds
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+        "500":
+          description: Unexpected system error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+
+components:
+  schemas:
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: healthy
+        orcaslicer_installed:
+          type: boolean
+          description: Whether the OrcaSlicer binary exists at its expected path
+        orcaslicer_version:
+          type: string
+          nullable: true
+          description: Version string from `orcaslicer --version`, or null if unavailable
+          example: "OrcaSlicer-2.2.0"
+        config_mounted:
+          type: boolean
+          description: Whether `/config` is accessible
+        system_profiles_available:
+          type: boolean
+          description: Whether the system profiles directory exists in the container
+        catalog_loaded:
+          type: boolean
+          description: >
+            `true` once the initial profile scan completes. Do not call profile or slice
+            endpoints until this is `true`.
+        catalog_profile_count:
+          nullable: true
+          description: Profile counts by type, or null if catalog not yet loaded
+          type: object
+          properties:
+            machine:
+              type: integer
+            process:
+              type: integer
+            filament:
+              type: integer
+        active_jobs:
+          type: integer
+          description: Number of slice jobs currently running
+
+    ProfilesResponse:
+      type: object
+      description: All profiles indexed by type
+      properties:
+        machine:
+          type: array
+          items:
+            $ref: "#/components/schemas/MachineProfile"
+        process:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProcessProfile"
+        filament:
+          type: array
+          items:
+            $ref: "#/components/schemas/FilamentProfile"
+
+    MachineProfile:
+      type: object
+      description: A printer machine preset
+      properties:
+        uuid:
+          type: string
+          format: uuid
+          description: >
+            Stable UUID derived from (manufacturer, model, nozzle). Identical across
+            container restarts and for equivalent printers in system vs. user profiles.
+        type:
+          type: string
+          enum: [machine]
+        name:
+          type: string
+          description: Full profile name, e.g. `"Bambu Lab P1S 0.4 nozzle"`
+          example: "Bambu Lab P1S 0.4 nozzle"
+        source:
+          type: string
+          enum: [system, user]
+          description: Whether the profile came from OrcaSlicer's bundled profiles or the user config
+        rel_path:
+          type: string
+          description: Relative path within the source directory
+        manufacturer:
+          type: string
+          nullable: true
+          example: "Bambu Lab"
+        model:
+          type: string
+          nullable: true
+          example: "P1S"
+        nozzle:
+          type: string
+          nullable: true
+          description: Nozzle diameter as parsed from the profile name
+          example: "0.4"
+        nozzle_diameter:
+          nullable: true
+          description: Nozzle diameter from profile data (may be a string or number)
+        bed_size_x:
+          nullable: true
+          description: Build plate X dimension (mm)
+        bed_size_y:
+          nullable: true
+          description: Build plate Y dimension (mm)
+        extruder_count:
+          type: integer
+          default: 1
+          description: Number of extruders
+
+    ProcessProfile:
+      type: object
+      description: A process (print settings) preset
+      properties:
+        uuid:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [process]
+        name:
+          type: string
+          example: "0.20mm Standard @Bambu Lab P1S"
+        source:
+          type: string
+          enum: [system, user]
+        rel_path:
+          type: string
+        layer_height:
+          nullable: true
+          description: Layer height value from the preset
+          example: "0.2"
+        speed:
+          nullable: true
+          description: Print speed value from the preset
+        compatible_printers:
+          type: array
+          items:
+            type: string
+          description: >
+            List of machine names this process is compatible with. An empty array means
+            compatible with all machines.
+          example: ["Bambu Lab P1S 0.4 nozzle"]
+
+    FilamentProfile:
+      type: object
+      description: A filament preset
+      properties:
+        uuid:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [filament]
+        name:
+          type: string
+          example: "Bambu PLA Basic @Bambu Lab P1S"
+        display_name:
+          type: string
+          description: Name with any ` @machine` suffix stripped
+          example: "Bambu PLA Basic"
+        source:
+          type: string
+          enum: [system, user]
+        rel_path:
+          type: string
+        filament_type:
+          type: string
+          example: "PLA"
+        filament_colour:
+          type: string
+          description: Hex colour string
+          example: "#FFFFFF"
+        filament_vendor:
+          type: string
+          example: "Bambu Lab"
+        filament_diameter:
+          type: number
+          example: 1.75
+        filament_density:
+          nullable: true
+          type: number
+        nozzle_temperature:
+          nullable: true
+          description: Recommended nozzle temperature (°C); may be array or number
+        nozzle_temperature_range_low:
+          nullable: true
+        nozzle_temperature_range_high:
+          nullable: true
+        bed_temperature:
+          nullable: true
+        bed_temperature_initial_layer:
+          nullable: true
+        compatible_printers:
+          type: array
+          items:
+            type: string
+          description: Machine names this filament is tested with (empty = universal)
+
+    JobStarted:
+      type: object
+      properties:
+        job_id:
+          type: string
+          format: uuid
+          description: Use this ID to poll status and download output
+        status:
+          type: string
+          enum: [pending]
+        message:
+          type: string
+          example: "Slicing job started."
+
+    JobStatus:
+      type: object
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, slicing, completed, failed]
+          description: |
+            - `pending` — queued, not yet started
+            - `slicing` — OrcaSlicer subprocess is running
+            - `completed` — output file is ready for download
+            - `failed` — see `error` for reason
+        output_format:
+          type: string
+          enum: [gcode, gcode_3mf]
+          description: >
+            `"gcode"` when only a `.gcode` was produced; `"gcode_3mf"` when `export_3mf`
+            was set (both a `.gcode` and a `.3mf` are available — the download returns the
+            `.3mf`).
+        sliced_file:
+          type: string
+          nullable: true
+          description: Basename of the output file when status is `"completed"`
+          example: "model_plate1.gcode"
+        error:
+          type: string
+          nullable: true
+          description: Human-readable error description when status is `"failed"`
+
+    UploadResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [success]
+        message:
+          type: string
+          example: "Profile uploaded to machine/my-printer.json. Catalog rebuild started."
+        filename:
+          type: string
+          example: "my-printer.json"
+
+    ErrorDetail:
+      type: object
+      properties:
+        detail:
+          type: string
+          description: Human-readable error message
+
+    CatalogBuildingError:
+      type: object
+      description: Returned (HTTP 503) while the profile catalog is still initialising
+      properties:
+        status:
+          type: string
+          enum: [building_catalog]
+        detail:
+          type: string
+          example: "Catalog not ready. Retry shortly."
