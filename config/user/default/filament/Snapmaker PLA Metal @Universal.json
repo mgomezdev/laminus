@@ -1,8 +1,0 @@
-{
-    "type": "filament",
-    "name": "Snapmaker PLA Metal @Universal",
-    "inherits": "Snapmaker PLA Metal @U1",
-    "from": "user",
-    "instantiation": "true",
-    "compatible_printers": []
-}

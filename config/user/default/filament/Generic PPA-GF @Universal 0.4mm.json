@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Generic PPA-GF @Universal 0.4mm",
+    "inherits": "Generic PPA-GF @base",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

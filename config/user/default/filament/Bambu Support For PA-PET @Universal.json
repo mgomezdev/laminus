@@ -1,8 +1,0 @@
-{
-  "type": "filament",
-  "name": "Bambu Support For PA/PET @Universal",
-  "inherits": "Bambu Support For PA/PET @base",
-  "from": "user",
-  "instantiation": "true",
-  "compatible_printers": []
-}

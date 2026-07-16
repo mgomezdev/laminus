@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Bambu PETG Translucent @Universal 0.4mm",
+    "inherits": "Bambu PETG Translucent @BBL X1C",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

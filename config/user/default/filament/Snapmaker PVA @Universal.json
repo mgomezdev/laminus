@@ -1,8 +1,0 @@
-{
-    "type": "filament",
-    "name": "Snapmaker PVA @Universal",
-    "inherits": "Snapmaker PVA @U1",
-    "from": "user",
-    "instantiation": "true",
-    "compatible_printers": []
-}

@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Bambu ABS @Universal 0.4mm",
+    "inherits": "Bambu ABS @BBL X1C",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Generic PLA Silk @Universal 0.4mm",
+    "inherits": "Generic PLA Silk @base",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

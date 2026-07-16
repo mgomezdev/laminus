@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Bambu Support For PA/PET @Universal 0.4mm",
+    "inherits": "Bambu Support For PA/PET @BBL X1C",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

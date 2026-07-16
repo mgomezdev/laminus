@@ -1,8 +1,0 @@
-{
-  "type": "filament",
-  "name": "Bambu PVA @Universal",
-  "inherits": "Bambu PVA @base",
-  "from": "user",
-  "instantiation": "true",
-  "compatible_printers": []
-}

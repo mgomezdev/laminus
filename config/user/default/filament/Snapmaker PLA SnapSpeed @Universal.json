@@ -1,8 +1,0 @@
-{
-    "type": "filament",
-    "name": "Snapmaker PLA SnapSpeed @Universal",
-    "inherits": "Snapmaker PLA SnapSpeed @U1",
-    "from": "user",
-    "instantiation": "true",
-    "compatible_printers": []
-}

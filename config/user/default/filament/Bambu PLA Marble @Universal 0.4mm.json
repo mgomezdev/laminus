@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Bambu PLA Marble @Universal 0.4mm",
+    "inherits": "Bambu PLA Marble @BBL X1C",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

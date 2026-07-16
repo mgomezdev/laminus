@@ -1,8 +1,0 @@
-{
-    "type": "filament",
-    "name": "Elegoo PLA Matte @Universal",
-    "inherits": "Elegoo PLA Matte @EC",
-    "from": "user",
-    "instantiation": "true",
-    "compatible_printers": []
-}

@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Generic PPS-CF @Universal 0.4mm",
+    "inherits": "Generic PPS-CF @base",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

@@ -1,8 +1,0 @@
-{
-    "type": "filament",
-    "name": "Elegoo PC-FR @Universal",
-    "inherits": "Elegoo PC-FR @EC",
-    "from": "user",
-    "instantiation": "true",
-    "compatible_printers": []
-}

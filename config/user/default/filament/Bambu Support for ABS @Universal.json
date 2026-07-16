@@ -1,8 +1,0 @@
-{
-  "type": "filament",
-  "name": "Bambu Support for ABS @Universal",
-  "inherits": "Bambu Support for ABS @base",
-  "from": "user",
-  "instantiation": "true",
-  "compatible_printers": []
-}

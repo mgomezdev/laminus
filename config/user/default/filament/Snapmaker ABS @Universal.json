@@ -1,8 +1,0 @@
-{
-    "type": "filament",
-    "name": "Snapmaker ABS @Universal",
-    "inherits": "Snapmaker ABS @U1",
-    "from": "user",
-    "instantiation": "true",
-    "compatible_printers": []
-}

@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Generic SBS @Universal 0.4mm",
+    "inherits": "Generic SBS @base",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

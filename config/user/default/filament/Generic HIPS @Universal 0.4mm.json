@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Generic HIPS @Universal 0.4mm",
+    "inherits": "Generic HIPS @base",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

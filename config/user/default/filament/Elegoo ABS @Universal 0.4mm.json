@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Elegoo ABS @Universal 0.4mm",
+    "inherits": "Elegoo ABS @EC",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

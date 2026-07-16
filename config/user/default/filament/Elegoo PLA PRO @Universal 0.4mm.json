@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Elegoo PLA PRO @Universal 0.4mm",
+    "inherits": "Elegoo PLA PRO @EC",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

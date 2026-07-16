@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Bambu TPU for AMS @Universal 0.4mm",
+    "inherits": "Bambu TPU for AMS @BBL X1C",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

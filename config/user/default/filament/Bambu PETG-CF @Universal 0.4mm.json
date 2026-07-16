@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Bambu PETG-CF @Universal 0.4mm",
+    "inherits": "Bambu PETG-CF @BBL X1C 0.4 nozzle",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

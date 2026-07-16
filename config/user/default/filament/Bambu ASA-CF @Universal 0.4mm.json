@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Bambu ASA-CF @Universal 0.4mm",
+    "inherits": "Bambu ASA-CF @BBL X1C",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

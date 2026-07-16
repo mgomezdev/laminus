@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Generic PVA @Universal 0.4mm",
+    "inherits": "Generic PVA @base",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

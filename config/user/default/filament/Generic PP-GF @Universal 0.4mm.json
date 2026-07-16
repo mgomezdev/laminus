@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Generic PP-GF @Universal 0.4mm",
+    "inherits": "Generic PP-GF @base",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

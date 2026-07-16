@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Elegoo ASA @Universal 0.4mm",
+    "inherits": "Elegoo ASA @EC",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

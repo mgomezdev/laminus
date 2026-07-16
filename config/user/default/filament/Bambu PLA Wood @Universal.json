@@ -1,8 +1,0 @@
-{
-  "type": "filament",
-  "name": "Bambu PLA Wood @Universal",
-  "inherits": "Bambu PLA Wood @base",
-  "from": "user",
-  "instantiation": "true",
-  "compatible_printers": []
-}

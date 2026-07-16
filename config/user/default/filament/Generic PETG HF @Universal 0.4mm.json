@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Generic PETG HF @Universal 0.4mm",
+    "inherits": "Generic PETG HF @base",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

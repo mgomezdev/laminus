@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Bambu PETG HF @Universal 0.4mm",
+    "inherits": "Bambu PETG HF @BBL X1C",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

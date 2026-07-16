@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Bambu PET-CF @Universal 0.4mm",
+    "inherits": "Bambu PET-CF @BBL X1C",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

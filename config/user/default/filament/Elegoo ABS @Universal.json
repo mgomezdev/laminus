@@ -1,8 +1,0 @@
-{
-    "type": "filament",
-    "name": "Elegoo ABS @Universal",
-    "inherits": "Elegoo ABS @EC",
-    "from": "user",
-    "instantiation": "true",
-    "compatible_printers": []
-}

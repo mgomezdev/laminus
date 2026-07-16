@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Elegoo PC @Universal 0.4mm",
+    "inherits": "Elegoo PC @EC",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

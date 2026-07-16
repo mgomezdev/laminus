@@ -1,8 +1,0 @@
-{
-  "type": "filament",
-  "name": "Bambu Support For PLA/PETG @Universal",
-  "inherits": "Bambu Support For PLA/PETG @base",
-  "from": "user",
-  "instantiation": "true",
-  "compatible_printers": []
-}

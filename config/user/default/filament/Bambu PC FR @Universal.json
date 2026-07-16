@@ -1,8 +1,0 @@
-{
-  "type": "filament",
-  "name": "Bambu PC FR @Universal",
-  "inherits": "Bambu PC FR @base",
-  "from": "user",
-  "instantiation": "true",
-  "compatible_printers": []
-}

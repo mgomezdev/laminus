@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Bambu PVA @Universal 0.4mm",
+    "inherits": "Bambu PVA @BBL X1C",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

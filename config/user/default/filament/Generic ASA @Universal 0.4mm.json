@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Generic ASA @Universal 0.4mm",
+    "inherits": "Generic ASA @base",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Generic PC @Universal 0.4mm",
+    "inherits": "Generic PC @base",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

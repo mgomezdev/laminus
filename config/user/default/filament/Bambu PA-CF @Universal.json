@@ -1,8 +1,0 @@
-{
-  "type": "filament",
-  "name": "Bambu PA-CF @Universal",
-  "inherits": "Bambu PA-CF @base",
-  "from": "user",
-  "instantiation": "true",
-  "compatible_printers": []
-}

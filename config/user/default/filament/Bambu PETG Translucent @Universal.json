@@ -1,8 +1,0 @@
-{
-  "type": "filament",
-  "name": "Bambu PETG Translucent @Universal",
-  "inherits": "Bambu PETG Translucent @base",
-  "from": "user",
-  "instantiation": "true",
-  "compatible_printers": []
-}

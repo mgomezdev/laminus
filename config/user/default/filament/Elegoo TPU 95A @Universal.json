@@ -1,8 +1,0 @@
-{
-    "type": "filament",
-    "name": "Elegoo TPU 95A @Universal",
-    "inherits": "Elegoo TPU 95A @EC",
-    "from": "user",
-    "instantiation": "true",
-    "compatible_printers": []
-}

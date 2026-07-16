@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Elegoo PLA Silk @Universal 0.4mm",
+    "inherits": "Elegoo PLA Silk @EC",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

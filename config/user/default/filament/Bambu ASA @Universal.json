@@ -1,8 +1,0 @@
-{
-  "type": "filament",
-  "name": "Bambu ASA @Universal",
-  "inherits": "Bambu ASA @base",
-  "from": "user",
-  "instantiation": "true",
-  "compatible_printers": []
-}

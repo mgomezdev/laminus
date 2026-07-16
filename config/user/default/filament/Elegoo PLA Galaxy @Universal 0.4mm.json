@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Elegoo PLA Galaxy @Universal 0.4mm",
+    "inherits": "Elegoo PLA Galaxy @EC",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

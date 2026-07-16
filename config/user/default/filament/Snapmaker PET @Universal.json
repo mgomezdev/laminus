@@ -1,8 +1,0 @@
-{
-    "type": "filament",
-    "name": "Snapmaker PET @Universal",
-    "inherits": "Snapmaker PET @U1",
-    "from": "user",
-    "instantiation": "true",
-    "compatible_printers": []
-}

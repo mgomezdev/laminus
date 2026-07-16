@@ -1,8 +1,0 @@
-{
-  "type": "filament",
-  "name": "Bambu PLA Marble @Universal",
-  "inherits": "Bambu PLA Marble @base",
-  "from": "user",
-  "instantiation": "true",
-  "compatible_printers": []
-}

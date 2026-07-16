@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Generic BVOH @Universal 0.4mm",
+    "inherits": "Generic BVOH @base",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

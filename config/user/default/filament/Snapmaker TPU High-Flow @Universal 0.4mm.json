@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Snapmaker TPU High-Flow @Universal 0.4mm",
+    "inherits": "Snapmaker TPU High-Flow @U1",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

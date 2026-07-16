@@ -1,8 +1,0 @@
-{
-  "type": "filament",
-  "name": "Bambu PLA Matte @Universal",
-  "inherits": "Bambu PLA Matte @base",
-  "from": "user",
-  "instantiation": "true",
-  "compatible_printers": []
-}

@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Bambu PAHT-CF @Universal 0.4mm",
+    "inherits": "Bambu PAHT-CF @BBL X1C",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

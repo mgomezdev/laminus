@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Bambu PLA Silk @Universal 0.4mm",
+    "inherits": "Bambu PLA Silk @BBL X1C",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

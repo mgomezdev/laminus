@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Generic ABS @Universal 0.4mm",
+    "inherits": "Generic ABS @base",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

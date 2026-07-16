@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Bambu PPA-CF @Universal 0.4mm",
+    "inherits": "Bambu PPA-CF @BBL X1C",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}
