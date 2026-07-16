@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Snapmaker TPU @Universal",
+    "inherits": "Snapmaker TPU @U1",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Elegoo PLA Wood @Universal",
+    "inherits": "Elegoo PLA Wood @EC",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

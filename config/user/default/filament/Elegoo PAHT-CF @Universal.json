@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Elegoo PAHT-CF @Universal",
+    "inherits": "Elegoo PAHT-CF @EC",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

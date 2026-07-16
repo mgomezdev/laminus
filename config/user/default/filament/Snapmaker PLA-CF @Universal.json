@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Snapmaker PLA-CF @Universal",
+    "inherits": "Snapmaker PLA-CF @U1",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

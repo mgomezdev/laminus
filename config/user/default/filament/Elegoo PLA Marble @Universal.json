@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Elegoo PLA Marble @Universal",
+    "inherits": "Elegoo PLA Marble @EC",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Snapmaker PETG @Universal",
+    "inherits": "Snapmaker PETG @U1",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

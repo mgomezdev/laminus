@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Snapmaker ASA @Universal",
+    "inherits": "Snapmaker ASA @U1",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Snapmaker PA-CF @Universal",
+    "inherits": "Snapmaker PA-CF @U1",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Snapmaker PLA Silk @Universal",
+    "inherits": "Snapmaker PLA Silk @U1",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Elegoo PLA Sparkle @Universal",
+    "inherits": "Elegoo PLA Sparkle @EC",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

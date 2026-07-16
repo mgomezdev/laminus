@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Elegoo PLA @Universal",
+    "inherits": "Elegoo PLA @EC",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

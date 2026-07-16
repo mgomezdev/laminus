@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Snapmaker PLA Eco @Universal",
+    "inherits": "Snapmaker PLA Eco @U1",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}

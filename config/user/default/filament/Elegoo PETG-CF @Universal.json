@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Elegoo PETG-CF @Universal",
+    "inherits": "Elegoo PETG-CF @EC",
+    "from": "user",
+    "instantiation": "true",
+    "compatible_printers": []
+}
