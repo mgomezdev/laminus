@@ -1,0 +1,8 @@
+{
+  "type": "filament",
+  "name": "Bambu PLA Impact @Universal",
+  "inherits": "Bambu PLA Impact @base",
+  "from": "user",
+  "instantiation": "true",
+  "compatible_printers": []
+}

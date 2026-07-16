@@ -1,0 +1,8 @@
+{
+  "type": "filament",
+  "name": "Bambu PETG Basic @Universal",
+  "inherits": "Bambu PETG Basic @base",
+  "from": "user",
+  "instantiation": "true",
+  "compatible_printers": []
+}

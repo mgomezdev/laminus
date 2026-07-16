@@ -1,0 +1,8 @@
+{
+  "type": "filament",
+  "name": "Bambu ASA-Aero @Universal",
+  "inherits": "Bambu ASA-Aero @base",
+  "from": "user",
+  "instantiation": "true",
+  "compatible_printers": []
+}

@@ -1,0 +1,8 @@
+{
+  "type": "filament",
+  "name": "Bambu ABS-GF @Universal",
+  "inherits": "Bambu ABS-GF @base",
+  "from": "user",
+  "instantiation": "true",
+  "compatible_printers": []
+}

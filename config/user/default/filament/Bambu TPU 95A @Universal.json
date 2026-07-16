@@ -1,0 +1,8 @@
+{
+  "type": "filament",
+  "name": "Bambu TPU 95A @Universal",
+  "inherits": "Bambu TPU 95A @base",
+  "from": "user",
+  "instantiation": "true",
+  "compatible_printers": []
+}

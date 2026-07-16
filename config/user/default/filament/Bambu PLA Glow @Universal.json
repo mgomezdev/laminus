@@ -1,0 +1,8 @@
+{
+  "type": "filament",
+  "name": "Bambu PLA Glow @Universal",
+  "inherits": "Bambu PLA Glow @base",
+  "from": "user",
+  "instantiation": "true",
+  "compatible_printers": []
+}

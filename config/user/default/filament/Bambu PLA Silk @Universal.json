@@ -1,0 +1,8 @@
+{
+  "type": "filament",
+  "name": "Bambu PLA Silk @Universal",
+  "inherits": "Bambu PLA Silk @base",
+  "from": "user",
+  "instantiation": "true",
+  "compatible_printers": []
+}

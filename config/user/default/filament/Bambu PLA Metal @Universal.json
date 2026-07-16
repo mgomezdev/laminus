@@ -1,0 +1,8 @@
+{
+  "type": "filament",
+  "name": "Bambu PLA Metal @Universal",
+  "inherits": "Bambu PLA Metal @base",
+  "from": "user",
+  "instantiation": "true",
+  "compatible_printers": []
+}

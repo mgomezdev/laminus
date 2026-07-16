@@ -1,0 +1,8 @@
+{
+  "type": "filament",
+  "name": "Bambu PPS-CF @Universal",
+  "inherits": "Bambu PPS-CF @base",
+  "from": "user",
+  "instantiation": "true",
+  "compatible_printers": []
+}
