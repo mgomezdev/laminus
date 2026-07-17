@@ -133,9 +133,6 @@ def resolve_inheritance(
 
 SYSTEM_PROFILE_TYPES = ("machine", "process", "filament")
 
-_STRIP_META = {"inherits", "compatible_printers", "compatible_printers_condition",
-               "is_custom_defined", "from", "instantiation"}
-
 
 def _display_name(name: str) -> str:
     at = name.find(" @")

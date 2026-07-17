@@ -8,7 +8,7 @@ import logging
 import json
 from contextlib import asynccontextmanager
 from typing import Dict, List, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -204,30 +204,6 @@ def _safe_filename(filename: Optional[str]) -> str:
     return name
 
 
-class SliceConfig(BaseModel):
-    printer: str = Field(..., description="Path or name of the printer preset JSON file.")
-    process: str = Field(..., description="Path or name of the process preset JSON file.")
-    plate: int = Field(0, description="Build plate ID to slice (0 for all).")
-    filaments: Dict[str, str] = Field(
-        ..., description="Mapping of extruder slots (1-indexed string keys) to filament preset JSON files."
-    )
-
-    @field_validator("filaments")
-    @classmethod
-    def filaments_not_empty(cls, v: Dict[str, str]) -> Dict[str, str]:
-        if not v:
-            raise ValueError("filaments must contain at least one slot mapping.")
-        # Fix R2: validate that all slot keys are positive integers
-        for key in v:
-            try:
-                slot = int(key)
-            except ValueError:
-                raise ValueError(f"Filament slot key '{key}' must be an integer.")
-            if slot < 1:
-                raise ValueError(f"Filament slot key '{key}' must be >= 1.")
-        return v
-
-
 class MergedConfigRequest(BaseModel):
     machine_uuid: str = Field(
         ...,
@@ -384,30 +360,6 @@ class JobLogger:
                 return
             self._new_entry.clear()
             await self._new_entry.wait()
-
-
-def find_profiles_in_config() -> dict:
-    """Blocking sync — callers must wrap with asyncio.to_thread in async context."""
-    profiles = {"machine": [], "process": [], "filament": []}
-    if not os.path.exists(USER_CONFIG_DIR):
-        return profiles
-    for root, dirs, files in os.walk(USER_CONFIG_DIR):
-        dirname = os.path.basename(root)
-        if dirname in ("machine", "process", "filament"):
-            for file in files:
-                if file.endswith(".json") and not file.startswith("."):
-                    path = os.path.join(root, file)
-                    rel_path = os.path.relpath(path, USER_CONFIG_DIR)
-                    name = os.path.splitext(file)[0]
-                    parts = rel_path.split(os.sep)
-                    user_sub = parts[0] if len(parts) > 1 else "default"
-                    profiles[dirname].append({
-                        "name": f"{user_sub} / {name}" if user_sub != "default" else name,
-                        "filename": file,
-                        "rel_path": rel_path,
-                        "full_path": path,
-                    })
-    return profiles
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
