@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Communication style
+When reporting information, be extremely concise and sacrifice grammar for the sake of concision.
+
+
 ## What this project is
 
 A Dockerized REST API that wraps the OrcaSlicer CLI to perform headless 3D model slicing and plate arrangement. OrcaSlicer is a GUI application run headlessly inside the container via `xvfb-run`. The API is implemented in a single FastAPI file (`app/main.py`) with a single-page HTML frontend (`app/templates/index.html`).
