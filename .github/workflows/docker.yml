@@ -4,8 +4,28 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
 
 jobs:
+  check-spec-freshness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install app dependencies
+        run: pip install -r requirements.txt
+
+      - name: Regenerate openapi.json
+        run: python scripts/export_openapi.py
+
+      - name: Fail if spec is stale
+        run: git diff --exit-code openapi.json
+
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
@@ -24,16 +44,19 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
+      - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ninjabuffalo/laminus
           tags: |
             type=raw,value=latest
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
             type=sha,prefix=sha-
 
-      - name: Build and push
+      - name: Build and push app image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -42,3 +65,31 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Extract metadata (mock)
+        id: meta-mock
+        uses: docker/metadata-action@v5
+        with:
+          images: ninjabuffalo/laminus-mock
+          tags: |
+            type=raw,value=latest
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=sha-
+
+      - name: Build and push mock image
+        uses: docker/build-push-action@v6
+        with:
+          context: mock
+          push: true
+          tags: ${{ steps.meta-mock.outputs.tags }}
+          labels: ${{ steps.meta-mock.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Attach spec to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: openapi.json

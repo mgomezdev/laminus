@@ -1,0 +1,981 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Laminus \u2014 OrcaSlicer Sidecar API",
+    "description": "Headless 3D model slicing via OrcaSlicer CLI running inside a Docker container. Laminus is a sidecar service used by Themis; it is not intended to be called directly by end-users in normal operation.\n\n## Typical agent workflow\n\n1. **`GET /api/health`** \u2014 wait until `catalog_loaded: true` before making any other calls.\n2. **`GET /api/profiles`** \u2014 discover machine / process / filament UUIDs for your printer and material. Filter by `manufacturer`, `model`, and `nozzle` to narrow results.\n3. **`POST /api/slice/start`** \u2014 upload the model (`.3mf` or `.stl`) with the resolved UUIDs. The response contains a `job_id`.\n4. **`GET /api/slice/status/{job_id}`** \u2014 poll every 2\u20135 s until `status` is `completed` or `failed`.\n5. **`GET /api/slice/download/{job_id}`** \u2014 retrieve the GCode (or `.3mf` when `export_3mf` was requested). Downloading evicts the job immediately.\n\nAlternatively, use **`POST /api/slice/prepared`** when the 3MF already embeds print settings from a previous OrcaSlicer session \u2014 no profile resolution is needed.\n\n## Packing / arrangement\n\nUse **`POST /api/pack`** to distribute STL geometry across build plates before slicing. Three modes: supply a template `.3mf`, profile UUIDs (preferred \u2014 catalog-aware), or explicit bed dimensions. The packed `.3mf` is returned directly (synchronous, up to 120 s).\n\n## Error conventions\n\n- **422** \u2014 caller-side validation failure (bad UUIDs, missing required fields, etc.).\n- **503** \u2014 Laminus is not yet ready; the catalog is still building. Retry after `GET /api/health` reports `catalog_loaded: true`.\n- **400 / 408 / 500** \u2014 OrcaSlicer-side failures; check server logs for details.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/profiles": {
+      "get": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "List profiles in the catalog",
+        "description": "Returns all machine, process, and filament presets known to this container.\n\n**Filtering:** supply all three of `manufacturer`, `model`, and `nozzle` together to receive only the matching machine preset plus all process and filament presets that declare that machine in their `compatible_printers` list. Supplying only one or two of the three parameters is a **422** error.\n\n**Refresh:** pass `refresh=true` to schedule a background catalog rebuild (e.g., after uploading new profiles via `POST /api/profiles/upload`). The response reflects the *current* catalog immediately; the new catalog is available after ~5 s. While rebuilding, `GET /api/health` will show `catalog_building: true`.\n\n**Response shape:**\n```json\n{\n  \"machine\":  [{ \"uuid\": \"...\", \"name\": \"...\", \"manufacturer\": \"...\", \"model\": \"...\", \"nozzle\": \"...\" }],\n  \"process\":  [{ \"uuid\": \"...\", \"name\": \"...\", \"layer_height\": 0.2, \"compatible_printers\": [...] }],\n  \"filament\": [{ \"uuid\": \"...\", \"name\": \"...\", \"filament_type\": \"PLA\", \"filament_colour\": \"#FFFFFF\", ... }]\n}\n```\n\nReturns **503** while the catalog is initialising on container start.",
+        "operationId": "get_profiles_api_profiles_get",
+        "parameters": [
+          {
+            "name": "manufacturer",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Manufacturer"
+            }
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Model"
+            }
+          },
+          {
+            "name": "nozzle",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Nozzle"
+            }
+          },
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Refresh"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Partial filter: supply all three of manufacturer/model/nozzle or none"
+          },
+          "503": {
+            "description": "Catalog not yet ready \u2014 retry after /api/health reports catalog_loaded: true"
+          }
+        }
+      }
+    },
+    "/api/profiles/merged-config": {
+      "post": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "Get merged project_settings.config for a profile set",
+        "description": "Resolves the full inheritance chains for the given machine, process, and filament UUIDs and returns the merged `project_settings.config` dict \u2014 exactly what would be embedded inside a `.3mf` before slicing.\n\n**Primary use cases:**\n- Inspect resolved print settings (temperatures, speeds, gcode) before committing to a slice job.\n- Allow Themis to diff embedded settings against a chosen preset to warn the user of overrides (`POST /api/v1/jobs/check-overrides`).\n- Verify that `layer_gcode` is populated (see OrcaSlicer -51 error) before slicing.\n\nThe response is the raw merged dict with inheritance stripped \u2014 keys like `inherits`, `compatible_printers`, `is_custom_defined`, and `from` are removed. Multi-filament keys are returned as arrays (one value per slot).\n\nReturns **503** while the catalog is initialising.",
+        "operationId": "get_merged_config_api_profiles_merged_config_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MergedConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "UUID not found in catalog, wrong type (e.g. process UUID used where machine expected), or filament_uuids is empty"
+          },
+          "503": {
+            "description": "Catalog not yet ready \u2014 retry after /api/health reports catalog_loaded: true"
+          }
+        }
+      }
+    },
+    "/api/profiles/{profile_uuid}": {
+      "get": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "Get full detail for one profile",
+        "description": "Returns all public fields for a single profile entry identified by its stable UUID. The `_resolved` (inheritance-flattened) dict is not included \u2014 use `POST /api/profiles/merged-config` for the fully merged config.\n\n**Fields by type:**\n\n*Machine:* `uuid`, `name`, `manufacturer`, `model`, `nozzle`, `nozzle_diameter`, `bed_size_x`, `bed_size_y`, `extruder_count`, `source`, `rel_path`\n\n*Process:* `uuid`, `name`, `layer_height`, `compatible_printers`, `source`, `rel_path`\n\n*Filament:* `uuid`, `name`, `display_name`, `filament_type`, `filament_colour`, `filament_vendor`, `filament_diameter`, `filament_density`, `nozzle_temperature`, `nozzle_temperature_range_low`, `nozzle_temperature_range_high`, `bed_temperature`, `bed_temperature_initial_layer`, `compatible_printers`, `source`, `rel_path`\n\nReturns **503** while the catalog is initialising.",
+        "operationId": "get_profile_detail_api_profiles__profile_uuid__get",
+        "parameters": [
+          {
+            "name": "profile_uuid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Profile Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Profile UUID not found in catalog"
+          },
+          "503": {
+            "description": "Catalog not yet ready \u2014 retry after /api/health reports catalog_loaded: true"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/slice/start": {
+      "post": {
+        "tags": [
+          "slice"
+        ],
+        "summary": "Start a slice job (UUID-based profile resolution)",
+        "description": "Upload a `.3mf` or `.stl` and specify print settings by profile UUID. The API resolves each profile's full inheritance chain, merges machine + process + filament into a `project_settings.config`, embeds it into the 3MF, then launches OrcaSlicer in the background and returns a `job_id` immediately.\n\n**Machine identification (mutually exclusive):**\n- `machine_uuid` \u2014 preferred; stable across catalog rebuilds.\n- `manufacturer` + `model` + `nozzle` \u2014 tuple lookup; useful when the UUID is unknown.\n\n**Key parameters:**\n- `filament_uuids` \u2014 JSON array string, e.g. `'[\"uuid1\"]'`; one entry per extruder slot in slot order. Single-extruder printers need exactly one entry.\n- `plate` \u2014 1-based plate number to slice. Use `1` for single-plate models.\n- `export_3mf` \u2014 optional output filename. When set, OrcaSlicer embeds the GCode inside a `.3mf` instead of writing a standalone `.gcode` file. The download endpoint returns the `.3mf` in this case.\n- `geometry_only_retry` \u2014 when `true` (default), if the first slice attempt fails OrcaSlicer retries with `Metadata/model_settings.config` stripped from the 3MF. This resolves failures caused by stale extruder-slot assignments baked into models exported from OrcaSlicer.\n- `extra_config` \u2014 optional JSON object merged into the resolved `project_settings.config` after profile resolution. Use to override individual settings, e.g. `{\"curr_bed_type\": \"Cool Plate\"}` or `{\"layer_height\": \"0.12\"}`.\n\n**STL files** are automatically converted to a minimal 3MF before slicing.\n\n**Concurrency:** at most `MAX_CONCURRENT_JOBS` (default 4) jobs may be slicing simultaneously. When the limit is reached the request returns **503** \u2014 retry later.\n\n**Job lifecycle after creation:**\n```\npending \u2192 slicing \u2192 completed  (download available)\n                  \u2198 failed     (check error field in status response)\n```\nPoll `GET /api/slice/status/{job_id}` every 2\u20135 s, then download via `GET /api/slice/download/{job_id}` when complete.",
+        "operationId": "start_slice_api_slice_start_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_start_slice_api_slice_start_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad filename (null bytes, semicolons, or missing Content-Disposition filename)"
+          },
+          "422": {
+            "description": "Validation failure: plate < 1, filament_uuids is not a valid JSON array, machine/process/filament UUID not found in catalog, profile not compatible with the selected machine, or extra_config is not a JSON object"
+          },
+          "503": {
+            "description": "Profile catalog not yet ready (retry after catalog_loaded: true), or too many concurrent slice jobs (retry when a slot opens)"
+          }
+        }
+      }
+    },
+    "/api/slice/prepared": {
+      "post": {
+        "tags": [
+          "slice"
+        ],
+        "summary": "Slice a pre-configured 3MF (no profile resolution)",
+        "description": "Accepts a `.3mf` that already contains `Metadata/project_settings.config` (e.g., exported from OrcaSlicer desktop or produced by `POST /api/slice/start` with `export_3mf` set). No catalog lookup or profile merging is performed \u2014 OrcaSlicer uses the embedded settings verbatim.\n\nUse this endpoint when you already have a fully-configured 3MF and want to avoid the overhead of profile resolution. Typical callers: Themis queue engine dispatching pre-packed project 3MFs, or debugging with a known-good 3MF from the desktop app.\n\n**Geometry-only retry** works the same as in `POST /api/slice/start`: when `geometry_only_retry=true` (default) and the first slice fails, the API retries with `Metadata/model_settings.config` stripped from the 3MF.\n\n**`export_3mf`:** when set, OrcaSlicer embeds the sliced GCode into a `.3mf` and the download endpoint returns that file instead of a standalone `.gcode`.\n\nThe response and job lifecycle are identical to `POST /api/slice/start`.",
+        "operationId": "slice_prepared_api_slice_prepared_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_slice_prepared_api_slice_prepared_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad filename (null bytes, semicolons, or missing Content-Disposition filename)"
+          },
+          "422": {
+            "description": "File is not a .3mf, or plate < 1"
+          },
+          "503": {
+            "description": "Too many concurrent slice jobs \u2014 retry when a slot opens (check active_jobs in GET /api/health)"
+          }
+        }
+      }
+    },
+    "/api/slice/thumbnail": {
+      "post": {
+        "tags": [
+          "slice"
+        ],
+        "summary": "Render a plate thumbnail PNG (synchronous)",
+        "description": "Runs OrcaSlicer with `--arrange 0 --export-3mf` to render a plate thumbnail PNG without disturbing the model's geometry or generating GCode. Returns the PNG bytes directly with `Content-Type: image/png`.\n\n**Blocking:** waits up to 120 seconds for OrcaSlicer to finish. No job tracking \u2014 this is fire-and-forget from the caller's perspective.\n\nThe endpoint accepts only `.3mf` files. The 3MF must embed a valid plate (the requested `plate` number must exist in the model). OrcaSlicer writes the PNG to `Metadata/plate_{N}.png` inside the output 3MF; the endpoint extracts and returns that PNG, cleaning up all temporary files afterwards.\n\nAll error conditions (OrcaSlicer failure, timeout, missing PNG output) return **422** with a JSON detail object `{\"error\": \"...\"}` describing the cause.",
+        "operationId": "slice_thumbnail_api_slice_thumbnail_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_slice_thumbnail_api_slice_thumbnail_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "OrcaSlicer returned non-zero, no PNG found in output, plate < 1, bad filename, or non-.3mf file uploaded. Also returned on timeout (the OrcaSlicer process is killed)."
+          }
+        }
+      }
+    },
+    "/api/slice/status/{job_id}": {
+      "get": {
+        "tags": [
+          "slice"
+        ],
+        "summary": "Poll slice job status",
+        "description": "Returns the current status of a slice job. Poll every 2\u20135 seconds until `status` is `completed` or `failed`.\n\n**Response fields:**\n- `job_id` \u2014 echoed back for correlation\n- `status` \u2014 one of `pending`, `slicing`, `completed`, `failed`\n- `output_format` \u2014 `gcode` (default) or `gcode_3mf` (when `export_3mf` was set)\n- `sliced_file` \u2014 basename of the output file when `completed`, otherwise `null`\n- `error` \u2014 human-readable error message when `failed`, otherwise `null`\n\n**Job lifecycle:** `pending` \u2192 `slicing` \u2192 `completed` or `failed`\n\nJobs are kept for `JOB_TTL_SECONDS` (default 3600) or until downloaded. A **404** on a previously-valid `job_id` means the job has already been evicted \u2014 either downloaded or timed out.",
+        "operationId": "get_job_status_api_slice_status__job_id__get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Job not found \u2014 never existed, already downloaded, or evicted after TTL"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/slice/logs/{job_id}": {
+      "get": {
+        "tags": [
+          "slice"
+        ],
+        "summary": "Stream slice job logs (Server-Sent Events)",
+        "description": "Returns a Server-Sent Events stream of OrcaSlicer stdout/stderr lines, emitted in real time as the slicer runs.\n\n**Event format:** `data: <log line>\\r\\n\\r\\n`\n\n**Terminal events (stream ends after these):**\n- `data: __COMPLETED__` \u2014 job finished successfully\n- `data: __FAILED__: <reason>` \u2014 job failed; `<reason>` is a short label\n\n**Usage notes:**\n- The stream replays all buffered log lines immediately on connect, so connecting after the job has already completed still delivers the full log history.\n- Most callers can skip this and poll `GET /api/slice/status` instead \u2014 logs are primarily useful for debugging slice failures.\n- If the job is evicted before you connect, the endpoint returns **404**.",
+        "operationId": "get_job_logs_api_slice_logs__job_id__get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Job not found \u2014 never existed, already downloaded, or evicted after TTL"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/slice/download/{job_id}": {
+      "get": {
+        "tags": [
+          "slice"
+        ],
+        "summary": "Download sliced output file",
+        "description": "Returns the sliced output as `application/octet-stream`. The file extension indicates the format:\n- `.gcode` \u2014 standalone GCode file (default)\n- `.3mf` \u2014 GCode embedded inside a 3MF (when `export_3mf` was set during job creation)\n\n**\u26a0\ufe0f One-time download:** downloading evicts the job immediately \u2014 the in-memory record and all temporary files on disk are deleted. There is no second download. Only call this once you have confirmed `status == 'completed'`.\n\nReturns **400** if the job exists but is not yet complete (wrong status). Returns **404** if the job does not exist (never created, already downloaded, or evicted).",
+        "operationId": "download_sliced_file_api_slice_download__job_id__get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Job exists but is not yet complete \u2014 check status first"
+          },
+          "404": {
+            "description": "Job not found (never existed, already downloaded, or evicted after TTL), or job is complete but the output file is missing from disk"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pack": {
+      "post": {
+        "tags": [
+          "arrange"
+        ],
+        "summary": "Pack N STLs onto as many plates as needed (synchronous)",
+        "description": "Distributes STL geometry across build plates via OrcaSlicer `--arrange 1 --orient 1`. Returns the resulting multi-plate `.3mf` directly as `application/octet-stream`. **Blocks for up to 120 seconds.**\n\n## Bed / settings source (mutually exclusive \u2014 supply exactly one)\n\n**1. Template file** (`template` field)\nUpload a `.3mf` whose `Metadata/project_settings.config` carries the printer and bed configuration. OrcaSlicer reads bed dimensions and settings from that config. Use this when you already have a known-good 3MF template from a previous session.\n\n**2. Profile UUIDs** (`machine_uuid` + `process_uuid` + `filament_uuids`)\nThe container resolves profiles from its catalog, builds the settings internally, and constructs a minimal bed-only template (only `printable_area` and `printable_height` are embedded \u2014 no full machine config that could override the bed size). Templates for a given UUID combination are cached in memory, so repeated calls with the same profiles are fast. This mode requires `catalog_loaded: true`.\n\n**3. Explicit bed dimensions** (`bed_x` + `bed_y` + `bed_z`, all in mm)\nLaminus constructs a minimal bed template from the supplied dimensions. `bed_z` is the printable height (not the physical Z travel). No profile catalog or template file needed \u2014 useful when you want geometry-only packing without print settings.\n\n## STL inputs\n\n- `files` \u2014 one or more `.stl` files (max 50 per request)\n- Filenames must not contain null bytes, newlines, or semicolons\n- Duplicate filenames in the same batch are deduplicated with a numeric suffix\n\n## Notes\n\n- OrcaSlicer auto-orients objects (`--orient 1`) to minimise support material. Pass orient=false to skip (not yet exposed as a parameter \u2014 file a request).\n- The packed `.3mf` preserves `Metadata/project_settings.config` from the template but discards any geometry or model_settings from it.\n- All temporary files are cleaned up after the response is sent.",
+        "operationId": "pack_stls_api_pack_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_pack_stls_api_pack_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad filename in STL or template upload, OrcaSlicer arrange process failed (non-zero exit or missing output file), or failed to build the combined 3MF"
+          },
+          "408": {
+            "description": "Pack operation timed out after 120 seconds"
+          },
+          "422": {
+            "description": "No STL files provided, more than 50 STLs, non-.stl file in files list, non-.3mf template, bed dimensions \u2264 0, invalid filament_uuids JSON, UUID not found in catalog, or no settings source provided"
+          },
+          "500": {
+            "description": "Unexpected system error \u2014 check server logs"
+          },
+          "503": {
+            "description": "Profile catalog not yet ready (UUID mode only)"
+          }
+        }
+      }
+    },
+    "/api/arrange": {
+      "post": {
+        "tags": [
+          "arrange"
+        ],
+        "summary": "Auto-arrange and orient objects in a 3MF (synchronous)",
+        "description": "Runs OrcaSlicer's plate-packing (`--arrange 1`) and auto-orientation (`--orient 1`) on an existing `.3mf` and returns the rearranged `.3mf` directly as `application/octet-stream`.\n\n**Blocking:** waits up to `ARRANGE_TIMEOUT_SECONDS` (default 120 s) for OrcaSlicer to finish. No job tracking \u2014 call completes synchronously.\n\n**When to use this vs `POST /api/pack`:**\n- Use `POST /api/arrange` when you already have a `.3mf` with the correct geometry and want to repack it (e.g., after hand-editing or re-importing).\n- Use `POST /api/pack` when starting from STL files that need to be combined into a 3MF first.\n\n**Settings preservation:** the input 3MF's `Metadata/project_settings.config` is passed to OrcaSlicer via `--datadir`, which means OrcaSlicer may load its own machine profiles from `/config`. The `Metadata/model_settings.config` (extruder/slot assignments) from the input 3MF is preserved in the output.\n\nAll temporary files are cleaned up after the response is sent, including the stable output copy used to serve the download.",
+        "operationId": "auto_arrange_3mf_api_arrange_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_auto_arrange_3mf_api_arrange_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad filename (null bytes, semicolons, or missing Content-Disposition filename), non-.3mf file uploaded, OrcaSlicer returned non-zero exit code, or output file missing after OrcaSlicer claims success"
+          },
+          "408": {
+            "description": "OrcaSlicer arrange timed out \u2014 reduce model complexity or increase ARRANGE_TIMEOUT_SECONDS"
+          },
+          "500": {
+            "description": "Unexpected system error \u2014 check server logs"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/profiles/upload": {
+      "post": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "Upload a user profile JSON",
+        "description": "Upload a flat OrcaSlicer preset JSON into the user config volume at `/config/user/default/{type}/`. A catalog rebuild is triggered in the background automatically \u2014 wait ~5 s and call `GET /api/profiles` to confirm the profile appears before using it in a slice job.\n\n**Requirements for the JSON file:**\n- Must have a `.json` extension\n- Must be a *fully-flattened* preset with no `inherits` chain. If the profile relies on a system base profile, flatten it first using `flatten_profiles.py` inside the container: `docker exec laminus python /workspace/app/flatten_profiles.py --profile 'Elegoo Centauri Carbon 0.4 nozzle'`\n- `type` must be exactly `machine`, `process`, or `filament`\n\n**Profile persistence:** the uploaded file is written to a Docker volume (`/config/user/`). It survives container restarts but is not baked into the image. Re-upload after replacing the container with a clean image.\n\n**UUID stability:** user profiles receive a UUID derived from `(user, rel_path)` so the UUID changes if the file is renamed or moved.",
+        "operationId": "upload_profile_api_profiles_upload_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_profile_api_profiles_upload_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid `type` (must be machine, process, or filament), bad filename (null bytes, semicolons, path traversal), or file does not have a .json extension"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Service health check",
+        "description": "Returns service readiness information. **Always call this first** \u2014 profile and slice endpoints return **503** while `catalog_loading` is `true`.\n\n**Response fields:**\n- `status` \u2014 always `\"healthy\"` when the process is running\n- `orcaslicer_installed` \u2014 whether the OrcaSlicer binary exists at `/usr/local/bin/orcaslicer`\n- `orcaslicer_version` \u2014 version string from `orcaslicer --version`, or `null` if the binary is not installed or timed out\n- `config_mounted` \u2014 whether `/config` exists (volume mount check)\n- `system_profiles_available` \u2014 whether the OrcaSlicer AppImage's profiles directory is present (required for catalog build)\n- `catalog_loaded` \u2014 `true` when the profile catalog is fully built and ready; `false` during initial startup or rebuild\n- `catalog_building` \u2014 `true` while a catalog rebuild is in progress\n- `catalog_profile_count` \u2014 `{machine: N, process: N, filament: N}` when loaded, otherwise `null`\n- `active_jobs` \u2014 number of jobs currently in `slicing` status",
+        "operationId": "health_check_api_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Body_auto_arrange_3mf_api_arrange_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "arrange": {
+            "type": "boolean",
+            "title": "Arrange",
+            "default": true
+          },
+          "orient": {
+            "type": "boolean",
+            "title": "Orient",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_auto_arrange_3mf_api_arrange_post"
+      },
+      "Body_pack_stls_api_pack_post": {
+        "properties": {
+          "files": {
+            "items": {
+              "type": "string",
+              "contentMediaType": "application/octet-stream"
+            },
+            "type": "array",
+            "title": "Files"
+          },
+          "template": {
+            "anyOf": [
+              {
+                "type": "string",
+                "contentMediaType": "application/octet-stream"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template",
+            "description": ".3mf with Metadata/project_settings.config"
+          },
+          "machine_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Machine Uuid"
+          },
+          "process_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Process Uuid"
+          },
+          "filament_uuids": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filament Uuids",
+            "description": "JSON array, e.g. [\"uuid1\"]"
+          },
+          "bed_x": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed X",
+            "description": "Bed X dimension in mm (alternative to template / UUIDs)"
+          },
+          "bed_y": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Y",
+            "description": "Bed Y dimension in mm"
+          },
+          "bed_z": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Z",
+            "description": "Bed Z printable height in mm"
+          }
+        },
+        "type": "object",
+        "required": [
+          "files"
+        ],
+        "title": "Body_pack_stls_api_pack_post"
+      },
+      "Body_slice_prepared_api_slice_prepared_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "plate": {
+            "type": "integer",
+            "title": "Plate"
+          },
+          "export_3mf": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Export 3Mf"
+          },
+          "geometry_only_retry": {
+            "type": "boolean",
+            "title": "Geometry Only Retry",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "file",
+          "plate"
+        ],
+        "title": "Body_slice_prepared_api_slice_prepared_post"
+      },
+      "Body_slice_thumbnail_api_slice_thumbnail_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "plate": {
+            "type": "integer",
+            "title": "Plate"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file",
+          "plate"
+        ],
+        "title": "Body_slice_thumbnail_api_slice_thumbnail_post"
+      },
+      "Body_start_slice_api_slice_start_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "machine_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Machine Uuid"
+          },
+          "manufacturer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manufacturer"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "nozzle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle"
+          },
+          "process_uuid": {
+            "type": "string",
+            "title": "Process Uuid"
+          },
+          "filament_uuids": {
+            "type": "string",
+            "title": "Filament Uuids",
+            "description": "JSON array, e.g. [\"uuid1\"]"
+          },
+          "plate": {
+            "type": "integer",
+            "title": "Plate"
+          },
+          "export_3mf": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Export 3Mf"
+          },
+          "geometry_only_retry": {
+            "type": "boolean",
+            "title": "Geometry Only Retry",
+            "default": true
+          },
+          "extra_config": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra Config",
+            "description": "JSON object merged into project settings after resolution"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file",
+          "process_uuid",
+          "filament_uuids",
+          "plate"
+        ],
+        "title": "Body_start_slice_api_slice_start_post"
+      },
+      "Body_upload_profile_api_profiles_upload_post": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "file"
+        ],
+        "title": "Body_upload_profile_api_profiles_upload_post"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "MergedConfigRequest": {
+        "properties": {
+          "machine_uuid": {
+            "type": "string",
+            "title": "Machine Uuid",
+            "description": "Stable UUID of the machine (printer) profile. Obtain from `GET /api/profiles` or `GET /api/profiles/{uuid}`. Machine UUIDs are derived from the (manufacturer, model, nozzle) tuple and are stable across catalog rebuilds."
+          },
+          "process_uuid": {
+            "type": "string",
+            "title": "Process Uuid",
+            "description": "Stable UUID of the process (print quality) profile, e.g. `0.20mm Standard`. Must be compatible with the supplied machine \u2014 check `compatible_printers` in the profile detail."
+          },
+          "filament_uuids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Filament Uuids",
+            "description": "List of filament profile UUIDs, one per extruder slot in slot order (slot 1 first). Must be compatible with the machine. Single-extruder printers need exactly one entry."
+          }
+        },
+        "type": "object",
+        "required": [
+          "machine_uuid",
+          "process_uuid",
+          "filament_uuids"
+        ],
+        "title": "MergedConfigRequest"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "health",
+      "description": "Service readiness and version information. Always check `/api/health` first \u2014 profile and slice endpoints return **503** while `catalog_loading` is `true`."
+    },
+    {
+      "name": "profiles",
+      "description": "Machine, process, and filament preset catalog derived from the OrcaSlicer AppImage's bundled profiles plus any user-uploaded profiles in `/config/user/`. Profiles are identified by stable UUIDs derived from their (manufacturer, model, nozzle) tuple (machine) or (source, rel_path) (process/filament), so UUIDs remain constant across catalog rebuilds as long as the profile files don't move."
+    },
+    {
+      "name": "slice",
+      "description": "Asynchronous slice job lifecycle: **start \u2192 poll \u2192 download**. Jobs are kept in memory and evicted after download or after `JOB_TTL_SECONDS` (default 3600). A maximum of `MAX_CONCURRENT_JOBS` (default 4) jobs may slice simultaneously; additional requests receive **503** until a slot opens."
+    },
+    {
+      "name": "arrange",
+      "description": "Synchronous plate arrangement and STL packing. No job tracking \u2014 responses block until OrcaSlicer finishes (up to `ARRANGE_TIMEOUT_SECONDS`, default 120). Use `POST /api/pack` to combine multiple STLs into a single multi-plate `.3mf`, and `POST /api/arrange` to re-pack an existing `.3mf`."
+    }
+  ]
+}
