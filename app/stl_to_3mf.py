@@ -68,20 +68,25 @@ def _parse_ascii(path: str) -> list[tuple]:
     return tris
 
 
-def _build_model_xml(tris: list[tuple]) -> str:
+def _mesh_body(tris: list[tuple], indent: str) -> tuple[str, str]:
+    """Return (vertices_block, triangles_block) as newline-joined lines at *indent*."""
     vlines, tlines = [], []
-    idx = 0
-    for tri in tris:
+    for i, tri in enumerate(tris):
         for x, y, z in tri:
-            vlines.append(f'          <vertex x="{x}" y="{y}" z="{z}"/>')
-        tlines.append(f'          <triangle v1="{idx}" v2="{idx+1}" v3="{idx+2}"/>')
-        idx += 3
+            vlines.append(f'{indent}<vertex x="{x}" y="{y}" z="{z}"/>')
+        base = i * 3
+        tlines.append(f'{indent}<triangle v1="{base}" v2="{base+1}" v3="{base+2}"/>')
+    return "\n".join(vlines), "\n".join(tlines)
+
+
+def _build_model_xml(tris: list[tuple]) -> str:
+    verts, tris_xml = _mesh_body(tris, "          ")
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n'
         '  <resources><object id="1" type="model"><mesh>\n'
-        f'    <vertices>\n{"\n".join(vlines)}\n    </vertices>\n'
-        f'    <triangles>\n{"\n".join(tlines)}\n    </triangles>\n'
+        f'    <vertices>\n{verts}\n    </vertices>\n'
+        f'    <triangles>\n{tris_xml}\n    </triangles>\n'
         '  </mesh></object></resources>\n'
         '  <build><item objectid="1"/></build>\n</model>'
     )
@@ -104,22 +109,17 @@ def parse_stl_triangles(path: str) -> list[tuple]:
 
 def _object_model_xml(tris: list[tuple]) -> str:
     """Build a 3D/Objects/*.model XML string for a single mesh (internal id always 1)."""
-    vlines, tlines = [], []
-    for i, tri in enumerate(tris):
-        for x, y, z in tri:
-            vlines.append(f'     <vertex x="{x}" y="{y}" z="{z}"/>')
-        base = i * 3
-        tlines.append(f'     <triangle v1="{base}" v2="{base+1}" v3="{base+2}"/>')
+    verts, tris_xml = _mesh_body(tris, "     ")
     return (
         _OBJ_MODEL_HEADER
         + ' <resources>\n'
           '  <object id="1" type="model">\n'
           '   <mesh>\n'
           '    <vertices>\n'
-        + '\n'.join(vlines)
+        + verts
         + '\n    </vertices>\n'
           '    <triangles>\n'
-        + '\n'.join(tlines)
+        + tris_xml
         + '\n    </triangles>\n'
           '   </mesh>\n'
           '  </object>\n'

@@ -1604,8 +1604,7 @@ async def upload_profile(
         "- `catalog_building` — `true` while a catalog rebuild is in progress\n"
         "- `catalog_profile_count` — `{machine: N, process: N, filament: N}` when loaded, "
         "otherwise `null`\n"
-        "- `active_jobs` — number of jobs currently in `slicing` status\n"
-        "- `thumbnail_endpoint` — always `true` (feature-flag sentinel for Themis)"
+        "- `active_jobs` — number of jobs currently in `slicing` status"
     ),
 )
 async def health_check():
@@ -1620,5 +1619,4 @@ async def health_check():
         "catalog_building": _catalog_building,
         "catalog_profile_count": catalog.counts if (catalog and catalog.is_built) else None,
         "active_jobs": active,
-        "thumbnail_endpoint": True,
     }

@@ -13,15 +13,6 @@ logger = logging.getLogger("orcaslicer-api.catalog")
 _CATALOG_NS = uuid.UUID("a7f3c2e1-84b0-4d9e-b1f2-3c8a5d6e7f01")
 
 
-def _find_file_by_name(name: str, search_roots: list[str]) -> Optional[str]:
-    filename = f"{name}.json"
-    for root in search_roots:
-        for dirpath, _dirs, files in os.walk(root):
-            if filename in files:
-                return os.path.join(dirpath, filename)
-    return None
-
-
 def _build_name_index(roots: list[str]) -> dict[str, str]:
     """Single-pass index of all JSON profile names → absolute paths (first root wins)."""
     index: dict[str, str] = {}
@@ -88,9 +79,8 @@ def parse_machine_name(name: str) -> Optional[Tuple[str, str, str]]:
 
 def resolve_inheritance(
     filepath: str,
-    search_roots: list[str],
+    _name_index: dict[str, str],
     _visited: Optional[set[str]] = None,
-    _name_index: Optional[dict[str, str]] = None,
     _resolved_cache: Optional[dict[str, dict]] = None,
 ) -> dict:
     """Return fully merged (flattened) profile dict. Child values override parent."""
@@ -108,13 +98,10 @@ def resolve_inheritance(
 
     parent_name: Optional[str] = data.get("inherits")
     if parent_name:
-        parent_path = (
-            _name_index.get(parent_name) if _name_index is not None
-            else _find_file_by_name(parent_name, search_roots)
-        )
+        parent_path = _name_index.get(parent_name)
         if parent_path:
             parent_data = resolve_inheritance(
-                parent_path, search_roots, set(_visited), _name_index, _resolved_cache,
+                parent_path, _name_index, set(_visited), _resolved_cache,
             )
             merged = {**parent_data, **data}
         else:
@@ -181,8 +168,7 @@ class ProfileCatalog:
                     rel_path = os.path.relpath(filepath, root).replace("\\", "/")
                     try:
                         resolved = resolve_inheritance(
-                            filepath, search_roots,
-                            _name_index=name_index, _resolved_cache=resolved_cache,
+                            filepath, name_index, _resolved_cache=resolved_cache,
                         )
                     except Exception as exc:
                         logger.warning("Skipping '%s': %s", filepath, exc)
