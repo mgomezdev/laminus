@@ -49,7 +49,7 @@ curl http://localhost:5000/api/health
 
 ### Request flow for slicing
 1. `POST /api/slice/start` saves the uploaded file to `/tmp/jobs/{uuid}/input/`, creates an in-memory job entry in the global `jobs` dict, and dispatches `run_orcaslicer_task` as a FastAPI `BackgroundTask`.
-2. `run_orcaslicer_task` resolves profile paths by scanning `/config/user/` via `find_profiles_in_config()`, builds a `xvfb-run orcaslicer --slice ...` subprocess, and streams stdout line-by-line into a per-job `JobLogger` (an `asyncio.Queue` wrapper).
+2. `run_orcaslicer_task` resolves profile paths via the `ProfileCatalog` singleton, builds a `xvfb-run orcaslicer --slice ...` subprocess, and streams stdout line-by-line into a per-job `JobLogger` (an `asyncio.Queue` wrapper).
 3. `GET /api/slice/logs/{job_id}` streams those logs as SSE using `StreamingResponse`. The stream terminates when the logger emits `__COMPLETED__` or `__FAILED__:...` sentinel strings.
 4. `GET /api/slice/download/{job_id}` returns the first `.gcode` or `.3mf` found in the job's output dir.
 
@@ -57,7 +57,7 @@ curl http://localhost:5000/api/health
 `POST /api/arrange` runs `xvfb-run orcaslicer --arrange 1 --orient 1 --export-3mf` **synchronously** (35-second timeout) and streams the resulting `.3mf` file back directly, then queues directory cleanup as a background task.
 
 ### Profile resolution
-`find_profiles_in_config()` walks `/config/user/` and collects any `.json` files inside directories named `machine`, `process`, or `filament`. Profiles can be matched by `rel_path`, display `name`, or bare `filename` when building CLI arguments.
+`ProfileCatalog` (`app/profile_catalog.py`) scans the OrcaSlicer system profiles dir and `/config/user/` on startup, resolves the `"inherits"` chain into fully merged presets, and builds a name index for fast lookup. Profiles are matched by display `name` or file path when building CLI arguments. The catalog is lazily loaded and cached to `/tmp/laminus_catalog_cache.json`; delete the cache file to force a rebuild. `flatten_profiles.py` (see above) produces standalone user presets from system profiles that can then be placed in `/config/user/`.
 
 ### Job state
 `jobs` is a plain in-memory dict — all state is lost on container restart. There is no database or persistence layer.
