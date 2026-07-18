@@ -1620,3 +1620,36 @@ async def health_check():
         "catalog_profile_count": catalog.counts if (catalog and catalog.is_built) else None,
         "active_jobs": active,
     }
+
+
+@app.get("/api/test/known-profile", include_in_schema=False)
+async def test_known_profile():
+    """Return the first compatible machine/process/filament UUID triple from the loaded catalog.
+
+    For E2E tests that need valid profile UUIDs without hardcoding profile names.
+    Returns 503 while the catalog is building.
+    """
+    if catalog is None or not catalog.is_built:
+        raise HTTPException(status_code=503, detail="Catalog not ready.")
+    data = catalog.as_dict()
+    machines = data.get("machine", [])
+    processes = data.get("process", [])
+    filaments = data.get("filament", [])
+    if not machines or not processes or not filaments:
+        raise HTTPException(status_code=503, detail="Catalog is empty.")
+    machine = machines[0]
+
+    def _compatible(entry: dict) -> bool:
+        cp = entry.get("compatible_printers", [])
+        return not cp or machine["name"] in cp
+
+    process = next((p for p in processes if _compatible(p)), processes[0])
+    filament = next((f for f in filaments if _compatible(f)), filaments[0])
+    return {
+        "machine_uuid": machine["uuid"],
+        "machine_name": machine["name"],
+        "process_uuid": process["uuid"],
+        "process_name": process["name"],
+        "filament_uuid": filament["uuid"],
+        "filament_name": filament["name"],
+    }
