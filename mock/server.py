@@ -26,7 +26,7 @@ FILAMENT_UUID = "00000000-mock-fila-0000-elegooplaefcc"
 
 _MACHINE = {
     "uuid": MACHINE_UUID,
-    "name": "Elegoo Centauri Carbon 0.4 nozzle (mock)",
+    "name": "Elegoo Centauri Carbon 0.4 nozzle",
     "manufacturer": "Elegoo",
     "model": "Centauri Carbon",
     "nozzle": "0.4",
@@ -40,17 +40,17 @@ _MACHINE = {
 }
 _PROCESS = {
     "uuid": PROCESS_UUID,
-    "name": "0.16mm Optimal @Elegoo CC 0.4 nozzle (mock)",
+    "name": "0.16mm Optimal @Elegoo CC 0.4 nozzle",
     "layer_height": 0.16,
-    "compatible_printers": ["Elegoo Centauri Carbon 0.4 nozzle (mock)"],
+    "compatible_printers": ["Elegoo Centauri Carbon 0.4 nozzle"],
     "source": "mock",
     "rel_path": "mock/process.json",
     "type": "process",
 }
 _FILAMENT = {
     "uuid": FILAMENT_UUID,
-    "name": "Elegoo PLA @ECC (mock)",
-    "display_name": "Elegoo PLA (mock)",
+    "name": "Elegoo PLA @ECC",
+    "display_name": "Elegoo PLA",
     "filament_type": "PLA",
     "filament_colour": "#FFFFFF",
     "filament_vendor": "Elegoo",
@@ -61,7 +61,7 @@ _FILAMENT = {
     "nozzle_temperature_range_high": 240,
     "bed_temperature": 60,
     "bed_temperature_initial_layer": 65,
-    "compatible_printers": ["Elegoo Centauri Carbon 0.4 nozzle (mock)"],
+    "compatible_printers": ["Elegoo Centauri Carbon 0.4 nozzle"],
     "source": "mock",
     "rel_path": "mock/filament.json",
     "type": "filament",
