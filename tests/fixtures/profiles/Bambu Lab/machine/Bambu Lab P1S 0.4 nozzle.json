@@ -1,0 +1,9 @@
+{
+  "name": "Bambu Lab P1S 0.4 nozzle",
+  "bed_size_x": 256,
+  "bed_size_y": 256,
+  "extruder_count": 1,
+  "nozzle_diameter": [0.4],
+  "printable_area": ["0x0", "256x0", "256x256", "0x256"],
+  "printable_height": 256
+}

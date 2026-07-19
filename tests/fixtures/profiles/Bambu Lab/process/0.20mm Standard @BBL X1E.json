@@ -1,0 +1,7 @@
+{
+  "name": "0.20mm Standard @BBL X1E",
+  "inherits": "FFF Settings",
+  "layer_height": 0.2,
+  "print_speed": 200,
+  "compatible_printers": ["Bambu Lab P1S 0.4 nozzle"]
+}

@@ -59,7 +59,14 @@ def client(request):
         if _real_app is None:
             pytest.skip("Real Laminus app not importable")
         tc = TestClient(_real_app, raise_server_exceptions=False)
-        health = tc.get("/api/health").json()
+        # Catalog builds in the background; poll until ready (or give up quickly).
+        for _ in range(20):
+            health = tc.get("/api/health").json()
+            if health.get("catalog_loaded"):
+                break
+            if not health.get("catalog_building"):
+                break
+            import time; time.sleep(0.1)
         if not health.get("catalog_loaded"):
             pytest.skip("Real Laminus catalog not loaded (OrcaSlicer not installed in this environment)")
         return TestClient(_real_app, raise_server_exceptions=True)

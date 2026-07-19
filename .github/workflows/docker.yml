@@ -26,8 +26,37 @@ jobs:
       - name: Fail if spec is stale
         run: git diff --exit-code openapi.json
 
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y xvfb
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt pytest httpx anyio[asyncio]
+
+      - name: Install mock OrcaSlicer
+        run: |
+          chmod +x mock/orca_cli.py
+          sudo ln -sf "$(pwd)/mock/orca_cli.py" /usr/local/bin/orcaslicer
+
+      - name: Run tests
+        env:
+          SYSTEM_PROFILES_DIR: ${{ github.workspace }}/tests/fixtures/profiles
+          USER_CONFIG_DIR: /tmp/laminus-test-user
+          CONFIG_DIR: /tmp/laminus-test-config
+          DATA_DIR: /tmp/laminus-test-data
+        run: pytest tests/ -v
+
   build-and-push:
     runs-on: ubuntu-latest
+    needs: [check-spec-freshness, test]
     permissions:
       contents: read
 

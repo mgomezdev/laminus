@@ -1,0 +1,14 @@
+{
+  "name": "Bambu PLA Basic @BBL X1E 0.4 nozzle",
+  "filament_type": "PLA",
+  "filament_colour": "#FFFFFF",
+  "filament_vendor": "Bambu Lab",
+  "filament_diameter": 1.75,
+  "filament_density": 1.24,
+  "nozzle_temperature": 220,
+  "nozzle_temperature_range_low": 190,
+  "nozzle_temperature_range_high": 240,
+  "bed_temperature": 35,
+  "bed_temperature_initial_layer": 35,
+  "compatible_printers": ["Bambu Lab P1S 0.4 nozzle"]
+}
