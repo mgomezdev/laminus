@@ -98,8 +98,9 @@ In CI, the mock binary (`mock/orca_cli.py`) is symlinked to `/usr/local/bin/orca
 ### No database
 
 Laminus has no persistent database. State lives in:
-- **In-memory:** active slice jobs dict `_jobs: dict[str, Job]` in `main.py`
-- **`/data/jobs.json`:** not used for persistence; the jobs dict is evicted by TTL sweep
+- **In-memory:** active slice jobs dict `jobs: dict[str, dict]` in `main.py`, evicted by TTL sweep or on download
+- **In-memory + `/data/job_history.json`:** `job_history` — a longer-lived, size-capped (`JOB_HISTORY_LIMIT`, default 200) record of every job ever created, independent of `jobs` eviction. Backs `GET /api/jobs` and the Web UI's job status/history table. Persisted so it survives restarts.
+- **`/data/jobs.json`:** snapshot of the active `jobs` dict, restored on startup as failed stub entries for anything that was `pending`/`slicing` when Laminus last stopped
 - **`/data/catalog_cache.json`:** profile catalog cache, keyed by MD5 of ORCA_VERSION + user config dir mtimes
 
 ### Startup sequence (`app/main.py :: lifespan`)
@@ -190,6 +191,13 @@ All routes are in `app/main.py`. Full reference with curl examples: `docs/laminu
 | `POST` | `/api/pack` | Inject N STLs into a bed template, pack across plates |
 
 `/api/pack` supports three template modes: uploaded `.3mf`, UUID-based (Laminus resolves machine settings), or explicit bed dimensions.
+
+### Jobs & Maintenance
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/jobs` | Job history (newest first), including jobs already evicted from the active table |
+| `POST` | `/api/cleanup` | Remove stale temp dirs/files left by failed or interrupted jobs; `dry_run=true` to preview |
 
 ---
 

@@ -6,6 +6,7 @@ import glob
 import time
 import logging
 import json
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
@@ -50,6 +51,7 @@ async def lifespan(app: FastAPI):
         os.makedirs(d, exist_ok=True)
     init_config_directories()
     _load_jobs_on_startup()
+    _load_history_on_startup()
     try:
         proc = await asyncio.create_subprocess_exec(
             "orcaslicer", "--version",
@@ -174,6 +176,21 @@ app = FastAPI(
                 "block until OrcaSlicer finishes (up to `ARRANGE_TIMEOUT_SECONDS`, default 120). "
                 "Use `POST /api/pack` to combine multiple STLs into a single multi-plate `.3mf`, "
                 "and `POST /api/arrange` to re-pack an existing `.3mf`."
+            ),
+        },
+        {
+            "name": "jobs",
+            "description": (
+                "Job history across the lifetime of the container — every slice job ever "
+                "created, including ones already evicted from the active `jobs` table. "
+                "Backs the Web UI's status/history view."
+            ),
+        },
+        {
+            "name": "maintenance",
+            "description": (
+                "On-demand disk cleanup for temp files left behind by failed or interrupted "
+                "slice/arrange/pack runs (e.g., after a container crash mid-request)."
             ),
         },
     ],
@@ -328,7 +345,56 @@ async def _evict_stale_jobs():
             if j:
                 job_dir = os.path.join(JOBS_DIR, jid)
                 await asyncio.to_thread(cleanup_directory, job_dir)
+                _history_upsert(jid, status=j.get("status"), error=j.get("error"), evicted=True, updated_at=time.time())
                 logger.info(f"Evicted stale job {jid}")
+
+
+# --- Job history: a longer-lived record of every job, independent of the active `jobs` dict.
+# Backs GET /api/jobs (status + history view in the Web UI). Entries persist across the job's
+# eviction from `jobs` (download or TTL sweep) so the UI can still show what happened.
+job_history: "OrderedDict[str, dict]" = OrderedDict()
+_HISTORY_FILE = os.path.join(DATA_DIR, "job_history.json")
+JOB_HISTORY_LIMIT = int(os.environ.get("JOB_HISTORY_LIMIT", "200"))
+
+
+def _history_upsert(job_id: str, **fields) -> None:
+    rec = job_history.get(job_id)
+    if rec is None:
+        rec = {"id": job_id}
+        job_history[job_id] = rec
+    rec.update(fields)
+    job_history.move_to_end(job_id)
+    while len(job_history) > JOB_HISTORY_LIMIT:
+        job_history.popitem(last=False)
+    _save_history()
+
+
+def _save_history() -> None:
+    """Persist job history to disk (best-effort)."""
+    try:
+        tmp = _HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(list(job_history.values()), f)
+        os.replace(tmp, _HISTORY_FILE)
+    except OSError:
+        pass
+
+
+def _load_history_on_startup() -> None:
+    try:
+        with open(_HISTORY_FILE, encoding="utf-8") as f:
+            saved = json.load(f)
+    except (OSError, ValueError):
+        return
+    for rec in saved:
+        jid = rec.get("id")
+        if not jid:
+            continue
+        if rec.get("status") in ("pending", "slicing"):
+            rec["status"] = "failed"
+            rec["error"] = "Laminus restarted while job was in progress"
+            rec["evicted"] = True
+        job_history[jid] = rec
 
 
 class JobLogger:
@@ -550,6 +616,7 @@ async def run_orcaslicer_task(
     job_logger = job["logger"]
     job["status"] = "slicing"
     _save_jobs()
+    _history_upsert(job_id, status="slicing", updated_at=time.time())
     job_logger.log(f"Starting slice: {os.path.basename(input_file_path)}")
 
     async def _attempt(slice_input: str, label: str) -> bool:
@@ -615,18 +682,22 @@ async def run_orcaslicer_task(
             job["status"] = "completed"
             job["sliced_file"] = found
             _save_jobs()
+            _history_upsert(job_id, status="completed", sliced_file=os.path.basename(found),
+                             error=None, updated_at=time.time())
             job_logger.log(f"Output: {os.path.basename(found)}")
             job_logger.log("__COMPLETED__")
         else:
             job["status"] = "failed"
             job["error"] = "OrcaSlicer succeeded but no output file found."
             _save_jobs()
+            _history_upsert(job_id, status="failed", error=job["error"], updated_at=time.time())
             job_logger.log("ERROR: No output file found.")
             job_logger.log("__FAILED__: Missing output file")
     else:
         job["status"] = "failed"
         job["error"] = "OrcaSlicer slice process failed. See logs."
         _save_jobs()
+        _history_upsert(job_id, status="failed", error=job["error"], updated_at=time.time())
         job_logger.log("__FAILED__: OrcaSlicer returned non-zero")
 
 
@@ -795,14 +866,18 @@ async def start_slice(
 
     job_logger = JobLogger(job_id)
     _wall_now = time.time()
+    output_format = "gcode_3mf" if export_3mf else "gcode"
     jobs[job_id] = {
         "id": job_id, "status": "pending",
         "input_file": prepared_3mf, "output_dir": output_dir,
-        "sliced_file": None, "output_format": "gcode_3mf" if export_3mf else "gcode",
+        "sliced_file": None, "output_format": output_format,
         "error": None, "logger": job_logger, "created_at": time.monotonic(),
         "_wall_created_at": _wall_now,
     }
     _save_jobs()
+    _history_upsert(job_id, filename=safe_name, status="pending", output_format=output_format,
+                     sliced_file=None, error=None, evicted=False,
+                     created_at=_wall_now, updated_at=_wall_now, source="slice/start")
     background_tasks.add_task(
         run_orcaslicer_task,
         job_id=job_id, input_file_path=prepared_3mf, output_dir=output_dir,
@@ -874,14 +949,19 @@ async def slice_prepared(
         await asyncio.to_thread(shutil.copyfileobj, file.file, buf)
 
     job_logger = JobLogger(job_id)
+    _wall_now = time.time()
+    output_format = "gcode_3mf" if export_3mf else "gcode"
     jobs[job_id] = {
         "id": job_id, "status": "pending",
         "input_file": input_path, "output_dir": output_dir,
-        "sliced_file": None, "output_format": "gcode_3mf" if export_3mf else "gcode",
+        "sliced_file": None, "output_format": output_format,
         "error": None, "logger": job_logger, "created_at": time.monotonic(),
-        "_wall_created_at": time.time(),
+        "_wall_created_at": _wall_now,
     }
     _save_jobs()
+    _history_upsert(job_id, filename=safe_name, status="pending", output_format=output_format,
+                     sliced_file=None, error=None, evicted=False,
+                     created_at=_wall_now, updated_at=_wall_now, source="slice/prepared")
     background_tasks.add_task(
         run_orcaslicer_task,
         job_id=job_id, input_file_path=input_path, output_dir=output_dir,
@@ -1105,6 +1185,7 @@ def _evict_job(job_id: str):
     j = jobs.pop(job_id, None)
     if j:
         cleanup_directory(os.path.join(JOBS_DIR, job_id))
+        _history_upsert(job_id, evicted=True, updated_at=time.time())
 
 
 def cleanup_directory(path: str):
@@ -1619,6 +1700,134 @@ async def health_check():
         "catalog_building": _catalog_building,
         "catalog_profile_count": catalog.counts if (catalog and catalog.is_built) else None,
         "active_jobs": active,
+    }
+
+
+@app.get(
+    "/api/jobs",
+    tags=["jobs"],
+    summary="List job history",
+    description=(
+        "Returns every slice job created during this container's lifetime, newest first — "
+        "including jobs already evicted from the active job table (downloaded, or expired "
+        "after `JOB_TTL_SECONDS`). Backs the Web UI's job status/history view.\n\n"
+        "**Response fields per job:** `id`, `filename` (original upload name), `status` "
+        "(`pending`/`slicing`/`completed`/`failed`), `output_format`, `sliced_file`, `error`, "
+        "`created_at` / `updated_at` (Unix timestamps), and `evicted` (`true` once the sliced "
+        "file has been deleted from disk — `GET /api/slice/download/{id}` will 404).\n\n"
+        "History is capped at `JOB_HISTORY_LIMIT` (default 200) entries; oldest entries are "
+        "dropped first. Persisted to `/data/job_history.json`, so it survives restarts."
+    ),
+)
+async def list_jobs(limit: int = 100, status: Optional[str] = None):
+    records = list(job_history.values())
+    if status:
+        records = [r for r in records if r.get("status") == status]
+    records.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+    limit = max(1, min(limit, JOB_HISTORY_LIMIT))
+    return {"jobs": records[:limit]}
+
+
+def _dir_size(path: str) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for fn in files:
+            try:
+                total += os.path.getsize(os.path.join(root, fn))
+            except OSError:
+                pass
+    return total
+
+
+def _scan_stale_temp(min_age_seconds: int) -> List[str]:
+    """Top-level entries under JOBS_DIR/ARRANGE_DIR that are safe to delete.
+
+    JOBS_DIR entries are only stale if their job_id isn't tracked by any active job
+    (i.e. left behind by a crash/restart). ARRANGE_DIR entries (arrange/pack/thumbnail
+    scratch dirs and stable output copies) are always synchronous and self-cleaning, so
+    anything still there past min_age_seconds is orphaned from an interrupted request.
+    Both are additionally gated by min_age_seconds to avoid racing a request in flight.
+    """
+    now = time.time()
+    active_ids = set(jobs.keys())
+    stale: List[str] = []
+
+    if os.path.isdir(JOBS_DIR):
+        for name in os.listdir(JOBS_DIR):
+            if name in active_ids:
+                continue
+            path = os.path.join(JOBS_DIR, name)
+            try:
+                age = now - os.path.getmtime(path)
+            except OSError:
+                continue
+            if age >= min_age_seconds:
+                stale.append(path)
+
+    if os.path.isdir(ARRANGE_DIR):
+        for name in os.listdir(ARRANGE_DIR):
+            path = os.path.join(ARRANGE_DIR, name)
+            try:
+                age = now - os.path.getmtime(path)
+            except OSError:
+                continue
+            if age >= min_age_seconds:
+                stale.append(path)
+
+    return stale
+
+
+@app.post(
+    "/api/cleanup",
+    tags=["maintenance"],
+    summary="Remove stale temp files from failed/interrupted jobs",
+    description=(
+        "Scans `/tmp/jobs` and `/tmp/arrange` for leftover directories/files not accounted "
+        "for by any currently active job, and removes the ones older than `min_age_seconds`. "
+        "This catches clutter that the normal job-eviction sweep can't see — e.g. scratch "
+        "dirs from an `/api/arrange`, `/api/pack`, or `/api/slice/thumbnail` request that "
+        "never finished because the container was killed mid-request, or `/tmp/jobs` entries "
+        "left behind by a slice job that existed before a restart.\n\n"
+        "**`dry_run=true`** reports what would be removed (path count + total bytes) without "
+        "deleting anything — use this to preview before committing.\n\n"
+        "**`min_age_seconds`** (default 300) guards against deleting a directory that's still "
+        "being written to by an in-flight request; pass `0` to remove everything unowned "
+        "regardless of age."
+    ),
+    responses={
+        422: {"description": "min_age_seconds must be >= 0"},
+    },
+)
+async def cleanup_temp(min_age_seconds: int = 300, dry_run: bool = False):
+    if min_age_seconds < 0:
+        raise HTTPException(status_code=422, detail="min_age_seconds must be >= 0.")
+
+    paths = await asyncio.to_thread(_scan_stale_temp, min_age_seconds)
+
+    items = []
+    total_bytes = 0
+    for path in paths:
+        is_dir = os.path.isdir(path)
+        try:
+            size = await asyncio.to_thread(_dir_size if is_dir else os.path.getsize, path)
+        except OSError:
+            size = 0
+        total_bytes += size
+        items.append({"path": os.path.relpath(path, "/tmp"), "bytes": size, "is_dir": is_dir})
+        if not dry_run:
+            if is_dir:
+                await asyncio.to_thread(shutil.rmtree, path, True)
+            else:
+                await asyncio.to_thread(cleanup_file, path)
+
+    if not dry_run and items:
+        logger.info("Cleanup removed %d stale temp item(s), freed %d bytes", len(items), total_bytes)
+
+    return {
+        "dry_run": dry_run,
+        "count": len(items),
+        "freed_bytes": total_bytes,
+        "items": items,
     }
 
 

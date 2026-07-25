@@ -519,6 +519,163 @@
             background: linear-gradient(135deg, #059669, var(--success)) !important;
         }
 
+        /* Jobs & Cleanup section */
+        .jobs-section {
+            max-width: 1200px;
+            width: 100%;
+            margin: 0 auto 2.5rem;
+            padding: 0 1.5rem;
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 2.5rem;
+        }
+
+        @media (max-width: 900px) {
+            .jobs-section {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card-title-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .card-title-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            font-weight: 400;
+            text-transform: none;
+            letter-spacing: normal;
+        }
+
+        .auto-refresh-label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+        }
+
+        .btn-small {
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid var(--panel-border);
+            color: var(--text-color);
+            border-radius: 6px;
+            padding: 5px 10px;
+            font-size: 0.8rem;
+            font-family: var(--font-main);
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .btn-small:hover {
+            background: rgba(255, 255, 255, 0.12);
+        }
+
+        .jobs-table-wrap {
+            overflow-x: auto;
+            max-height: 420px;
+            overflow-y: auto;
+        }
+
+        .jobs-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+        }
+
+        .jobs-table th {
+            text-align: left;
+            color: var(--text-muted);
+            font-weight: 500;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 8px 10px;
+            border-bottom: 1px solid var(--panel-border);
+            position: sticky;
+            top: 0;
+            background: rgba(17, 24, 39, 0.95);
+        }
+
+        .jobs-table td {
+            padding: 8px 10px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            vertical-align: middle;
+        }
+
+        .jobs-table td.mono {
+            font-family: var(--font-mono);
+            color: var(--text-muted);
+        }
+
+        .jobs-table td.ellipsis {
+            max-width: 220px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .jobs-empty {
+            text-align: center;
+            color: var(--text-muted);
+            padding: 2rem 0 !important;
+        }
+
+        .status-pill {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 99px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: capitalize;
+        }
+
+        .status-pill.pending { background: rgba(156, 163, 175, 0.15); color: var(--text-muted); }
+        .status-pill.slicing { background: var(--primary-glow); color: var(--primary); }
+        .status-pill.completed { background: var(--success-glow); color: var(--success); }
+        .status-pill.failed { background: rgba(239, 68, 68, 0.12); color: var(--error); }
+
+        .evicted-tag {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-left: 6px;
+        }
+
+        .jobs-download {
+            color: var(--success);
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-decoration: none;
+            white-space: nowrap;
+        }
+
+        .jobs-download:hover {
+            text-decoration: underline;
+        }
+
+        .cleanup-desc {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            line-height: 1.5;
+            margin-bottom: 1.25rem;
+        }
+
+        .cleanup-preview {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            padding: 12px 14px;
+            font-size: 0.85rem;
+            color: var(--text-color);
+            min-height: 20px;
+        }
+
         footer {
             padding: 1.5rem;
             text-align: center;
@@ -674,6 +831,66 @@
             </div>
         </section>
     </main>
+
+    <section class="jobs-section">
+        <!-- Job Status & History -->
+        <section class="card">
+            <h2 class="card-title card-title-row">
+                <span style="display:flex; align-items:center; gap:10px;">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                    Job Status &amp; History
+                </span>
+                <span class="card-title-actions">
+                    <label class="auto-refresh-label"><input type="checkbox" id="jobs-auto-refresh" checked> Auto-refresh</label>
+                    <button type="button" class="btn-small" id="jobs-refresh-btn">Refresh</button>
+                </span>
+            </h2>
+            <div class="jobs-table-wrap">
+                <table class="jobs-table">
+                    <thead>
+                        <tr>
+                            <th>Job</th>
+                            <th>File</th>
+                            <th>Status</th>
+                            <th>Created</th>
+                            <th>Details</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="jobs-tbody">
+                        <tr><td colspan="6" class="jobs-empty">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Disk Cleanup -->
+        <section class="card">
+            <h2 class="card-title">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+                Disk Cleanup
+            </h2>
+            <p class="cleanup-desc">
+                Removes leftover temp files from failed or interrupted jobs — abandoned
+                input uploads, and arrange/pack/thumbnail scratch dirs left behind if the
+                container was killed mid-request.
+            </p>
+            <div class="form-group">
+                <label class="form-label" for="cleanup-age">Only remove items older than</label>
+                <select class="form-select" id="cleanup-age">
+                    <option value="0">Any age</option>
+                    <option value="300" selected>5 minutes</option>
+                    <option value="1800">30 minutes</option>
+                    <option value="3600">1 hour</option>
+                </select>
+            </div>
+            <div class="cleanup-preview" id="cleanup-preview">Scanning…</div>
+            <div style="display:flex; gap:10px; margin-top:1.25rem;">
+                <button type="button" class="btn" id="cleanup-scan-btn" style="background: rgba(255,255,255,0.08); box-shadow: none;">Scan</button>
+                <button type="button" class="btn download-btn" id="cleanup-run-btn" disabled>Clean Up</button>
+            </div>
+        </section>
+    </section>
 
     <footer>
         <p>OrcaSlicer container wrapper running on <code>FastAPI</code> & <code>Xvfb</code> virtual X-Server. Mounted volume path: <code>/config</code></p>
@@ -1043,6 +1260,133 @@
             errorCard.style.display = 'flex';
             errorDesc.textContent = `Slicing command aborted: ${reason}. Please inspect the logs above to check configuration parameters or mesh issues.`;
         }
+
+        // --- Job Status & History ---------------------------------------------------
+        const jobsTbody = document.getElementById('jobs-tbody');
+        const jobsAutoRefresh = document.getElementById('jobs-auto-refresh');
+        const jobsRefreshBtn = document.getElementById('jobs-refresh-btn');
+        let jobsPollHandle = null;
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str == null ? '' : String(str);
+            return div.innerHTML;
+        }
+
+        function fmtRelTime(unixSeconds) {
+            if (!unixSeconds) return '—';
+            const diff = Date.now() / 1000 - unixSeconds;
+            if (diff < 5) return 'just now';
+            if (diff < 60) return `${Math.floor(diff)}s ago`;
+            if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+            if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+            return `${Math.floor(diff / 86400)}d ago`;
+        }
+
+        function statusPill(status) {
+            const known = ['pending', 'slicing', 'completed', 'failed'];
+            const cls = known.includes(status) ? status : 'pending';
+            return `<span class="status-pill ${cls}">${escapeHtml(status || 'unknown')}</span>`;
+        }
+
+        async function fetchJobs() {
+            try {
+                const res = await fetch('/api/jobs?limit=50');
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                renderJobs(data.jobs || []);
+            } catch (err) {
+                jobsTbody.innerHTML = `<tr><td colspan="6" class="jobs-empty">Failed to load job history: ${escapeHtml(err.message)}</td></tr>`;
+            }
+        }
+
+        function renderJobs(list) {
+            if (!list.length) {
+                jobsTbody.innerHTML = `<tr><td colspan="6" class="jobs-empty">No jobs yet. Start a slicing job to see it here.</td></tr>`;
+                return;
+            }
+            jobsTbody.innerHTML = list.map(j => {
+                const shortId = (j.id || '').slice(0, 8);
+                const canDownload = j.status === 'completed' && !j.evicted;
+                const detail = j.status === 'failed' ? (j.error || '') : (j.sliced_file || '');
+                const evictedTag = j.evicted && j.status === 'completed' ? '<span class="evicted-tag">(downloaded)</span>' : '';
+                return `<tr>
+                    <td class="mono" title="${escapeHtml(j.id)}">${escapeHtml(shortId)}</td>
+                    <td class="ellipsis" title="${escapeHtml(j.filename)}">${escapeHtml(j.filename) || '—'}</td>
+                    <td>${statusPill(j.status)}</td>
+                    <td title="${j.created_at ? new Date(j.created_at * 1000).toLocaleString() : ''}">${fmtRelTime(j.created_at)}</td>
+                    <td class="ellipsis" title="${escapeHtml(detail)}">${escapeHtml(detail) || '—'}${evictedTag}</td>
+                    <td>${canDownload ? `<a class="jobs-download" href="/api/slice/download/${encodeURIComponent(j.id)}">Download</a>` : ''}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        function startJobsPolling() {
+            if (jobsPollHandle) clearInterval(jobsPollHandle);
+            jobsPollHandle = setInterval(fetchJobs, 5000);
+        }
+
+        jobsRefreshBtn.addEventListener('click', fetchJobs);
+        jobsAutoRefresh.addEventListener('change', () => {
+            if (jobsAutoRefresh.checked) {
+                startJobsPolling();
+                fetchJobs();
+            } else if (jobsPollHandle) {
+                clearInterval(jobsPollHandle);
+                jobsPollHandle = null;
+            }
+        });
+
+        fetchJobs();
+        startJobsPolling();
+
+        // --- Disk Cleanup -------------------------------------------------------------
+        const cleanupAgeSelect = document.getElementById('cleanup-age');
+        const cleanupPreview = document.getElementById('cleanup-preview');
+        const cleanupScanBtn = document.getElementById('cleanup-scan-btn');
+        const cleanupRunBtn = document.getElementById('cleanup-run-btn');
+
+        async function scanCleanup() {
+            cleanupPreview.textContent = 'Scanning…';
+            cleanupRunBtn.disabled = true;
+            try {
+                const age = cleanupAgeSelect.value;
+                const res = await fetch(`/api/cleanup?dry_run=true&min_age_seconds=${encodeURIComponent(age)}`, { method: 'POST' });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                if (data.count === 0) {
+                    cleanupPreview.textContent = 'Nothing to clean up right now.';
+                    cleanupRunBtn.disabled = true;
+                } else {
+                    cleanupPreview.textContent = `${data.count} stale item(s) found, ${formatBytes(data.freed_bytes)} reclaimable.`;
+                    cleanupRunBtn.disabled = false;
+                }
+            } catch (err) {
+                cleanupPreview.textContent = `Scan failed: ${err.message}`;
+                cleanupRunBtn.disabled = true;
+            }
+        }
+
+        async function runCleanup() {
+            if (!confirm('Delete these stale temp files? This cannot be undone.')) return;
+            cleanupRunBtn.disabled = true;
+            cleanupScanBtn.disabled = true;
+            try {
+                const age = cleanupAgeSelect.value;
+                const res = await fetch(`/api/cleanup?dry_run=false&min_age_seconds=${encodeURIComponent(age)}`, { method: 'POST' });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                cleanupPreview.textContent = `Removed ${data.count} item(s), freed ${formatBytes(data.freed_bytes)}.`;
+            } catch (err) {
+                cleanupPreview.textContent = `Cleanup failed: ${err.message}`;
+            } finally {
+                cleanupScanBtn.disabled = false;
+            }
+        }
+
+        cleanupScanBtn.addEventListener('click', scanCleanup);
+        cleanupRunBtn.addEventListener('click', runCleanup);
+        scanCleanup();
     </script>
 </body>
 </html>

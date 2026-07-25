@@ -572,6 +572,109 @@
           }
         }
       }
+    },
+    "/api/jobs": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "List job history",
+        "description": "Returns every slice job created during this container's lifetime, newest first \u2014 including jobs already evicted from the active job table (downloaded, or expired after `JOB_TTL_SECONDS`). Backs the Web UI's job status/history view.\n\n**Response fields per job:** `id`, `filename` (original upload name), `status` (`pending`/`slicing`/`completed`/`failed`), `output_format`, `sliced_file`, `error`, `created_at` / `updated_at` (Unix timestamps), and `evicted` (`true` once the sliced file has been deleted from disk \u2014 `GET /api/slice/download/{id}` will 404).\n\nHistory is capped at `JOB_HISTORY_LIMIT` (default 200) entries; oldest entries are dropped first. Persisted to `/data/job_history.json`, so it survives restarts.",
+        "operationId": "list_jobs_api_jobs_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cleanup": {
+      "post": {
+        "tags": [
+          "maintenance"
+        ],
+        "summary": "Remove stale temp files from failed/interrupted jobs",
+        "description": "Scans `/tmp/jobs` and `/tmp/arrange` for leftover directories/files not accounted for by any currently active job, and removes the ones older than `min_age_seconds`. This catches clutter that the normal job-eviction sweep can't see \u2014 e.g. scratch dirs from an `/api/arrange`, `/api/pack`, or `/api/slice/thumbnail` request that never finished because the container was killed mid-request, or `/tmp/jobs` entries left behind by a slice job that existed before a restart.\n\n**`dry_run=true`** reports what would be removed (path count + total bytes) without deleting anything \u2014 use this to preview before committing.\n\n**`min_age_seconds`** (default 300) guards against deleting a directory that's still being written to by an in-flight request; pass `0` to remove everything unowned regardless of age.",
+        "operationId": "cleanup_temp_api_cleanup_post",
+        "parameters": [
+          {
+            "name": "min_age_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 300,
+              "title": "Min Age Seconds"
+            }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Dry Run"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "min_age_seconds must be >= 0"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -976,6 +1079,14 @@
     {
       "name": "arrange",
       "description": "Synchronous plate arrangement and STL packing. No job tracking \u2014 responses block until OrcaSlicer finishes (up to `ARRANGE_TIMEOUT_SECONDS`, default 120). Use `POST /api/pack` to combine multiple STLs into a single multi-plate `.3mf`, and `POST /api/arrange` to re-pack an existing `.3mf`."
+    },
+    {
+      "name": "jobs",
+      "description": "Job history across the lifetime of the container \u2014 every slice job ever created, including ones already evicted from the active `jobs` table. Backs the Web UI's status/history view."
+    },
+    {
+      "name": "maintenance",
+      "description": "On-demand disk cleanup for temp files left behind by failed or interrupted slice/arrange/pack runs (e.g., after a container crash mid-request)."
     }
   ]
 }
