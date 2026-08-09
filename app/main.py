@@ -847,7 +847,10 @@ async def start_slice(
 
     if safe_name.lower().endswith(".stl"):
         base_3mf = os.path.join(input_dir, os.path.splitext(safe_name)[0] + ".3mf")
-        await asyncio.to_thread(_stl_to_3mf, raw_path, base_3mf)
+        try:
+            await asyncio.to_thread(_stl_to_3mf, raw_path, base_3mf)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Could not parse uploaded STL: {e}")
     else:
         base_3mf = raw_path
 
