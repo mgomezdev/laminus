@@ -95,6 +95,8 @@ def _build_model_xml(tris: list[tuple]) -> str:
 def stl_to_3mf(stl_path: str, out_path: str) -> None:
     """Convert stl_path to a minimal 3MF written at out_path."""
     tris = _parse_binary(stl_path) if _is_binary(stl_path) else _parse_ascii(stl_path)
+    if not tris:
+        raise ValueError(f"No triangles found in '{os.path.basename(stl_path)}' (empty or unparseable STL)")
     model_xml = _build_model_xml(tris)
     with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("[Content_Types].xml", _CONTENT_TYPES)
@@ -154,6 +156,8 @@ def inject_stls_into_3mf(template_path: str, stl_paths: list[str], out_path: str
         wrapper_id = i * 2  # 2, 4, 6, … — matches OrcaSlicer component/wrapper pattern
 
         tris = parse_stl_triangles(stl_path)
+        if not tris:
+            raise ValueError(f"No triangles found in '{os.path.basename(stl_path)}' (empty or unparseable STL)")
         object_files[obj_path] = _object_model_xml(tris).encode("utf-8")
 
         resources_parts.append(

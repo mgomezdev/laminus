@@ -1,4 +1,5 @@
 import json, os, struct, zipfile
+import pytest
 from app.stl_to_3mf import stl_to_3mf, inject_stls_into_3mf
 
 def _binary_stl(tmp_path, triangles=1):
@@ -118,6 +119,43 @@ def test_inject_object_files_contain_geometry(tmp_path):
         obj_file = next(n for n in zf.namelist() if n.startswith("3D/Objects/"))
         xml = zf.read(obj_file).decode()
     assert xml.count("<vertex ") == 6   # 2 triangles × 3 vertices
+
+
+def test_ascii_stl_with_zero_triangles_raises(tmp_path):
+    """An ASCII STL that parses but matches no triangles (e.g. uppercase VERTEX,
+    a case-sensitive miss in _parse_ascii) must raise, not silently produce a
+    structurally-valid but empty 3MF that slices into empty gcode."""
+    path = str(tmp_path / "uppercase.stl")
+    with open(path, "w") as f:
+        f.write("solid test\nfacet normal 0 0 1\n outer loop\n")
+        f.write("  VERTEX 0 0 0\n  VERTEX 1 0 0\n  VERTEX 0 1 0\n")
+        f.write(" endloop\nendfacet\nendsolid test\n")
+    with pytest.raises(ValueError, match="[Nn]o triangles"):
+        stl_to_3mf(path, str(tmp_path / "out.3mf"))
+
+
+def test_misclassified_binary_stl_with_zero_triangles_raises(tmp_path):
+    """A binary STL whose header starts with 'solid' but whose size doesn't match
+    the binary-format size formula is misclassified as ASCII by _is_binary; parsing
+    its binary bytes as ASCII text yields zero "vertex" lines. Must raise, not
+    silently produce an empty 3MF."""
+    path = str(tmp_path / "tricky_mismatched_size.stl")
+    with open(path, "wb") as f:
+        header = b"solid weird binary export" + b"\x00" * (80 - len(b"solid weird binary export"))
+        f.write(header)
+        f.write(struct.pack("<I", 1))  # claims 1 triangle (expects 80+4+50=134 bytes)
+        f.write(b"\x00" * 10)  # actual size doesn't match -> misclassified as ASCII
+    with pytest.raises(ValueError, match="[Nn]o triangles"):
+        stl_to_3mf(path, str(tmp_path / "out.3mf"))
+
+
+def test_inject_raises_when_one_stl_has_zero_triangles(tmp_path):
+    template = _make_template_3mf(str(tmp_path / "tmpl.3mf"))
+    empty_stl = str(tmp_path / "empty.stl")
+    with open(empty_stl, "w") as f:
+        f.write("solid empty\nendsolid empty\n")
+    with pytest.raises(ValueError, match="[Nn]o triangles"):
+        inject_stls_into_3mf(template, [empty_stl], str(tmp_path / "out.3mf"))
 
 
 def test_binary_stl_with_solid_header(tmp_path):
