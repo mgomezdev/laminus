@@ -42,3 +42,40 @@ def test_slice_start_rejects_malformed_stl(profile_tree):
     )
     assert resp.status_code == 422
     assert "STL" in resp.json()["detail"]
+
+
+def test_slice_start_rejects_malformed_3mf(profile_tree):
+    """A .3mf upload that isn't a valid ZIP (corrupt, truncated, zero-byte) must 422,
+    not 500 (regression: zipfile.BadZipFile from embed_project_settings was unhandled)."""
+    cat, machine_uuid, process_uuid, filament_uuid = _catalog_and_uuids(profile_tree)
+    main_mod.catalog = cat
+    client = TestClient(main_mod.app)
+    resp = client.post(
+        "/api/slice/start",
+        files={"file": ("bad.3mf", b"not a zip file", "application/octet-stream")},
+        data={
+            "machine_uuid": machine_uuid,
+            "process_uuid": process_uuid,
+            "filament_uuids": f'["{filament_uuid}"]',
+            "plate": "1",
+        },
+    )
+    assert resp.status_code == 422
+    assert "3MF" in resp.json()["detail"]
+
+
+def test_slice_start_rejects_zero_byte_3mf(profile_tree):
+    cat, machine_uuid, process_uuid, filament_uuid = _catalog_and_uuids(profile_tree)
+    main_mod.catalog = cat
+    client = TestClient(main_mod.app)
+    resp = client.post(
+        "/api/slice/start",
+        files={"file": ("empty.3mf", b"", "application/octet-stream")},
+        data={
+            "machine_uuid": machine_uuid,
+            "process_uuid": process_uuid,
+            "filament_uuids": f'["{filament_uuid}"]',
+            "plate": "1",
+        },
+    )
+    assert resp.status_code == 422

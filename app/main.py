@@ -870,7 +870,10 @@ async def start_slice(
         except (ValueError, TypeError):
             raise HTTPException(status_code=422, detail="extra_config must be a JSON object.")
     prepared_3mf = os.path.join(input_dir, "prepared.3mf")
-    await asyncio.to_thread(embed_project_settings, base_3mf, project_cfg, prepared_3mf)
+    try:
+        await asyncio.to_thread(embed_project_settings, base_3mf, project_cfg, prepared_3mf)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Uploaded file is not a valid 3MF archive: {e}")
 
     job_logger = JobLogger(job_id)
     _wall_now = time.time()
