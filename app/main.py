@@ -1477,7 +1477,13 @@ async def pack_stls(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=120.0)
+        try:
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=120.0)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            background_tasks.add_task(cleanup_directory, job_dir)
+            raise HTTPException(status_code=408, detail="Pack operation timed out after 120 seconds.")
         exit_code = process.returncode
 
         if exit_code != 0 or not os.path.exists(out_file):
@@ -1502,9 +1508,6 @@ async def pack_stls(
             media_type="application/octet-stream",
         )
 
-    except asyncio.TimeoutError:
-        background_tasks.add_task(cleanup_directory, job_dir)
-        raise HTTPException(status_code=408, detail="Pack operation timed out after 120 seconds.")
     except HTTPException:
         raise
     except Exception as e:
@@ -1599,7 +1602,13 @@ async def auto_arrange_3mf(
             stderr=asyncio.subprocess.STDOUT,
         )
 
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=float(ARRANGE_TIMEOUT))
+        try:
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=float(ARRANGE_TIMEOUT))
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            background_tasks.add_task(cleanup_directory, job_dir)
+            raise HTTPException(status_code=408, detail=f"Slicer arrange execution timed out after {ARRANGE_TIMEOUT} seconds.")
         exit_code = process.returncode
 
         if exit_code != 0 or not os.path.exists(out_file):
@@ -1626,9 +1635,6 @@ async def auto_arrange_3mf(
         background_tasks.add_task(cleanup_file, stable_out)
         return response
 
-    except asyncio.TimeoutError:
-        background_tasks.add_task(cleanup_directory, job_dir)
-        raise HTTPException(status_code=408, detail=f"Slicer arrange execution timed out after {ARRANGE_TIMEOUT} seconds.")
     except HTTPException:
         raise
     except Exception as e:
