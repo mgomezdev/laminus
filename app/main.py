@@ -1,6 +1,7 @@
 import os
 import shutil
 import asyncio
+import signal
 import uuid
 import glob
 import time
@@ -587,6 +588,21 @@ async def get_profile_detail(profile_uuid: str):
     return catalog._public(entry)
 
 
+async def _kill_process_group(process: asyncio.subprocess.Process) -> None:
+    """Kill the whole process group spawned for *process*, not just the direct child.
+
+    xvfb-run (from the `xvfb` apt package, see Dockerfile) is a /bin/sh wrapper -
+    SIGKILL on it alone cannot be trapped, so Xvfb and the orcaslicer child are
+    reparented to PID 1 and keep running. Requires the process to have been
+    started with start_new_session=True.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, AttributeError, OSError, TypeError):
+        process.kill()
+    await process.wait()
+
+
 async def _stream_subprocess_output(process: asyncio.subprocess.Process, job_logger: JobLogger):
     while True:
         line = await process.stdout.readline()
@@ -637,12 +653,12 @@ async def run_orcaslicer_task(
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
             )
             try:
                 await asyncio.wait_for(_stream_subprocess_output(process, job_logger), timeout=SLICE_TIMEOUT)
             except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+                await _kill_process_group(process)
                 job_logger.log(f"ERROR: Timed out after {SLICE_TIMEOUT}s")
                 return False
             else:
@@ -1068,12 +1084,12 @@ async def slice_thumbnail(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
         try:
             stdout, _ = await asyncio.wait_for(process.communicate(), timeout=THUMBNAIL_TIMEOUT)
         except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
+            await _kill_process_group(process)
             background_tasks.add_task(cleanup_directory, job_dir)
             raise HTTPException(status_code=422, detail={"error": f"Timed out after {THUMBNAIL_TIMEOUT}s"})
 
@@ -1502,12 +1518,12 @@ async def pack_stls(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
         try:
             stdout, _ = await asyncio.wait_for(process.communicate(), timeout=120.0)
         except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
+            await _kill_process_group(process)
             background_tasks.add_task(cleanup_directory, job_dir)
             raise HTTPException(status_code=408, detail="Pack operation timed out after 120 seconds.")
         exit_code = process.returncode
@@ -1626,13 +1642,13 @@ async def auto_arrange_3mf(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
 
         try:
             stdout, _ = await asyncio.wait_for(process.communicate(), timeout=float(ARRANGE_TIMEOUT))
         except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
+            await _kill_process_group(process)
             background_tasks.add_task(cleanup_directory, job_dir)
             raise HTTPException(status_code=408, detail=f"Slicer arrange execution timed out after {ARRANGE_TIMEOUT} seconds.")
         exit_code = process.returncode
