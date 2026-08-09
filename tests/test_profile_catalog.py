@@ -190,3 +190,37 @@ def test_skipped_count_persists_through_cache_roundtrip(profile_tree, tmp_path):
     )
     assert loaded is not None
     assert loaded.skipped_count == cat.skipped_count == 1
+
+
+def test_parent_with_slash_resolves_to_escaped_filename(profile_tree):
+    """OrcaSlicer stores a profile named "A/B" in a file that escapes the slash,
+    and is inconsistent about how: both "-" and " " ship in the same tree. A child
+    inherits by name, so the index must try those spellings or the parent looks
+    missing and the whole child is dropped from the catalog."""
+    system_dir = profile_tree["system_dir"]
+    write_json(
+        f"{system_dir}/Bambu Lab/filament/Support For PLA-PETG @base.json",
+        {"name": "Support For PLA/PETG @base", "filament_type": "PLA", "nozzle_temperature": 220},
+    )
+    write_json(
+        f"{system_dir}/Bambu Lab/filament/Support For PA PET @base.json",
+        {"name": "Support For PA/PET @base", "filament_type": "PA", "nozzle_temperature": 280},
+    )
+    write_json(
+        f"{system_dir}/Bambu Lab/filament/Dash Child.json",
+        {"name": "Dash Child", "inherits": "Support For PLA/PETG @base"},
+    )
+    write_json(
+        f"{system_dir}/Bambu Lab/filament/Space Child.json",
+        {"name": "Space Child", "inherits": "Support For PA/PET @base"},
+    )
+
+    cat = ProfileCatalog(system_dir=system_dir, user_dir=profile_tree["user_dir"])
+    cat.build()
+
+    by_name = {f["name"]: f for f in cat.as_dict()["filament"]}
+    assert "Dash Child" in by_name, "slash-to-dash escaped parent was not resolved"
+    assert "Space Child" in by_name, "slash-to-space escaped parent was not resolved"
+    # Inherited values must actually be merged in, not just the child published bare.
+    assert by_name["Dash Child"]["nozzle_temperature"] == 220
+    assert by_name["Space Child"]["nozzle_temperature"] == 280

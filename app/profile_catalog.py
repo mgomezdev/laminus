@@ -13,6 +13,21 @@ logger = logging.getLogger("orcaslicer-api.catalog")
 _CATALOG_NS = uuid.UUID("a7f3c2e1-84b0-4d9e-b1f2-3c8a5d6e7f01")
 
 
+def _fs_safe_names(name: str) -> list[str]:
+    """Candidate on-disk spellings of a profile name.
+
+    `inherits` references a profile's `name`, but the file is named after it with
+    the filesystem-illegal "/" substituted — and OrcaSlicer is not consistent about
+    what it substitutes. Both spellings ship in the same tree:
+      "Bambu Support For PLA/PETG @base" -> "Bambu Support For PLA-PETG @base.json"
+      "Bambu Support For PA/PET @base"   -> "Bambu Support For PA PET @base.json"
+    Indexing by filename stem alone therefore misses every such parent.
+    """
+    if "/" not in name:
+        return []
+    return [name.replace("/", "-"), name.replace("/", " ")]
+
+
 def _build_name_index(roots: list[str]) -> dict[str, str]:
     """Single-pass index of all JSON profile names → absolute paths (first root wins)."""
     index: dict[str, str] = {}
@@ -26,6 +41,18 @@ def _build_name_index(roots: list[str]) -> dict[str, str]:
                     if stem not in index:
                         index[stem] = os.path.join(dirpath, filename)
     return index
+
+
+def _lookup_parent(name_index: dict[str, str], parent_name: str) -> Optional[str]:
+    """Resolve an `inherits` value to a path, allowing for on-disk name escaping."""
+    path = name_index.get(parent_name)
+    if path is not None:
+        return path
+    for candidate in _fs_safe_names(parent_name):
+        path = name_index.get(candidate)
+        if path is not None:
+            return path
+    return None
 
 
 def make_profile_uuid(source: str, rel_path: str) -> str:
@@ -98,7 +125,7 @@ def resolve_inheritance(
 
     parent_name: Optional[str] = data.get("inherits")
     if parent_name:
-        parent_path = _name_index.get(parent_name)
+        parent_path = _lookup_parent(_name_index, parent_name)
         # A self-named `inherits` (parent name equal to this profile's own name) means
         # "the system profile of this name" - never treat the file itself as its own
         # parent, or a legitimate system base gets misdiagnosed as circular inheritance.
