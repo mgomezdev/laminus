@@ -1180,6 +1180,11 @@ async def download_sliced_file(job_id: str, background_tasks: BackgroundTasks):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found.")
     job = jobs[job_id]
+    if job.get("_stub"):
+        # Restored from disk after a restart: the sliced_file (if any) is gone along
+        # with the rest of the job's working directory. Report it as gone, not as
+        # "not complete" (which is misleading for a job whose status is "completed").
+        raise HTTPException(status_code=404, detail="Job data was lost when Laminus restarted.")
     if job["status"] != "completed" or not job["sliced_file"]:
         raise HTTPException(status_code=400, detail=f"Slicing job is not complete. Current status: {job['status']}")
     file_path = job["sliced_file"]
