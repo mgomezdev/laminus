@@ -338,15 +338,20 @@ def _load_jobs_on_startup() -> None:
 async def _evict_stale_jobs():
     while True:
         await asyncio.sleep(JOB_SWEEP_INTERVAL)
-        cutoff = time.monotonic() - JOB_TTL
-        stale = [jid for jid, j in list(jobs.items()) if j.get("created_at", 0) < cutoff]
-        for jid in stale:
-            j = jobs.pop(jid, None)
-            if j:
-                job_dir = os.path.join(JOBS_DIR, jid)
-                await asyncio.to_thread(cleanup_directory, job_dir)
-                _history_upsert(jid, status=j.get("status"), error=j.get("error"), evicted=True, updated_at=time.time())
-                logger.info(f"Evicted stale job {jid}")
+        try:
+            cutoff = time.monotonic() - JOB_TTL
+            stale = [jid for jid, j in list(jobs.items()) if j.get("created_at", 0) < cutoff]
+            for jid in stale:
+                j = jobs.pop(jid, None)
+                if j:
+                    job_dir = os.path.join(JOBS_DIR, jid)
+                    await asyncio.to_thread(cleanup_directory, job_dir)
+                    _history_upsert(jid, status=j.get("status"), error=j.get("error"), evicted=True, updated_at=time.time())
+                    logger.info(f"Evicted stale job {jid}")
+        except Exception:
+            # A single bad sweep must never kill the loop — jobs/JOBS_DIR would then
+            # grow unbounded for the rest of the process lifetime.
+            logger.exception("Stale-job sweep iteration failed")
 
 
 # --- Job history: a longer-lived record of every job, independent of the active `jobs` dict.
@@ -1189,9 +1194,12 @@ def _evict_job(job_id: str):
 
 
 def cleanup_directory(path: str):
-    if os.path.exists(path):
-        shutil.rmtree(path)
-        logger.info(f"Cleaned up temp folder: {path}")
+    try:
+        if os.path.exists(path):
+            shutil.rmtree(path)
+            logger.info(f"Cleaned up temp folder: {path}")
+    except OSError:
+        logger.warning(f"Failed to clean up temp folder: {path}", exc_info=True)
 
 
 def cleanup_file(path: str):
