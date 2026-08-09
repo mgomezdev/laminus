@@ -19,7 +19,9 @@ else
 
     curl -fsSL -o /tmp/OrcaSlicer.AppImage "$APPIMAGE_URL"
     chmod +x /tmp/OrcaSlicer.AppImage
-    cd /tmp && ./OrcaSlicer.AppImage --appimage-extract
+    # Subshell: this must not change the working directory of the process that
+    # goes on to exec the CMD, which is `uvicorn app.main:app` relative to WORKDIR.
+    (cd /tmp && ./OrcaSlicer.AppImage --appimage-extract)
     mv /tmp/squashfs-root/* "$ORCA_INSTALL_DIR/"
     rm -rf /tmp/squashfs-root /tmp/OrcaSlicer.AppImage
 
