@@ -792,6 +792,14 @@ async def start_slice(
     if plate < 1:
         raise HTTPException(status_code=422, detail="plate must be >= 1.")
 
+    if export_3mf:
+        try:
+            export_3mf = _safe_filename(export_3mf)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        if not export_3mf.lower().endswith(".3mf"):
+            raise HTTPException(status_code=422, detail="export_3mf must end with .3mf")
+
     # Machine lookup: prefer stable UUID, fall back to (manufacturer, model, nozzle) tuple.
     if machine_uuid:
         machine_entry = catalog.get_by_uuid(machine_uuid)
@@ -936,6 +944,14 @@ async def slice_prepared(
 ):
     if plate < 1:
         raise HTTPException(status_code=422, detail="plate must be >= 1.")
+
+    if export_3mf:
+        try:
+            export_3mf = _safe_filename(export_3mf)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        if not export_3mf.lower().endswith(".3mf"):
+            raise HTTPException(status_code=422, detail="export_3mf must end with .3mf")
 
     active_count = sum(1 for j in jobs.values() if j["status"] == "slicing")
     if active_count >= MAX_CONCURRENT_JOBS:

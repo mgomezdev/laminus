@@ -7,6 +7,7 @@ test_mock_contract.py, where the same pattern leaves `catalog` as None and the
 fixture-built ProfileCatalog directly onto app.main.catalog without it being
 raced or clobbered by the background catalog-build task.
 """
+import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_mod
@@ -79,3 +80,47 @@ def test_slice_start_rejects_zero_byte_3mf(profile_tree):
         },
     )
     assert resp.status_code == 422
+
+
+ESCAPING_EXPORT_NAMES = [
+    "/config/user/default/machine/evil.json",
+    "../../../data/jobs.json",
+    "..\\..\\data\\jobs.json",
+]
+
+
+@pytest.mark.parametrize("export_name", ESCAPING_EXPORT_NAMES)
+def test_slice_start_rejects_escaping_export_3mf(profile_tree, export_name):
+    """export_3mf is passed to OrcaSlicer as --export-3mf and joined onto output_dir.
+    An absolute path replaces output_dir outright, so an unvalidated value writes
+    anywhere on disk — including the scanned profile volume and /data/jobs.json."""
+    cat, machine_uuid, process_uuid, filament_uuid = _catalog_and_uuids(profile_tree)
+    main_mod.catalog = cat
+    client = TestClient(main_mod.app)
+    resp = client.post(
+        "/api/slice/start",
+        files={"file": ("model.3mf", b"not a zip file", "application/octet-stream")},
+        data={
+            "machine_uuid": machine_uuid,
+            "process_uuid": process_uuid,
+            "filament_uuids": f'["{filament_uuid}"]',
+            "plate": "1",
+            "export_3mf": export_name,
+        },
+    )
+    # Rejected before the upload is even parsed, so this cannot be the 3MF-parse 422.
+    assert resp.status_code == 422
+    assert "3MF" not in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("export_name", ESCAPING_EXPORT_NAMES)
+def test_slice_prepared_rejects_escaping_export_3mf(export_name):
+    """/api/slice/prepared takes the same export_3mf field and needs the same guard."""
+    client = TestClient(main_mod.app)
+    resp = client.post(
+        "/api/slice/prepared",
+        files={"file": ("model.3mf", b"not a zip file", "application/octet-stream")},
+        data={"plate": "1", "export_3mf": export_name},
+    )
+    assert resp.status_code == 422
+    assert "export_3mf" in resp.json()["detail"] or "Filename" in resp.json()["detail"]
