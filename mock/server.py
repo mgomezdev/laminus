@@ -136,6 +136,22 @@ def _new_job() -> str:
     return jid
 
 
+def _check_export_3mf(export_3mf: Optional[str]) -> None:
+    """Mirror the real app's export_3mf guard.
+
+    The real service passes this straight to OrcaSlicer as --export-3mf and joins
+    it onto the output dir, so it rejects any path component (an absolute path
+    replaces the join base outright) and requires a .3mf suffix. The mock has to
+    reject the same inputs, or a test can pass here and fail against the real one.
+    """
+    if not export_3mf:
+        return
+    if export_3mf in (".", "..") or "/" in export_3mf or "\\" in export_3mf:
+        raise HTTPException(422, "export_3mf must not contain path separators")
+    if not export_3mf.lower().endswith(".3mf"):
+        raise HTTPException(422, "export_3mf must end with .3mf")
+
+
 @app.get("/api/health")
 async def health():
     return {
@@ -147,6 +163,7 @@ async def health():
         "catalog_loaded": True,
         "catalog_building": False,
         "catalog_profile_count": {"machine": 1, "process": 1, "filament": 1},
+        "catalog_skipped_count": 0,
         "active_jobs": len(_jobs),
     }
 
@@ -188,6 +205,9 @@ async def slice_start(
     model: Optional[str] = Form(None),
     nozzle: Optional[str] = Form(None),
 ):
+    if plate < 1:
+        raise HTTPException(422, "plate must be >= 1.")
+    _check_export_3mf(export_3mf)
     return {"job_id": _new_job(), "status": "pending", "message": "Mock slice started."}
 
 
@@ -198,6 +218,9 @@ async def slice_prepared(
     export_3mf: Optional[str] = Form(None),
     geometry_only_retry: bool = Form(True),
 ):
+    if plate < 1:
+        raise HTTPException(422, "plate must be >= 1.")
+    _check_export_3mf(export_3mf)
     return {"job_id": _new_job(), "status": "pending", "message": "Mock slice started."}
 
 

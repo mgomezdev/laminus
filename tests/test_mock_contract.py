@@ -251,6 +251,30 @@ def test_slice_start_fields(client):
     assert not _missing(SLICE_START_FIELDS, r.json())
 
 
+@pytest.mark.parametrize(
+    "export_name",
+    ["/config/user/default/machine/evil.json", "../../../data/jobs.json", "nota3mf.txt"],
+)
+def test_slice_start_rejects_unsafe_export_3mf(client, export_name):
+    """export_3mf reaches OrcaSlicer as --export-3mf and is joined onto the output
+    dir, so a path component or a non-.3mf suffix must be refused. Mock and real
+    must agree — otherwise a test passes against the mock while the real service
+    rejects the identical request."""
+    kp = _known_profile(client)
+    r = client.post(
+        "/api/slice/start",
+        files={"file": ("m.stl", _stl(), "application/octet-stream")},
+        data={
+            "machine_uuid": kp["machine_uuid"],
+            "process_uuid": kp["process_uuid"],
+            "filament_uuids": json.dumps([kp["filament_uuid"]]),
+            "plate": "1",
+            "export_3mf": export_name,
+        },
+    )
+    assert r.status_code == 422
+
+
 def test_slice_prepared_fields(client):
     r = client.post(
         "/api/slice/prepared",
@@ -259,6 +283,15 @@ def test_slice_prepared_fields(client):
     )
     assert r.status_code == 200
     assert "job_id" in r.json()
+
+
+def test_slice_prepared_rejects_unsafe_export_3mf(client):
+    r = client.post(
+        "/api/slice/prepared",
+        files={"file": ("m.3mf", _minimal_3mf(), "application/octet-stream")},
+        data={"plate": "1", "export_3mf": "../../../data/jobs.json"},
+    )
+    assert r.status_code == 422
 
 
 def test_slice_status_fields(client):
