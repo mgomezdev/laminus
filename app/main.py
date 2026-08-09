@@ -1417,10 +1417,19 @@ async def pack_stls(
                 [fe.get("_resolved", fe) for fe in fil_entries],
             )
 
+            printable_area = project_cfg.get("printable_area")
+            printable_height = project_cfg.get("printable_height")
+            if not printable_area or not printable_height:
+                background_tasks.add_task(cleanup_directory, job_dir)
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Machine UUID '{machine_uuid}' is missing bed dimensions (printable_area/printable_height).",
+                )
+
             cached_bytes = await asyncio.to_thread(
                 _build_bed_template_bytes,
-                project_cfg["printable_area"],
-                project_cfg["printable_height"],
+                printable_area,
+                printable_height,
             )
             _template_cache[cache_key] = cached_bytes
             logger.info("Template cached for key %s (%d bytes)", cache_key[:40], len(cached_bytes))
