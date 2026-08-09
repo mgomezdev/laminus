@@ -10,15 +10,6 @@ _STRIP_KEYS = {
     "is_custom_defined", "from", "instantiation",
 }
 
-_KNOWN_FILAMENT_KEYS = {
-    "filament_type", "filament_colour", "filament_vendor", "filament_diameter",
-    "filament_density", "filament_settings_id", "nozzle_temperature",
-    "nozzle_temperature_initial_layer", "nozzle_temperature_range_low",
-    "nozzle_temperature_range_high", "bed_temperature", "bed_temperature_initial_layer",
-    "filament_cost", "filament_spool_weight", "filament_max_volumetric_speed",
-}
-
-
 def build_project_settings(machine: dict, process: dict, filaments: list[dict]) -> dict:
     """Merge flattened machine + process + filament presets into a project_settings dict."""
     if not filaments:
@@ -27,7 +18,11 @@ def build_project_settings(machine: dict, process: dict, filaments: list[dict]) 
     config.update({k: v for k, v in machine.items() if k not in _STRIP_KEYS})
     config.update({k: v for k, v in process.items() if k not in _STRIP_KEYS})
 
-    all_filament_keys = set(_KNOWN_FILAMENT_KEYS)
+    # Only emit a key when at least one filament actually defines it - seeding this
+    # with a fixed "known keys" set previously wrote missing settings (e.g.
+    # nozzle_temperature, filament_density) to the slicer as [""] instead of omitting
+    # them.
+    all_filament_keys: set[str] = set()
     for fil in filaments:
         all_filament_keys.update(fil.keys())
     all_filament_keys -= _STRIP_KEYS

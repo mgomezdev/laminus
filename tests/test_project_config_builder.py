@@ -69,3 +69,18 @@ def test_embed_preserves_model_settings(tmp_path):
 def test_empty_filaments_raises():
     with pytest.raises(ValueError, match="filament"):
         build_project_settings(_machine(), _process(), [])
+
+
+def test_filament_key_omitted_when_no_filament_defines_it():
+    """A filament setting no filament in the batch defines (e.g. filament_density)
+    must be absent from the config, not written as [""] (regression: previously
+    seeded from a fixed 'known keys' set regardless of what filaments actually had)."""
+    cfg = build_project_settings(_machine(), _process(), [_filament()])
+    assert "filament_density" not in cfg
+    assert "filament_vendor" not in cfg
+
+
+def test_filament_key_present_when_at_least_one_filament_defines_it():
+    fil_with_density = {**_filament(), "filament_density": 1.24}
+    cfg = build_project_settings(_machine(), _process(), [_filament(), fil_with_density])
+    assert cfg["filament_density"] == ["", 1.24]
