@@ -1720,6 +1720,9 @@ async def upload_profile(
         "- `catalog_building` — `true` while a catalog rebuild is in progress\n"
         "- `catalog_profile_count` — `{machine: N, process: N, filament: N}` when loaded, "
         "otherwise `null`\n"
+        "- `catalog_skipped_count` — number of profiles excluded from the catalog on the "
+        "last build (unresolvable `inherits` parent, unparseable JSON, etc.) — see server "
+        "logs for which profiles and why; `null` if not yet built\n"
         "- `active_jobs` — number of jobs currently in `slicing` status"
     ),
 )
@@ -1734,6 +1737,7 @@ async def health_check():
         "catalog_loaded": catalog is not None and catalog.is_built,
         "catalog_building": _catalog_building,
         "catalog_profile_count": catalog.counts if (catalog and catalog.is_built) else None,
+        "catalog_skipped_count": catalog.skipped_count if (catalog and catalog.is_built) else None,
         "active_jobs": active,
     }
 

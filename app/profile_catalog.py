@@ -99,14 +99,12 @@ def resolve_inheritance(
     parent_name: Optional[str] = data.get("inherits")
     if parent_name:
         parent_path = _name_index.get(parent_name)
-        if parent_path:
-            parent_data = resolve_inheritance(
-                parent_path, _name_index, set(_visited), _resolved_cache,
-            )
-            merged = {**parent_data, **data}
-        else:
-            logger.warning("Parent profile '%s' not found - skipping", parent_name)
-            merged = dict(data)
+        if parent_path is None:
+            raise ValueError(f"Parent profile '{parent_name}' not found")
+        parent_data = resolve_inheritance(
+            parent_path, _name_index, set(_visited), _resolved_cache,
+        )
+        merged = {**parent_data, **data}
         merged.pop("inherits", None)
         result = merged
     else:
@@ -143,11 +141,13 @@ class ProfileCatalog:
         self._catalog: dict[str, list[dict]] = {"machine": [], "process": [], "filament": []}
         self._built = False
         self._dict_cache: dict | None = None
+        self._skipped_count = 0
 
     def build(self) -> None:
         catalog: dict[str, list[dict]] = {"machine": [], "process": [], "filament": []}
         by_uuid: dict[str, dict] = {}
         search_roots = [self._system_dir, self._user_dir]
+        skipped = 0
 
         # Pre-build name→path index and resolved-profile cache so parent lookups
         # are O(1) and shared base profiles are loaded only once (critical for
@@ -180,6 +180,7 @@ class ProfileCatalog:
                         entry = self._make_entry(resolved, ptype, source, rel_path)
                     except Exception as exc:
                         logger.warning("Skipping '%s': %s", filepath, exc)
+                        skipped += 1
                         continue
                     catalog[ptype].append(entry)
                     by_uuid[entry["uuid"]] = entry
@@ -188,7 +189,12 @@ class ProfileCatalog:
         self._by_uuid = by_uuid
         self._dict_cache = None  # invalidate on rebuild
         self._built = True
-        logger.info("Catalog built: %s", {k: len(v) for k, v in catalog.items()})
+        self._skipped_count = skipped
+        if skipped:
+            logger.warning("Catalog built: %s (%d profile(s) skipped - see warnings above)",
+                            {k: len(v) for k, v in catalog.items()}, skipped)
+        else:
+            logger.info("Catalog built: %s", {k: len(v) for k, v in catalog.items()})
 
     def _make_entry(self, resolved: dict, ptype: str, source: str, rel_path: str) -> dict:
         name: str = resolved.get("name", os.path.splitext(os.path.basename(rel_path))[0])
@@ -286,11 +292,20 @@ class ProfileCatalog:
     def counts(self) -> dict:
         return {k: len(v) for k, v in self._catalog.items()}
 
+    @property
+    def skipped_count(self) -> int:
+        """Number of profiles excluded from the last build() (unresolvable inheritance,
+        unparseable JSON, etc.) - see warnings in the log for which and why."""
+        return self._skipped_count
+
     def save_to_cache(self, path: str, cache_key: str) -> None:
         """Write catalog state to a JSON file keyed by cache_key."""
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"cache_key": cache_key, "catalog": self._catalog, "by_uuid": self._by_uuid}, f)
+            json.dump({
+                "cache_key": cache_key, "catalog": self._catalog, "by_uuid": self._by_uuid,
+                "skipped_count": self._skipped_count,
+            }, f)
         os.replace(tmp, path)
 
     @classmethod
@@ -307,6 +322,7 @@ class ProfileCatalog:
         cat._catalog = data["catalog"]
         cat._by_uuid = data["by_uuid"]
         cat._built = True
+        cat._skipped_count = data.get("skipped_count", 0)
         return cat
 
     @staticmethod

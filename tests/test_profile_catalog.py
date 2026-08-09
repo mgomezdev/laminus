@@ -27,12 +27,15 @@ def test_resolve_cycle_raises(tmp_path):
     with pytest.raises(ValueError, match="[Cc]ircular"):
         resolve_inheritance(str(a), _build_name_index([str(tmp_path)]))
 
-def test_resolve_missing_parent_returns_child(tmp_path):
+def test_resolve_missing_parent_raises(tmp_path):
+    # An unresolvable `inherits` parent must not silently degrade to the bare leaf -
+    # that leaf is typically missing most of its real settings (nozzle temp, layer
+    # height, compatible_printers) and would otherwise be published and used for
+    # slicing as if it were a complete, valid profile.
     child = tmp_path / "Child.json"
     child.write_text(json.dumps({"name": "Child", "inherits": "Ghost", "layer_height": 0.2}))
-    result = resolve_inheritance(str(child), _build_name_index([str(tmp_path)]))
-    assert result["layer_height"] == 0.2
-    assert "inherits" not in result
+    with pytest.raises(ValueError, match="Ghost"):
+        resolve_inheritance(str(child), _build_name_index([str(tmp_path)]))
 
 from app.profile_catalog import make_profile_uuid, make_machine_uuid, parse_machine_name
 
@@ -133,3 +136,35 @@ def test_empty_list_field_does_not_abort_build(profile_tree):
     assert "Bad Filament" in names
     bad = next(f for f in cat.as_dict()["filament"] if f["name"] == "Bad Filament")
     assert bad["filament_colour"] == "#FFFFFF"  # falls back to default, not IndexError
+
+
+def test_unresolvable_parent_excluded_from_catalog(profile_tree):
+    """A profile whose `inherits` parent can't be found must not be published as a
+    near-empty preset - it must be dropped entirely, and the drop must be observable
+    via skipped_count (regression for the degraded-profile-silently-served bug)."""
+    write_json(
+        f"{profile_tree['system_dir']}/Bambu Lab/filament/Orphan Filament.json",
+        {"name": "Orphan Filament", "inherits": "Generic PLA @base"},
+    )
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()  # must not raise
+    assert cat.is_built
+    names = [f["name"] for f in cat.as_dict()["filament"]]
+    assert "Orphan Filament" not in names
+    assert cat.skipped_count == 1
+
+
+def test_skipped_count_persists_through_cache_roundtrip(profile_tree, tmp_path):
+    write_json(
+        f"{profile_tree['system_dir']}/Bambu Lab/filament/Orphan Filament.json",
+        {"name": "Orphan Filament", "inherits": "Generic PLA @base"},
+    )
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    cache_path = str(tmp_path / "cache.json")
+    cat.save_to_cache(cache_path, "key1")
+    loaded = ProfileCatalog.load_from_cache(
+        cache_path, "key1", profile_tree["system_dir"], profile_tree["user_dir"],
+    )
+    assert loaded is not None
+    assert loaded.skipped_count == cat.skipped_count == 1
