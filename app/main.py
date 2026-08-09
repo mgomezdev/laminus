@@ -778,7 +778,10 @@ async def start_slice(
     if catalog is None:
         raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
 
-    active_count = sum(1 for j in jobs.values() if j["status"] == "slicing")
+    # Count "pending" too: a job stays "pending" until its background task (which
+    # Starlette only runs after the response is sent) flips it to "slicing", so a
+    # burst of concurrent requests would otherwise all see active_count == 0.
+    active_count = sum(1 for j in jobs.values() if j["status"] in ("pending", "slicing"))
     if active_count >= MAX_CONCURRENT_JOBS:
         raise HTTPException(status_code=503, detail=f"Too many active jobs ({active_count}/{MAX_CONCURRENT_JOBS}). Retry later.")
 
@@ -953,7 +956,10 @@ async def slice_prepared(
         if not export_3mf.lower().endswith(".3mf"):
             raise HTTPException(status_code=422, detail="export_3mf must end with .3mf")
 
-    active_count = sum(1 for j in jobs.values() if j["status"] == "slicing")
+    # Count "pending" too: a job stays "pending" until its background task (which
+    # Starlette only runs after the response is sent) flips it to "slicing", so a
+    # burst of concurrent requests would otherwise all see active_count == 0.
+    active_count = sum(1 for j in jobs.values() if j["status"] in ("pending", "slicing"))
     if active_count >= MAX_CONCURRENT_JOBS:
         raise HTTPException(status_code=503, detail=f"Too many active jobs ({active_count}/{MAX_CONCURRENT_JOBS}). Retry later.")
 
