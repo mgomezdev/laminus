@@ -8,7 +8,7 @@ import time
 import logging
 import json
 from collections import OrderedDict
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
@@ -272,6 +272,23 @@ def init_config_directories():
 
 
 jobs: Dict[str, dict] = {}
+
+# job_ids of in-flight /api/pack, /api/arrange, /api/slice/thumbnail requests. These
+# are synchronous requests tracked in no other registry, so POST /api/cleanup (with
+# min_age_seconds=0) would otherwise delete their scratch dirs / stable output copies
+# mid-write. _scan_stale_temp excludes any ARRANGE_DIR entry whose name contains one
+# of these ids, regardless of age.
+_inflight_arrange_ids: set[str] = set()
+
+
+@contextmanager
+def _track_inflight_arrange(job_id: str):
+    _inflight_arrange_ids.add(job_id)
+    try:
+        yield
+    finally:
+        _inflight_arrange_ids.discard(job_id)
+
 
 _JOBS_FILE = os.path.join(DATA_DIR, "jobs.json")
 _CATALOG_CACHE_FILE = os.path.join(DATA_DIR, "catalog_cache.json")
@@ -1061,67 +1078,68 @@ async def slice_thumbnail(
         raise HTTPException(status_code=422, detail={"error": "Only .3mf files accepted."})
 
     job_id = str(uuid.uuid4())
-    job_dir = os.path.join(ARRANGE_DIR, f"thumb_{job_id}")
-    input_dir = os.path.join(job_dir, "input")
-    output_dir = os.path.join(job_dir, "output")
-    os.makedirs(input_dir, exist_ok=True)
-    os.makedirs(output_dir, exist_ok=True)
+    with _track_inflight_arrange(job_id):
+        job_dir = os.path.join(ARRANGE_DIR, f"thumb_{job_id}")
+        input_dir = os.path.join(job_dir, "input")
+        output_dir = os.path.join(job_dir, "output")
+        os.makedirs(input_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
 
-    in_file = os.path.join(input_dir, safe_name)
-    out_3mf = os.path.join(output_dir, "thumb.3mf")
+        in_file = os.path.join(input_dir, safe_name)
+        out_3mf = os.path.join(output_dir, "thumb.3mf")
 
-    with open(in_file, "wb") as buf:
-        await asyncio.to_thread(shutil.copyfileobj, file.file, buf)
+        with open(in_file, "wb") as buf:
+            await asyncio.to_thread(shutil.copyfileobj, file.file, buf)
 
-    cmd = [
-        "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-        "orcaslicer", "--slice", str(plate), "--arrange", "0",
-        "--export-3mf", out_3mf, in_file,
-    ]
+        cmd = [
+            "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
+            "orcaslicer", "--slice", str(plate), "--arrange", "0",
+            "--export-3mf", out_3mf, in_file,
+        ]
 
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
-        )
         try:
-            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=THUMBNAIL_TIMEOUT)
-        except asyncio.TimeoutError:
-            await _kill_process_group(process)
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(process.communicate(), timeout=THUMBNAIL_TIMEOUT)
+            except asyncio.TimeoutError:
+                await _kill_process_group(process)
+                background_tasks.add_task(cleanup_directory, job_dir)
+                raise HTTPException(status_code=422, detail={"error": f"Timed out after {THUMBNAIL_TIMEOUT}s"})
+
+            if process.returncode != 0 or not os.path.exists(out_3mf):
+                log_text = stdout.decode("utf-8", errors="replace") if stdout else ""
+                logger.error("Thumbnail failed. Exit %s. Log: %s", process.returncode, log_text)
+                background_tasks.add_task(cleanup_directory, job_dir)
+                raise HTTPException(status_code=422, detail={"error": f"OrcaSlicer exited {process.returncode}"})
+
+            def _extract_png(archive: str, plate_idx: int) -> Optional[bytes]:
+                import zipfile as _zf
+                with _zf.ZipFile(archive, "r") as zf:
+                    names = zf.namelist()
+                    for candidate in (f"Metadata/plate_{plate_idx}.png", "Metadata/plate_1.png"):
+                        if candidate in names:
+                            return zf.read(candidate)
+                return None
+
+            png_bytes = await asyncio.to_thread(_extract_png, out_3mf, plate)
             background_tasks.add_task(cleanup_directory, job_dir)
-            raise HTTPException(status_code=422, detail={"error": f"Timed out after {THUMBNAIL_TIMEOUT}s"})
 
-        if process.returncode != 0 or not os.path.exists(out_3mf):
-            log_text = stdout.decode("utf-8", errors="replace") if stdout else ""
-            logger.error("Thumbnail failed. Exit %s. Log: %s", process.returncode, log_text)
+            if png_bytes is None:
+                raise HTTPException(status_code=422, detail={"error": "No plate PNG found in OrcaSlicer output"})
+
+            return Response(content=png_bytes, media_type="image/png")
+
+        except HTTPException:
+            raise
+        except Exception as exc:
             background_tasks.add_task(cleanup_directory, job_dir)
-            raise HTTPException(status_code=422, detail={"error": f"OrcaSlicer exited {process.returncode}"})
-
-        def _extract_png(archive: str, plate_idx: int) -> Optional[bytes]:
-            import zipfile as _zf
-            with _zf.ZipFile(archive, "r") as zf:
-                names = zf.namelist()
-                for candidate in (f"Metadata/plate_{plate_idx}.png", "Metadata/plate_1.png"):
-                    if candidate in names:
-                        return zf.read(candidate)
-            return None
-
-        png_bytes = await asyncio.to_thread(_extract_png, out_3mf, plate)
-        background_tasks.add_task(cleanup_directory, job_dir)
-
-        if png_bytes is None:
-            raise HTTPException(status_code=422, detail={"error": "No plate PNG found in OrcaSlicer output"})
-
-        return Response(content=png_bytes, media_type="image/png")
-
-    except HTTPException:
-        raise
-    except Exception as exc:
-        background_tasks.add_task(cleanup_directory, job_dir)
-        logger.exception("Thumbnail error")
-        raise HTTPException(status_code=422, detail={"error": str(exc)})
+            logger.exception("Thumbnail error")
+            raise HTTPException(status_code=422, detail={"error": str(exc)})
 
 
 @app.get(
@@ -1382,180 +1400,181 @@ async def pack_stls(
         safe_names.append(name)
 
     job_id = str(uuid.uuid4())
-    job_dir = os.path.join(ARRANGE_DIR, f"pack_{job_id}")
-    input_dir = os.path.join(job_dir, "input")
-    output_dir = os.path.join(job_dir, "output")
-    os.makedirs(input_dir, exist_ok=True)
-    os.makedirs(output_dir, exist_ok=True)
+    with _track_inflight_arrange(job_id):
+        job_dir = os.path.join(ARRANGE_DIR, f"pack_{job_id}")
+        input_dir = os.path.join(job_dir, "input")
+        output_dir = os.path.join(job_dir, "output")
+        os.makedirs(input_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
 
-    # --- Resolve template ---
-    if template is not None:
-        # Caller-supplied template file
-        try:
-            template_name = _safe_filename(template.filename)
-        except ValueError as e:
-            background_tasks.add_task(cleanup_directory, job_dir)
-            raise HTTPException(status_code=400, detail=str(e))
-        if not template_name.lower().endswith(".3mf"):
-            background_tasks.add_task(cleanup_directory, job_dir)
-            raise HTTPException(status_code=422, detail="template must be a .3mf file.")
-        template_path = os.path.join(input_dir, template_name)
-        with open(template_path, "wb") as buf:
-            await asyncio.to_thread(shutil.copyfileobj, template.file, buf)
-
-    elif machine_uuid and process_uuid and filament_uuids:
-        # UUID-based: resolve profiles from catalog and build template (cached)
-        if catalog is None:
-            background_tasks.add_task(cleanup_directory, job_dir)
-            raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
-        try:
-            fil_uuid_list: list[str] = json.loads(filament_uuids)
-            if not isinstance(fil_uuid_list, list) or not fil_uuid_list:
-                raise ValueError
-        except (ValueError, TypeError):
-            background_tasks.add_task(cleanup_directory, job_dir)
-            raise HTTPException(status_code=422, detail="filament_uuids must be a non-empty JSON array.")
-
-        cache_key = f"{machine_uuid}|{process_uuid}|{','.join(sorted(fil_uuid_list))}"
-        cached_bytes = _template_cache.get(cache_key)
-
-        if cached_bytes is None:
-            machine_entry = catalog.get_by_uuid(machine_uuid)
-            if machine_entry is None or machine_entry.get("type") != "machine":
+        # --- Resolve template ---
+        if template is not None:
+            # Caller-supplied template file
+            try:
+                template_name = _safe_filename(template.filename)
+            except ValueError as e:
                 background_tasks.add_task(cleanup_directory, job_dir)
-                raise HTTPException(status_code=422, detail=f"Machine UUID '{machine_uuid}' not found.")
-            proc_entry = catalog.get_by_uuid(process_uuid)
-            if proc_entry is None or proc_entry.get("type") != "process":
+                raise HTTPException(status_code=400, detail=str(e))
+            if not template_name.lower().endswith(".3mf"):
                 background_tasks.add_task(cleanup_directory, job_dir)
-                raise HTTPException(status_code=422, detail=f"Process UUID '{process_uuid}' not found.")
-            fil_entries = []
-            for fuid in fil_uuid_list:
-                fe = catalog.get_by_uuid(fuid)
-                if fe is None or fe.get("type") != "filament":
+                raise HTTPException(status_code=422, detail="template must be a .3mf file.")
+            template_path = os.path.join(input_dir, template_name)
+            with open(template_path, "wb") as buf:
+                await asyncio.to_thread(shutil.copyfileobj, template.file, buf)
+
+        elif machine_uuid and process_uuid and filament_uuids:
+            # UUID-based: resolve profiles from catalog and build template (cached)
+            if catalog is None:
+                background_tasks.add_task(cleanup_directory, job_dir)
+                raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
+            try:
+                fil_uuid_list: list[str] = json.loads(filament_uuids)
+                if not isinstance(fil_uuid_list, list) or not fil_uuid_list:
+                    raise ValueError
+            except (ValueError, TypeError):
+                background_tasks.add_task(cleanup_directory, job_dir)
+                raise HTTPException(status_code=422, detail="filament_uuids must be a non-empty JSON array.")
+
+            cache_key = f"{machine_uuid}|{process_uuid}|{','.join(sorted(fil_uuid_list))}"
+            cached_bytes = _template_cache.get(cache_key)
+
+            if cached_bytes is None:
+                machine_entry = catalog.get_by_uuid(machine_uuid)
+                if machine_entry is None or machine_entry.get("type") != "machine":
                     background_tasks.add_task(cleanup_directory, job_dir)
-                    raise HTTPException(status_code=422, detail=f"Filament UUID '{fuid}' not found.")
-                fil_entries.append(fe)
+                    raise HTTPException(status_code=422, detail=f"Machine UUID '{machine_uuid}' not found.")
+                proc_entry = catalog.get_by_uuid(process_uuid)
+                if proc_entry is None or proc_entry.get("type") != "process":
+                    background_tasks.add_task(cleanup_directory, job_dir)
+                    raise HTTPException(status_code=422, detail=f"Process UUID '{process_uuid}' not found.")
+                fil_entries = []
+                for fuid in fil_uuid_list:
+                    fe = catalog.get_by_uuid(fuid)
+                    if fe is None or fe.get("type") != "filament":
+                        background_tasks.add_task(cleanup_directory, job_dir)
+                        raise HTTPException(status_code=422, detail=f"Filament UUID '{fuid}' not found.")
+                    fil_entries.append(fe)
 
-            project_cfg = await asyncio.to_thread(
-                build_project_settings,
-                machine_entry.get("_resolved", machine_entry),
-                proc_entry.get("_resolved", proc_entry),
-                [fe.get("_resolved", fe) for fe in fil_entries],
-            )
-
-            printable_area = project_cfg.get("printable_area")
-            printable_height = project_cfg.get("printable_height")
-            if not printable_area or not printable_height:
-                background_tasks.add_task(cleanup_directory, job_dir)
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Machine UUID '{machine_uuid}' is missing bed dimensions (printable_area/printable_height).",
+                project_cfg = await asyncio.to_thread(
+                    build_project_settings,
+                    machine_entry.get("_resolved", machine_entry),
+                    proc_entry.get("_resolved", proc_entry),
+                    [fe.get("_resolved", fe) for fe in fil_entries],
                 )
 
-            cached_bytes = await asyncio.to_thread(
-                _build_bed_template_bytes,
-                printable_area,
-                printable_height,
-            )
-            _template_cache[cache_key] = cached_bytes
-            logger.info("Template cached for key %s (%d bytes)", cache_key[:40], len(cached_bytes))
+                printable_area = project_cfg.get("printable_area")
+                printable_height = project_cfg.get("printable_height")
+                if not printable_area or not printable_height:
+                    background_tasks.add_task(cleanup_directory, job_dir)
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Machine UUID '{machine_uuid}' is missing bed dimensions (printable_area/printable_height).",
+                    )
+
+                cached_bytes = await asyncio.to_thread(
+                    _build_bed_template_bytes,
+                    printable_area,
+                    printable_height,
+                )
+                _template_cache[cache_key] = cached_bytes
+                logger.info("Template cached for key %s (%d bytes)", cache_key[:40], len(cached_bytes))
+            else:
+                logger.debug("Template cache hit for key %s", cache_key[:40])
+
+            template_path = os.path.join(input_dir, "settings_template.3mf")
+            with open(template_path, "wb") as buf:
+                buf.write(cached_bytes)
+
+        elif bed_x is not None and bed_y is not None and bed_z is not None:
+            if bed_x <= 0 or bed_y <= 0 or bed_z <= 0:
+                background_tasks.add_task(cleanup_directory, job_dir)
+                raise HTTPException(status_code=422, detail="bed_x, bed_y, and bed_z must all be positive.")
+            area = [f"0x0", f"{bed_x}x0", f"{bed_x}x{bed_y}", f"0x{bed_y}"]
+            template_path = os.path.join(input_dir, "settings_template.3mf")
+            with open(template_path, "wb") as buf:
+                buf.write(_build_bed_template_bytes(area, bed_z))
+
         else:
-            logger.debug("Template cache hit for key %s", cache_key[:40])
-
-        template_path = os.path.join(input_dir, "settings_template.3mf")
-        with open(template_path, "wb") as buf:
-            buf.write(cached_bytes)
-
-    elif bed_x is not None and bed_y is not None and bed_z is not None:
-        if bed_x <= 0 or bed_y <= 0 or bed_z <= 0:
-            background_tasks.add_task(cleanup_directory, job_dir)
-            raise HTTPException(status_code=422, detail="bed_x, bed_y, and bed_z must all be positive.")
-        area = [f"0x0", f"{bed_x}x0", f"{bed_x}x{bed_y}", f"0x{bed_y}"]
-        template_path = os.path.join(input_dir, "settings_template.3mf")
-        with open(template_path, "wb") as buf:
-            buf.write(_build_bed_template_bytes(area, bed_z))
-
-    else:
-        background_tasks.add_task(cleanup_directory, job_dir)
-        raise HTTPException(
-            status_code=422,
-            detail="Provide 'template' (a .3mf file) OR 'machine_uuid'/'process_uuid'/'filament_uuids' OR 'bed_x'/'bed_y'/'bed_z'.",
-        )
-
-    # Write uploaded STLs
-    stl_paths: list[str] = []
-    for f, name in zip(files, safe_names):
-        dest = os.path.join(input_dir, name)
-        with open(dest, "wb") as buf:
-            await asyncio.to_thread(shutil.copyfileobj, f.file, buf)
-        stl_paths.append(dest)
-
-    # Inject STL geometry into the template (preserves project_settings.config)
-    combined_3mf = os.path.join(input_dir, "combined.3mf")
-    try:
-        await asyncio.to_thread(_inject_stls_into_3mf, template_path, stl_paths, combined_3mf)
-    except ValueError as e:
-        background_tasks.add_task(cleanup_directory, job_dir)
-        raise HTTPException(status_code=422, detail=str(e))
-    except Exception as e:
-        background_tasks.add_task(cleanup_directory, job_dir)
-        raise HTTPException(status_code=400, detail=f"Failed to build combined 3MF: {e}")
-
-    out_file = os.path.join(output_dir, "packed.3mf")
-    cmd = [
-        "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-        "orcaslicer",
-        "--datadir", CONFIG_DIR,
-        "--arrange", "1",
-        "--orient", "1",
-        "--export-3mf", out_file,
-        combined_3mf,
-    ]
-    logger.info("Running pack command: %s", " ".join(cmd))
-
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=120.0)
-        except asyncio.TimeoutError:
-            await _kill_process_group(process)
-            background_tasks.add_task(cleanup_directory, job_dir)
-            raise HTTPException(status_code=408, detail="Pack operation timed out after 120 seconds.")
-        exit_code = process.returncode
-
-        if exit_code != 0 or not os.path.exists(out_file):
-            logger.error(
-                "Pack failed. Exit %d. Log:\n%s",
-                exit_code,
-                stdout.decode("utf-8", errors="replace") if stdout else "(no output)",
-            )
             background_tasks.add_task(cleanup_directory, job_dir)
             raise HTTPException(
-                status_code=400,
-                detail=f"Slicer pack failed (exit {exit_code}). Check server logs.",
+                status_code=422,
+                detail="Provide 'template' (a .3mf file) OR 'machine_uuid'/'process_uuid'/'filament_uuids' OR 'bed_x'/'bed_y'/'bed_z'.",
             )
 
-        stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_packed.3mf")
-        shutil.copy2(out_file, stable_out)
-        background_tasks.add_task(cleanup_directory, job_dir)
-        background_tasks.add_task(cleanup_file, stable_out)
-        return FileResponse(
-            path=stable_out,
-            filename="packed.3mf",
-            media_type="application/octet-stream",
-        )
+        # Write uploaded STLs
+        stl_paths: list[str] = []
+        for f, name in zip(files, safe_names):
+            dest = os.path.join(input_dir, name)
+            with open(dest, "wb") as buf:
+                await asyncio.to_thread(shutil.copyfileobj, f.file, buf)
+            stl_paths.append(dest)
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        background_tasks.add_task(cleanup_directory, job_dir)
-        logger.exception("System error during pack operation")
-        raise HTTPException(status_code=500, detail=f"System error: {e}")
+        # Inject STL geometry into the template (preserves project_settings.config)
+        combined_3mf = os.path.join(input_dir, "combined.3mf")
+        try:
+            await asyncio.to_thread(_inject_stls_into_3mf, template_path, stl_paths, combined_3mf)
+        except ValueError as e:
+            background_tasks.add_task(cleanup_directory, job_dir)
+            raise HTTPException(status_code=422, detail=str(e))
+        except Exception as e:
+            background_tasks.add_task(cleanup_directory, job_dir)
+            raise HTTPException(status_code=400, detail=f"Failed to build combined 3MF: {e}")
+
+        out_file = os.path.join(output_dir, "packed.3mf")
+        cmd = [
+            "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
+            "orcaslicer",
+            "--datadir", CONFIG_DIR,
+            "--arrange", "1",
+            "--orient", "1",
+            "--export-3mf", out_file,
+            combined_3mf,
+        ]
+        logger.info("Running pack command: %s", " ".join(cmd))
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(process.communicate(), timeout=120.0)
+            except asyncio.TimeoutError:
+                await _kill_process_group(process)
+                background_tasks.add_task(cleanup_directory, job_dir)
+                raise HTTPException(status_code=408, detail="Pack operation timed out after 120 seconds.")
+            exit_code = process.returncode
+
+            if exit_code != 0 or not os.path.exists(out_file):
+                logger.error(
+                    "Pack failed. Exit %d. Log:\n%s",
+                    exit_code,
+                    stdout.decode("utf-8", errors="replace") if stdout else "(no output)",
+                )
+                background_tasks.add_task(cleanup_directory, job_dir)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Slicer pack failed (exit {exit_code}). Check server logs.",
+                )
+
+            stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_packed.3mf")
+            shutil.copy2(out_file, stable_out)
+            background_tasks.add_task(cleanup_directory, job_dir)
+            background_tasks.add_task(cleanup_file, stable_out)
+            return FileResponse(
+                path=stable_out,
+                filename="packed.3mf",
+                media_type="application/octet-stream",
+            )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            background_tasks.add_task(cleanup_directory, job_dir)
+            logger.exception("System error during pack operation")
+            raise HTTPException(status_code=500, detail=f"System error: {e}")
 
 
 @app.post(
@@ -1608,81 +1627,82 @@ async def auto_arrange_3mf(
         raise HTTPException(status_code=400, detail="Arrange endpoint only supports .3mf files.")
 
     job_id = str(uuid.uuid4())
-    job_dir = os.path.join(ARRANGE_DIR, job_id)
-    input_dir = os.path.join(job_dir, "input")
-    output_dir = os.path.join(job_dir, "output")
+    with _track_inflight_arrange(job_id):
+        job_dir = os.path.join(ARRANGE_DIR, job_id)
+        input_dir = os.path.join(job_dir, "input")
+        output_dir = os.path.join(job_dir, "output")
 
-    os.makedirs(input_dir, exist_ok=True)
-    os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(input_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
 
-    in_file = os.path.join(input_dir, safe_name)
-    out_file = os.path.join(output_dir, f"arranged_{safe_name}")
+        in_file = os.path.join(input_dir, safe_name)
+        out_file = os.path.join(output_dir, f"arranged_{safe_name}")
 
-    # Fix R8: blocking file write — run in thread pool
-    with open(in_file, "wb") as buffer:
-        await asyncio.to_thread(shutil.copyfileobj, file.file, buffer)
+        # Fix R8: blocking file write — run in thread pool
+        with open(in_file, "wb") as buffer:
+            await asyncio.to_thread(shutil.copyfileobj, file.file, buffer)
 
-    cmd = [
-        "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-        "orcaslicer",
-        "--datadir", CONFIG_DIR,
-        "--export-3mf", out_file,
-    ]
+        cmd = [
+            "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
+            "orcaslicer",
+            "--datadir", CONFIG_DIR,
+            "--export-3mf", out_file,
+        ]
 
-    if arrange:
-        cmd.extend(["--arrange", "1"])
-    if orient:
-        cmd.extend(["--orient", "1"])
+        if arrange:
+            cmd.extend(["--arrange", "1"])
+        if orient:
+            cmd.extend(["--orient", "1"])
 
-    cmd.append(in_file)
-    logger.info(f"Running arrange command: {' '.join(cmd)}")
-
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
-        )
+        cmd.append(in_file)
+        logger.info(f"Running arrange command: {' '.join(cmd)}")
 
         try:
-            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=float(ARRANGE_TIMEOUT))
-        except asyncio.TimeoutError:
-            await _kill_process_group(process)
-            background_tasks.add_task(cleanup_directory, job_dir)
-            raise HTTPException(status_code=408, detail=f"Slicer arrange execution timed out after {ARRANGE_TIMEOUT} seconds.")
-        exit_code = process.returncode
-
-        if exit_code != 0 or not os.path.exists(out_file):
-            # Fix R4: don't embed raw slicer output (contains internal paths) in HTTP response
-            logger.error(
-                f"Arrangement failed. Exit code {exit_code}. Log:\n"
-                + (stdout.decode("utf-8", errors="replace") if stdout else "(no output)")
-            )
-            background_tasks.add_task(cleanup_directory, job_dir)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Slicer auto-arrange process failed (exit code {exit_code}). Check server logs for details.",
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
             )
 
-        stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_output.3mf")
-        shutil.copy2(out_file, stable_out)
+            try:
+                stdout, _ = await asyncio.wait_for(process.communicate(), timeout=float(ARRANGE_TIMEOUT))
+            except asyncio.TimeoutError:
+                await _kill_process_group(process)
+                background_tasks.add_task(cleanup_directory, job_dir)
+                raise HTTPException(status_code=408, detail=f"Slicer arrange execution timed out after {ARRANGE_TIMEOUT} seconds.")
+            exit_code = process.returncode
 
-        response = FileResponse(
-            path=stable_out,
-            filename=f"arranged_{safe_name}",
-            media_type="application/octet-stream",
-        )
-        background_tasks.add_task(cleanup_directory, job_dir)
-        background_tasks.add_task(cleanup_file, stable_out)
-        return response
+            if exit_code != 0 or not os.path.exists(out_file):
+                # Fix R4: don't embed raw slicer output (contains internal paths) in HTTP response
+                logger.error(
+                    f"Arrangement failed. Exit code {exit_code}. Log:\n"
+                    + (stdout.decode("utf-8", errors="replace") if stdout else "(no output)")
+                )
+                background_tasks.add_task(cleanup_directory, job_dir)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Slicer auto-arrange process failed (exit code {exit_code}). Check server logs for details.",
+                )
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        background_tasks.add_task(cleanup_directory, job_dir)
-        logger.exception("System exception during arrange operation")
-        raise HTTPException(status_code=500, detail=f"System error during arrangement: {str(e)}")
+            stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_output.3mf")
+            shutil.copy2(out_file, stable_out)
+
+            response = FileResponse(
+                path=stable_out,
+                filename=f"arranged_{safe_name}",
+                media_type="application/octet-stream",
+            )
+            background_tasks.add_task(cleanup_directory, job_dir)
+            background_tasks.add_task(cleanup_file, stable_out)
+            return response
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            background_tasks.add_task(cleanup_directory, job_dir)
+            logger.exception("System exception during arrange operation")
+            raise HTTPException(status_code=500, detail=f"System error during arrangement: {str(e)}")
 
 
 @app.post(
@@ -1853,6 +1873,8 @@ def _scan_stale_temp(min_age_seconds: int) -> List[str]:
 
     if os.path.isdir(ARRANGE_DIR):
         for name in os.listdir(ARRANGE_DIR):
+            if any(job_id in name for job_id in _inflight_arrange_ids):
+                continue
             path = os.path.join(ARRANGE_DIR, name)
             try:
                 age = now - os.path.getmtime(path)
