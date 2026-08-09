@@ -20,3 +20,20 @@ def test_download_stub_job_returns_404_not_misleading_400():
         assert resp.status_code == 404
     finally:
         main_mod.jobs.pop(job_id, None)
+
+
+def test_logs_stub_job_returns_404_not_attribute_error():
+    """A stub job has `logger: None`; streaming its logs must 404, not raise
+    AttributeError from calling .get_stream() on None."""
+    client = TestClient(main_mod.app)
+    job_id = "stub-job-2"
+    main_mod.jobs[job_id] = {
+        "id": job_id, "status": "completed", "error": None,
+        "sliced_file": None, "logger": None, "created_at": 0,
+        "_wall_created_at": 0, "_stub": True,
+    }
+    try:
+        resp = client.get(f"/api/slice/logs/{job_id}")
+        assert resp.status_code == 404
+    finally:
+        main_mod.jobs.pop(job_id, None)

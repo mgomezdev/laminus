@@ -1164,6 +1164,10 @@ async def get_job_logs(job_id: str):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found.")
     job = jobs[job_id]
+    if job.get("logger") is None:
+        # Restored from disk after a restart (_load_jobs_on_startup): the in-memory
+        # JobLogger is gone, so there's no log history left to stream.
+        raise HTTPException(status_code=404, detail="Job data was lost when Laminus restarted.")
     return StreamingResponse(job["logger"].get_stream(), media_type="text/event-stream")
 
 
