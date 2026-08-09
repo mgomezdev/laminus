@@ -7,7 +7,7 @@ import glob
 import time
 import logging
 import json
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from contextlib import asynccontextmanager, contextmanager
 from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
@@ -35,6 +35,7 @@ THUMBNAIL_TIMEOUT = 120
 SYSTEM_PROFILES_DIR = os.environ.get("SYSTEM_PROFILES_DIR", "/opt/orcaslicer/resources/profiles")
 SLICE_TIMEOUT = int(os.environ.get("SLICE_TIMEOUT_SECONDS", "600"))
 ARRANGE_TIMEOUT = int(os.environ.get("ARRANGE_TIMEOUT_SECONDS", "120"))
+JOB_LOG_MAX_LINES = int(os.environ.get("JOB_LOG_MAX_LINES", "2000"))
 
 catalog: Optional[ProfileCatalog] = None
 _catalog_building: bool = False
@@ -421,9 +422,11 @@ def _load_history_on_startup() -> None:
 
 
 class JobLogger:
-    def __init__(self, job_id: str):
+    def __init__(self, job_id: str, max_lines: int = JOB_LOG_MAX_LINES):
         self.job_id = job_id
-        self._logs: List[str] = []
+        self._logs: deque[str] = deque(maxlen=max_lines)
+        self._dropped = 0  # count of messages evicted off the front of _logs
+        self._total = 0  # total messages ever logged, i.e. the next cursor value
         self._new_entry = asyncio.Event()
         self._done = False
 
@@ -431,16 +434,25 @@ class JobLogger:
         msg = message.strip()
         if not msg:
             return
+        if len(self._logs) == self._logs.maxlen:
+            self._dropped += 1
         self._logs.append(msg)
+        self._total += 1
         self._new_entry.set()
         if msg == "__COMPLETED__" or msg.startswith("__FAILED__"):
             self._done = True
 
     async def get_stream(self):
         cursor = 0
+        warned_dropped = False
         while True:
-            while cursor < len(self._logs):
-                msg = self._logs[cursor]
+            if cursor < self._dropped:
+                if not warned_dropped:
+                    yield f"data: __DROPPED__: {self._dropped} earlier line(s) omitted\n\n"
+                    warned_dropped = True
+                cursor = self._dropped
+            while cursor < self._total:
+                msg = self._logs[cursor - self._dropped]
                 cursor += 1
                 yield f"data: {msg}\n\n"
                 if msg == "__COMPLETED__" or msg.startswith("__FAILED__"):
