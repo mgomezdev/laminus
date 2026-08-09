@@ -99,6 +99,11 @@ def resolve_inheritance(
     parent_name: Optional[str] = data.get("inherits")
     if parent_name:
         parent_path = _name_index.get(parent_name)
+        # A self-named `inherits` (parent name equal to this profile's own name) means
+        # "the system profile of this name" - never treat the file itself as its own
+        # parent, or a legitimate system base gets misdiagnosed as circular inheritance.
+        if parent_path is not None and os.path.realpath(parent_path) == real:
+            parent_path = None
         if parent_path is None:
             raise ValueError(f"Parent profile '{parent_name}' not found")
         parent_data = resolve_inheritance(

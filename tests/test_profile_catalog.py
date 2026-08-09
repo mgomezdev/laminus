@@ -27,6 +27,28 @@ def test_resolve_cycle_raises(tmp_path):
     with pytest.raises(ValueError, match="[Cc]ircular"):
         resolve_inheritance(str(a), _build_name_index([str(tmp_path)]))
 
+def test_resolve_self_named_inherits_uses_system_profile(tmp_path):
+    """A self-named `inherits` (parent name == own name) means 'the system profile of
+    this name' - when a distinct system profile with that name exists, it must be
+    used as the parent instead of being mistaken for circular self-inheritance."""
+    system = tmp_path / "system"
+    user = tmp_path / "user"
+    system.mkdir()
+    user.mkdir()
+    (system / "Optimal.json").write_text(json.dumps({"name": "Optimal", "layer_height": 0.16, "speed": 60}))
+    (user / "Optimal.json").write_text(json.dumps({"name": "Optimal", "inherits": "Optimal", "layer_height": 0.2}))
+    result = resolve_inheritance(str(user / "Optimal.json"), _build_name_index([str(system), str(user)]))
+    assert result["layer_height"] == 0.2
+    assert result["speed"] == 60
+
+def test_resolve_self_named_inherits_without_system_profile_raises_not_found(tmp_path):
+    """Without a distinct system profile to shadow it, a self-named `inherits` is
+    unresolvable - it must raise 'not found', not 'circular inheritance'."""
+    child = tmp_path / "Optimal.json"
+    child.write_text(json.dumps({"name": "Optimal", "inherits": "Optimal", "layer_height": 0.2}))
+    with pytest.raises(ValueError, match="not found"):
+        resolve_inheritance(str(child), _build_name_index([str(tmp_path)]))
+
 def test_resolve_missing_parent_raises(tmp_path):
     # An unresolvable `inherits` parent must not silently degrade to the bare leaf -
     # that leaf is typically missing most of its real settings (nozzle temp, layer
