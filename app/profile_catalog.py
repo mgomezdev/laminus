@@ -126,6 +126,13 @@ def _display_name(name: str) -> str:
     return name[:at].strip() if at != -1 else name.strip()
 
 
+def _first_or_default(raw, default):
+    """Unwrap a possibly-list-valued profile field. Empty lists fall back to *default*."""
+    if isinstance(raw, list):
+        return raw[0] if raw else default
+    return raw
+
+
 class ProfileCatalog:
     """Scanned, inheritance-resolved, UUID-annotated profile catalog."""
 
@@ -170,10 +177,10 @@ class ProfileCatalog:
                         resolved = resolve_inheritance(
                             filepath, name_index, _resolved_cache=resolved_cache,
                         )
+                        entry = self._make_entry(resolved, ptype, source, rel_path)
                     except Exception as exc:
                         logger.warning("Skipping '%s': %s", filepath, exc)
                         continue
-                    entry = self._make_entry(resolved, ptype, source, rel_path)
                     catalog[ptype].append(entry)
                     by_uuid[entry["uuid"]] = entry
 
@@ -203,14 +210,10 @@ class ProfileCatalog:
             }
 
         if ptype == "filament":
-            colour_raw = resolved.get("filament_colour", "#FFFFFF")
-            colour = colour_raw[0] if isinstance(colour_raw, list) else colour_raw
-            ft_raw = resolved.get("filament_type", "")
-            filament_type = ft_raw[0] if isinstance(ft_raw, list) else ft_raw
-            fd_raw = resolved.get("filament_diameter", 1.75)
-            filament_diameter = fd_raw[0] if isinstance(fd_raw, list) else fd_raw
-            fv_raw = resolved.get("filament_vendor", "")
-            filament_vendor = fv_raw[0] if isinstance(fv_raw, list) else fv_raw
+            colour = _first_or_default(resolved.get("filament_colour", "#FFFFFF"), "#FFFFFF")
+            filament_type = _first_or_default(resolved.get("filament_type", ""), "")
+            filament_diameter = _first_or_default(resolved.get("filament_diameter", 1.75), 1.75)
+            filament_vendor = _first_or_default(resolved.get("filament_vendor", ""), "")
             return {
                 "uuid": make_profile_uuid(source, rel_path), "type": "filament",
                 "name": name, "display_name": _display_name(name), "source": source,

@@ -1,5 +1,6 @@
 import json, pytest
 from app.profile_catalog import resolve_inheritance, _build_name_index
+from tests.conftest import write_json
 
 def test_resolve_flat_profile(tmp_path):
     p = tmp_path / "leaf.json"
@@ -116,3 +117,19 @@ def test_filter_by_machine_tuple(profile_tree):
     data = cat.as_dict(manufacturer="Bambu Lab", model="P1S", nozzle="0.4")
     for p in data["process"]:
         assert not p.get("compatible_printers") or "Bambu Lab P1S 0.4 nozzle" in p["compatible_printers"]
+
+
+def test_empty_list_field_does_not_abort_build(profile_tree):
+    """A profile with an empty-list value (e.g. 'filament_colour': []) must be skipped,
+    not crash the whole catalog build (regression for IndexError on `[][0]`)."""
+    write_json(
+        f"{profile_tree['system_dir']}/Bambu Lab/filament/Bad Filament.json",
+        {"name": "Bad Filament", "filament_colour": []},
+    )
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()  # must not raise
+    assert cat.is_built
+    names = [f["name"] for f in cat.as_dict()["filament"]]
+    assert "Bad Filament" in names
+    bad = next(f for f in cat.as_dict()["filament"] if f["name"] == "Bad Filament")
+    assert bad["filament_colour"] == "#FFFFFF"  # falls back to default, not IndexError
