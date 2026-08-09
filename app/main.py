@@ -1337,8 +1337,10 @@ async def pack_stls(
     if len(files) > 50:
         raise HTTPException(status_code=422, detail="Maximum 50 STL files per request.")
 
-    # Validate STL filenames
+    # Validate STL filenames, deduplicating repeats within the batch with a numeric
+    # suffix so two uploads named e.g. "bracket.stl" don't overwrite one another on disk.
     safe_names: list[str] = []
+    seen_counts: dict[str, int] = {}
     for f in files:
         try:
             name = _safe_filename(f.filename)
@@ -1346,6 +1348,11 @@ async def pack_stls(
             raise HTTPException(status_code=400, detail=str(e))
         if not name.lower().endswith(".stl"):
             raise HTTPException(status_code=422, detail=f"Only .stl files accepted; got: {name}")
+        count = seen_counts.get(name, 0)
+        seen_counts[name] = count + 1
+        if count:
+            stem, ext = os.path.splitext(name)
+            name = f"{stem}_{count}{ext}"
         safe_names.append(name)
 
     job_id = str(uuid.uuid4())
