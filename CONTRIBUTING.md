@@ -62,7 +62,7 @@ orca/                              # service name: Laminus
 Laminus is designed to run in Docker (it needs OrcaSlicer, Xvfb, and specific volume layout). The recommended approach is to run it via Concordia:
 
 ```bash
-# From the Concordia (omnibus) repo:
+# From the Concordia repo:
 docker compose -f docker-compose.yml -f docker-compose.local.yml up laminus
 ```
 
