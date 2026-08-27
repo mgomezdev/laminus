@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import uuid
+from collections import OrderedDict
 from typing import Optional, Tuple
 
 logger = logging.getLogger("orcaslicer-api.catalog")
@@ -53,6 +54,16 @@ def _lookup_parent(name_index: dict[str, str], parent_name: str) -> Optional[str
         if path is not None:
             return path
     return None
+
+
+def _name_of(filepath: str) -> Optional[str]:
+    """Best-effort read of a profile's declared `name`, for reporting a broken profile
+    that could not be resolved (and so has no catalog entry to read the name from)."""
+    try:
+        with open(filepath, "r", encoding="utf-8") as fh:
+            return json.load(fh).get("name")
+    except (OSError, ValueError):
+        return None
 
 
 def make_profile_uuid(source: str, rel_path: str) -> str:
@@ -150,6 +161,11 @@ def resolve_inheritance(
 
 SYSTEM_PROFILE_TYPES = ("machine", "process", "filament")
 
+# Upper bound on lazily-resolved presets held in memory. A slice job touches a machine,
+# a process and a handful of filaments, so this is generous; it exists only to stop a
+# long-lived container from accumulating every preset it has ever sliced with.
+_RESOLVED_MEMO_MAX = 256
+
 
 def _display_name(name: str) -> str:
     at = name.find(" @")
@@ -173,13 +189,18 @@ class ProfileCatalog:
         self._catalog: dict[str, list[dict]] = {"machine": [], "process": [], "filament": []}
         self._built = False
         self._dict_cache: dict | None = None
-        self._skipped_count = 0
+        self._broken: list[dict] = []
+        self._name_index: dict[str, str] = {}
+        # Lazily-resolved full presets, keyed by uuid. build() no longer retains the
+        # merged dict for every profile (37 MB of an 87 MB cache file was these blobs);
+        # slicing needs only the handful of presets it actually uses.
+        self._resolved_memo: "OrderedDict[str, dict]" = OrderedDict()
 
     def build(self) -> None:
         catalog: dict[str, list[dict]] = {"machine": [], "process": [], "filament": []}
         by_uuid: dict[str, dict] = {}
         search_roots = [self._system_dir, self._user_dir]
-        skipped = 0
+        broken: list[dict] = []
 
         # Pre-build name→path index and resolved-profile cache so parent lookups
         # are O(1) and shared base profiles are loaded only once (critical for
@@ -212,19 +233,25 @@ class ProfileCatalog:
                         entry = self._make_entry(resolved, ptype, source, rel_path)
                     except Exception as exc:
                         logger.warning("Skipping '%s': %s", filepath, exc)
-                        skipped += 1
+                        broken.append({
+                            "rel_path": rel_path, "source": source, "type": ptype,
+                            "name": _name_of(filepath) or os.path.splitext(filename)[0],
+                            "reason": str(exc),
+                        })
                         continue
                     catalog[ptype].append(entry)
                     by_uuid[entry["uuid"]] = entry
 
         self._catalog = catalog
         self._by_uuid = by_uuid
+        self._name_index = name_index
+        self._resolved_memo.clear()
         self._dict_cache = None  # invalidate on rebuild
         self._built = True
-        self._skipped_count = skipped
-        if skipped:
+        self._broken = broken
+        if broken:
             logger.warning("Catalog built: %s (%d profile(s) skipped - see warnings above)",
-                            {k: len(v) for k, v in catalog.items()}, skipped)
+                            {k: len(v) for k, v in catalog.items()}, len(broken))
         else:
             logger.info("Catalog built: %s", {k: len(v) for k, v in catalog.items()})
 
@@ -244,7 +271,6 @@ class ProfileCatalog:
                 "nozzle_diameter": resolved.get("nozzle_diameter"),
                 "bed_size_x": resolved.get("bed_size_x"), "bed_size_y": resolved.get("bed_size_y"),
                 "extruder_count": resolved.get("extruder_count", 1),
-                "_resolved": resolved,
             }
 
         if ptype == "filament":
@@ -267,7 +293,6 @@ class ProfileCatalog:
                 "bed_temperature": resolved.get("bed_temperature"),
                 "bed_temperature_initial_layer": resolved.get("bed_temperature_initial_layer"),
                 "compatible_printers": resolved.get("compatible_printers", []),
-                "_resolved": resolved,
             }
 
         return {
@@ -276,11 +301,46 @@ class ProfileCatalog:
             "layer_height": resolved.get("layer_height"),
             "speed": resolved.get("speed"),
             "compatible_printers": resolved.get("compatible_printers", []),
-            "_resolved": resolved,
         }
 
     def get_by_uuid(self, uid: str) -> Optional[dict]:
         return self._by_uuid.get(uid)
+
+    # ---- lazy full-preset resolution ----
+
+    def _abs_path(self, entry: dict) -> str:
+        root = self._system_dir if entry.get("source") == "system" else self._user_dir
+        return os.path.join(root, entry["rel_path"].replace("/", os.sep))
+
+    def _ensure_name_index(self) -> dict[str, str]:
+        """The name index is persisted with the cache, so a cache hit does not pay for
+        an os.walk of the whole profile tree. Rebuild it only if it is genuinely absent."""
+        if not self._name_index:
+            self._name_index = _build_name_index([self._system_dir, self._user_dir])
+        return self._name_index
+
+    def resolved(self, uid: str) -> dict:
+        """Fully merged preset for *uid*, resolved on demand and memoised.
+
+        build() keeps only the display fields it needs for the catalog listing; the
+        complete merged dict is materialised here, for the two or three presets a
+        slice job actually uses. Because resolution happens against the profile tree
+        as it exists *now*, an updated vendor base rolls through into user profiles
+        that inherit from it without any reflattening step.
+        """
+        memo = self._resolved_memo
+        hit = memo.get(uid)
+        if hit is not None:
+            memo.move_to_end(uid)
+            return hit
+        entry = self._by_uuid.get(uid)
+        if entry is None:
+            raise KeyError(f"Unknown profile uuid: {uid}")
+        result = resolve_inheritance(self._abs_path(entry), self._ensure_name_index())
+        memo[uid] = result
+        while len(memo) > _RESOLVED_MEMO_MAX:
+            memo.popitem(last=False)
+        return result
 
     def get_machine(self, manufacturer: str, model: str, nozzle: str) -> Optional[dict]:
         entry = self._by_uuid.get(make_machine_uuid(manufacturer, model, nozzle))
@@ -327,16 +387,28 @@ class ProfileCatalog:
     @property
     def skipped_count(self) -> int:
         """Number of profiles excluded from the last build() (unresolvable inheritance,
-        unparseable JSON, etc.) - see warnings in the log for which and why."""
-        return self._skipped_count
+        unparseable JSON, etc.) - see `broken` for which and why."""
+        return len(self._broken)
+
+    @property
+    def broken(self) -> list[dict]:
+        """Profiles excluded from the last build(), each with the reason it failed.
+
+        An unresolvable `inherits` here is the signal that an OrcaSlicer update renamed
+        or removed a vendor base a user profile was building on."""
+        return list(self._broken)
 
     def save_to_cache(self, path: str, cache_key: str) -> None:
-        """Write catalog state to a JSON file keyed by cache_key."""
+        """Write catalog state to a JSON file keyed by cache_key.
+
+        `by_uuid` is not persisted — it holds the same entry dicts as `catalog` and
+        doubled the file size. It is rebuilt on load.
+        """
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({
-                "cache_key": cache_key, "catalog": self._catalog, "by_uuid": self._by_uuid,
-                "skipped_count": self._skipped_count,
+                "cache_key": cache_key, "catalog": self._catalog,
+                "broken": self._broken, "name_index": self._name_index,
             }, f)
         os.replace(tmp, path)
 
@@ -352,9 +424,12 @@ class ProfileCatalog:
             return None
         cat = cls(system_dir=system_dir, user_dir=user_dir)
         cat._catalog = data["catalog"]
-        cat._by_uuid = data["by_uuid"]
+        cat._by_uuid = {
+            e["uuid"]: e for entries in cat._catalog.values() for e in entries
+        }
         cat._built = True
-        cat._skipped_count = data.get("skipped_count", 0)
+        cat._broken = data.get("broken", [])
+        cat._name_index = data.get("name_index", {})
         return cat
 
     @staticmethod

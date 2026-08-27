@@ -183,6 +183,16 @@ async def merged_config(body: dict):
     return JSONResponse(_MERGED_CONFIG)
 
 
+@app.post("/api/profiles/rescan")
+async def rescan_profiles():
+    return {"status": "started", "message": "Catalog rescan started. Poll /api/health until catalog_building is false."}
+
+
+@app.get("/api/profiles/broken")
+async def get_broken_profiles():
+    return {"count": 0, "broken": []}
+
+
 @app.get("/api/profiles/{profile_uuid}")
 async def get_profile(profile_uuid: str):
     entry = _CATALOG.get(profile_uuid)

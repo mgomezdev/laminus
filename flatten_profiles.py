@@ -1,8 +1,15 @@
 """Recursively flatten OrcaSlicer system profiles into standalone user profiles.
 
-OrcaSlicer's built-in profiles use an 'inherits' chain that the CLI cannot resolve
-at runtime for user presets. This script walks the chain and writes a fully merged,
-self-contained JSON ready to drop into /config/user/default/<type>/.
+Use this only when you want a permanent fork of a vendor profile. laminus resolves
+`inherits` itself (ProfileCatalog.resolved(), used at slice time) - a plain user profile
+with `"inherits": "<vendor name>"` and only the keys you're actually changing works fine
+without flattening, and stays current: it re-resolves against the vendor tree on every
+catalog build, so an OrcaSlicer update to that vendor base rolls straight through.
+
+A profile written by this script is frozen at the OrcaSlicer version it was flattened
+from. It will not receive any later vendor fix, silently, forever. Prefer a thin
+`inherits`-based profile via `POST /api/profiles/upload` and reach for this script only
+when the vendor profile is going away (dropped, or you need to diverge permanently).
 """
 import json
 import os

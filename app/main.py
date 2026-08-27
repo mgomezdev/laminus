@@ -82,18 +82,29 @@ async def lifespan(app: FastAPI):
             pass
 
 
-def _trigger_catalog_rebuild() -> None:
+def _trigger_catalog_rebuild(force: bool = False) -> None:
     global _catalog_task, _catalog_building
     if not _catalog_building:
         _catalog_building = True
-        _catalog_task = asyncio.create_task(_build_catalog())
+        _catalog_task = asyncio.create_task(_build_catalog(force=force))
 
 
-async def _build_catalog():
+async def _build_catalog(force: bool = False):
+    """Verify inheritance across the profile tree and build the catalog dictionary.
+
+    This is the eager pass: every profile's `inherits` chain is walked and validated and
+    the display fields Themis lists are computed, so callers get the catalog without
+    waiting on a scan. The fully-merged preset is deliberately *not* retained — see
+    `ProfileCatalog.resolved()`, which materialises it lazily at slice time so an updated
+    vendor base rolls through without any reflattening step.
+
+    `force=True` skips the cache read so a manual rescan re-verifies even when nothing on
+    disk appears to have changed.
+    """
     global catalog, _catalog_building, _template_cache
     try:
         cache_key = await asyncio.to_thread(_catalog_cache_key)
-        cached = await asyncio.to_thread(
+        cached = None if force else await asyncio.to_thread(
             ProfileCatalog.load_from_cache, _CATALOG_CACHE_FILE, cache_key,
             SYSTEM_PROFILES_DIR, USER_CONFIG_DIR,
         )
@@ -295,10 +306,53 @@ _JOBS_FILE = os.path.join(DATA_DIR, "jobs.json")
 _CATALOG_CACHE_FILE = os.path.join(DATA_DIR, "catalog_cache.json")
 
 
+def _vendor_bundle_signature() -> list[tuple]:
+    """Signature of the system (vendor) profile tree.
+
+    ORCA_VERSION alone is not sufficient: when SYSTEM_PROFILES_DIR is bind-mounted from
+    a host OrcaSlicer install, Orca updates its vendor bundles independently of the
+    application version, and a key that ignores them serves stale resolved presets
+    indefinitely.
+
+    Only the top-level `<Vendor>.json` bundle files are inspected, not the whole tree —
+    OrcaSlicer ships vendor profiles as whole versioned bundles, and stat()-ing several
+    thousand nested files is slow precisely where this matters most (a Docker bind mount
+    on Windows/WSL2).
+    """
+    sig: list[tuple] = []
+    if not os.path.isdir(SYSTEM_PROFILES_DIR):
+        return sig
+    try:
+        names = os.listdir(SYSTEM_PROFILES_DIR)
+    except OSError:
+        return sig
+    for fn in names:
+        if not fn.endswith(".json"):
+            continue
+        p = os.path.join(SYSTEM_PROFILES_DIR, fn)
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        version = ""
+        try:
+            with open(p, encoding="utf-8") as f:
+                version = json.load(f).get("version", "")
+        except (OSError, ValueError):
+            pass
+        sig.append((fn, version, st.st_mtime, st.st_size))
+    sig.sort()
+    return sig
+
+
 def _catalog_cache_key() -> str:
-    """Hash of ORCA_VERSION + sorted (relpath, mtime, size) for user config dir."""
+    """Hash of ORCA_VERSION + the vendor bundle signature + sorted (relpath, mtime, size)
+    for the user config dir. Any preset change on either side voids the cache, forcing a
+    fresh inheritance verification and catalog rebuild."""
     import hashlib
     h = hashlib.md5(os.environ.get("ORCA_VERSION", "").encode())
+    for entry in _vendor_bundle_signature():
+        h.update(str(entry).encode())
     if os.path.isdir(USER_CONFIG_DIR):
         entries = []
         for root, _dirs, files in os.walk(USER_CONFIG_DIR):
@@ -573,13 +627,38 @@ async def get_merged_config(body: MergedConfigRequest):
         if fe is None or fe.get("type") != "filament":
             raise HTTPException(status_code=422, detail=f"Filament UUID '{fuid}' not found.")
         filament_entries.append(fe)
-    machine_resolved = machine_entry.get("_resolved", machine_entry)
-    process_resolved = process_entry.get("_resolved", process_entry)
-    filament_resolved_list = [fe.get("_resolved", fe) for fe in filament_entries]
+    machine_resolved = catalog.resolved(machine_entry["uuid"])
+    process_resolved = catalog.resolved(process_entry["uuid"])
+    filament_resolved_list = [catalog.resolved(fe["uuid"]) for fe in filament_entries]
     config = await asyncio.to_thread(
         build_project_settings, machine_resolved, process_resolved, filament_resolved_list
     )
     return JSONResponse(content=config)
+
+
+@app.get(
+    "/api/profiles/broken",
+    tags=["profiles"],
+    summary="List profiles excluded from the catalog",
+    description=(
+        "Profiles dropped by the last catalog build, each with the reason. An unresolvable "
+        "`inherits` parent here is the signal that an OrcaSlicer update renamed or removed a "
+        "vendor base that a user profile was building on.\n\n"
+        "Must be registered before `/api/profiles/{profile_uuid}` — Starlette matches path "
+        "routes in registration order, and `{profile_uuid}` would otherwise swallow this path "
+        "as a literal UUID lookup and always 404.\n\n"
+        "Returns **503** while the catalog is still building."
+    ),
+    responses={503: {"description": "Catalog not yet ready"}},
+)
+async def get_broken_profiles():
+    if catalog is None or not catalog.is_built:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "building_catalog", "detail": "Catalog not ready. Retry shortly."},
+        )
+    broken = catalog.broken
+    return {"count": len(broken), "broken": broken}
 
 
 @app.get(
@@ -910,9 +989,9 @@ async def start_slice(
     else:
         base_3mf = raw_path
 
-    machine_resolved = machine_entry.get("_resolved", machine_entry)
-    process_resolved = process_entry.get("_resolved", process_entry)
-    filament_resolved_list = [fe.get("_resolved", fe) for fe in filament_entries]
+    machine_resolved = catalog.resolved(machine_entry["uuid"])
+    process_resolved = catalog.resolved(process_entry["uuid"])
+    filament_resolved_list = [catalog.resolved(fe["uuid"]) for fe in filament_entries]
 
     project_cfg = await asyncio.to_thread(
         build_project_settings, machine_resolved, process_resolved, filament_resolved_list
@@ -1469,9 +1548,9 @@ async def pack_stls(
 
                 project_cfg = await asyncio.to_thread(
                     build_project_settings,
-                    machine_entry.get("_resolved", machine_entry),
-                    proc_entry.get("_resolved", proc_entry),
-                    [fe.get("_resolved", fe) for fe in fil_entries],
+                    catalog.resolved(machine_entry["uuid"]),
+                    catalog.resolved(proc_entry["uuid"]),
+                    [catalog.resolved(fe["uuid"]) for fe in fil_entries],
                 )
 
                 printable_area = project_cfg.get("printable_area")
@@ -1728,11 +1807,16 @@ async def auto_arrange_3mf(
         "appears before using it in a slice job.\n\n"
         "**Requirements for the JSON file:**\n"
         "- Must have a `.json` extension\n"
-        "- Must be a *fully-flattened* preset with no `inherits` chain. If the profile "
-        "relies on a system base profile, flatten it first using `flatten_profiles.py` "
-        "inside the container: `docker exec laminus python /workspace/app/flatten_profiles.py "
-        "--profile 'Elegoo Centauri Carbon 0.4 nozzle'`\n"
         "- `type` must be exactly `machine`, `process`, or `filament`\n\n"
+        "**Prefer a thin preset over a flattened one.** Declare `inherits` naming the vendor "
+        "base plus only the keys you are actually changing. Inheritance is resolved against "
+        "the profile tree as it exists at slice time, so an OrcaSlicer update that improves "
+        "the vendor base rolls straight through into your profile. A fully-flattened preset "
+        "(no `inherits`) is frozen at the version it was flattened from and silently misses "
+        "every later vendor fix — use it only when you want a permanent fork.\n\n"
+        "If the base is renamed or removed by a later OrcaSlicer release the profile is "
+        "dropped from the catalog rather than served half-resolved; `GET /api/profiles/broken` "
+        "reports it.\n\n"
         "**Profile persistence:** the uploaded file is written to a Docker volume "
         "(`/config/user/`). It survives container restarts but is not baked into the image. "
         "Re-upload after replacing the container with a clean image.\n\n"
@@ -1779,6 +1863,36 @@ async def upload_profile(
     }
 
 
+@app.post(
+    "/api/profiles/rescan",
+    tags=["profiles"],
+    summary="Rescan profiles and rebuild the catalog",
+    description=(
+        "Re-walks the system and user profile trees, re-verifies every `inherits` chain, "
+        "and rebuilds the catalog dictionary.\n\n"
+        "The catalog is normally rebuilt automatically — the cache key covers the OrcaSlicer "
+        "version, the vendor profile bundles, and every file under `/config/user/`, so any "
+        "preset change voids it. Use this endpoint to force the work anyway: after editing "
+        "profiles in place on a bind mount, or to re-check which profiles are broken after "
+        "an OrcaSlicer upgrade.\n\n"
+        "Returns immediately; the rebuild runs in the background. Poll `GET /api/health` "
+        "until `catalog_building` is `false`, then call `GET /api/profiles/broken` for "
+        "profiles whose inheritance no longer resolves."
+    ),
+)
+async def rescan_profiles():
+    already = _catalog_building
+    _trigger_catalog_rebuild(force=True)
+    return {
+        "status": "already_building" if already else "started",
+        "message": (
+            "A catalog rebuild was already in progress; not queuing another."
+            if already else
+            "Catalog rescan started. Poll /api/health until catalog_building is false."
+        ),
+    }
+
+
 @app.get(
     "/api/health",
     tags=["health"],
@@ -1801,8 +1915,8 @@ async def upload_profile(
         "- `catalog_profile_count` — `{machine: N, process: N, filament: N}` when loaded, "
         "otherwise `null`\n"
         "- `catalog_skipped_count` — number of profiles excluded from the catalog on the "
-        "last build (unresolvable `inherits` parent, unparseable JSON, etc.) — see server "
-        "logs for which profiles and why; `null` if not yet built\n"
+        "last build (unresolvable `inherits` parent, unparseable JSON, etc.) — call "
+        "`GET /api/profiles/broken` for which profiles and why; `null` if not yet built\n"
         "- `active_jobs` — number of jobs currently in `slicing` status"
     ),
 )

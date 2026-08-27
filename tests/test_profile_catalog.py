@@ -224,3 +224,127 @@ def test_parent_with_slash_resolves_to_escaped_filename(profile_tree):
     # Inherited values must actually be merged in, not just the child published bare.
     assert by_name["Dash Child"]["nozzle_temperature"] == 220
     assert by_name["Space Child"]["nozzle_temperature"] == 280
+
+
+# ---------------------------------------------------------------------------
+# Lazy resolution: build() validates inheritance and publishes the dictionary,
+# but the fully-merged preset is materialised on demand.
+# ---------------------------------------------------------------------------
+
+def test_catalog_entries_do_not_carry_resolved_blob(profile_tree):
+    """The merged dict must not be retained per entry - it was ~40% of an 87 MB
+    cache file and is only ever needed for the presets a slice job actually uses."""
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    for entries in cat._catalog.values():
+        for e in entries:
+            assert "_resolved" not in e
+
+
+def test_resolved_materialises_full_preset(profile_tree):
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    standard = next(p for p in cat.as_dict()["process"] if "Standard" in p["name"])
+    full = cat.resolved(standard["uuid"])
+    assert full["layer_height"] == 0.2   # own value
+    assert full["speed"] == 50           # inherited from FFF Settings
+    assert "inherits" not in full
+
+
+def test_resolved_unknown_uuid_raises(profile_tree):
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    with pytest.raises(KeyError):
+        cat.resolved("not-a-real-uuid")
+
+
+def test_updated_vendor_base_rolls_into_user_profile(profile_tree):
+    """The point of the whole design: a user profile that declares `inherits` picks up
+    an updated vendor base on the next catalog build, with no reflattening step."""
+    write_json(
+        f"{profile_tree['user_dir']}/default/process/My Fast @Custom.json",
+        {"name": "My Fast @Custom", "inherits": "FFF Settings", "layer_height": 0.28},
+    )
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    mine = next(p for p in cat.as_dict()["process"] if p["name"] == "My Fast @Custom")
+    assert cat.resolved(mine["uuid"])["speed"] == 50
+
+    # Vendor ships a new base value; user profile is untouched on disk.
+    write_json(
+        f"{profile_tree['system_dir']}/Bambu Lab/process/FFF Settings.json",
+        {"name": "FFF Settings", "layer_height": 0.3, "speed": 80},
+    )
+    cat2 = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat2.build()
+    mine2 = next(p for p in cat2.as_dict()["process"] if p["name"] == "My Fast @Custom")
+    full = cat2.resolved(mine2["uuid"])
+    assert full["speed"] == 80, "updated vendor base did not roll through"
+    assert full["layer_height"] == 0.28, "user override must still win"
+
+
+def test_flattened_profile_does_not_receive_vendor_updates(profile_tree):
+    """Counterpart to the test above - documents why a flattened preset is a fork."""
+    write_json(
+        f"{profile_tree['user_dir']}/default/process/Frozen @Custom.json",
+        {"name": "Frozen @Custom", "layer_height": 0.28, "speed": 50},
+    )
+    write_json(
+        f"{profile_tree['system_dir']}/Bambu Lab/process/FFF Settings.json",
+        {"name": "FFF Settings", "layer_height": 0.3, "speed": 80},
+    )
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    frozen = next(p for p in cat.as_dict()["process"] if p["name"] == "Frozen @Custom")
+    assert cat.resolved(frozen["uuid"])["speed"] == 50
+
+
+def test_resolved_works_after_cache_roundtrip(profile_tree, tmp_path):
+    """A cache hit skips build() entirely, so lazy resolution must still find the file
+    on disk - the persisted name index has to survive the roundtrip."""
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    cache_path = str(tmp_path / "cache.json")
+    cat.save_to_cache(cache_path, "key1")
+    loaded = ProfileCatalog.load_from_cache(
+        cache_path, "key1", profile_tree["system_dir"], profile_tree["user_dir"],
+    )
+    assert loaded is not None
+    standard = next(p for p in loaded.as_dict()["process"] if "Standard" in p["name"])
+    assert loaded.resolved(standard["uuid"])["speed"] == 50
+    assert loaded.get_by_uuid(standard["uuid"]) is not None  # by_uuid rebuilt, not persisted
+
+
+def test_cache_file_excludes_resolved_blobs(profile_tree, tmp_path):
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    cache_path = str(tmp_path / "cache.json")
+    cat.save_to_cache(cache_path, "key1")
+    raw = json.loads(open(cache_path, encoding="utf-8").read())
+    assert "by_uuid" not in raw
+    for entries in raw["catalog"].values():
+        for e in entries:
+            assert "_resolved" not in e
+
+
+def test_broken_reports_reason_and_survives_cache(profile_tree, tmp_path):
+    """An OrcaSlicer update that renames a vendor base shows up here."""
+    write_json(
+        f"{profile_tree['user_dir']}/default/filament/Mine @Custom.json",
+        {"name": "Mine @Custom", "inherits": "Vendor Base That Went Away"},
+    )
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    assert cat.skipped_count == 1
+    (entry,) = cat.broken
+    assert entry["name"] == "Mine @Custom"
+    assert entry["source"] == "user"
+    assert entry["type"] == "filament"
+    assert "Vendor Base That Went Away" in entry["reason"]
+
+    cache_path = str(tmp_path / "cache.json")
+    cat.save_to_cache(cache_path, "key1")
+    loaded = ProfileCatalog.load_from_cache(
+        cache_path, "key1", profile_tree["system_dir"], profile_tree["user_dir"],
+    )
+    assert loaded.broken == cat.broken

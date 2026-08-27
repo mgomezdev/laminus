@@ -57,10 +57,16 @@ curl http://localhost:5000/api/health
 `POST /api/arrange` runs `xvfb-run orcaslicer --arrange 1 --orient 1 --export-3mf` **synchronously** (35-second timeout) and streams the resulting `.3mf` file back directly, then queues directory cleanup as a background task.
 
 ### Profile resolution
-`ProfileCatalog` (`app/profile_catalog.py`) scans the OrcaSlicer system profiles dir and `/config/user/` on startup, resolves the `"inherits"` chain into fully merged presets, and builds a name index for fast lookup. Profiles are matched by display `name` or file path when building CLI arguments. The catalog is lazily loaded and cached to `/tmp/laminus_catalog_cache.json`; delete the cache file to force a rebuild. `flatten_profiles.py` (see above) produces standalone user presets from system profiles that can then be placed in `/config/user/`.
+`ProfileCatalog` (`app/profile_catalog.py`) walks the OrcaSlicer system profiles dir and `/config/user/` in the background, verifies every `"inherits"` chain resolves, and builds the display catalog (`GET /api/profiles`) plus a name index. It does **not** retain the fully-merged preset per entry — that used to be 40% of an 87 MB cache file. `ProfileCatalog.resolved(uuid)` materializes the merged dict lazily, on demand, memoized per-process (`_RESOLVED_MEMO_MAX = 256`), and is what `build_project_settings` is fed at slice time.
+
+Because resolution happens against the profile tree *as it currently is*, a thin user profile (`"inherits": "<vendor name>"` + only the keys it changes) automatically picks up vendor updates on the next catalog build — no reflattening step needed. This is why `flatten_profiles.py` should be a last resort, not the default path (see below).
+
+The catalog is cached to `<DATA_DIR>/catalog_cache.json`, keyed by `ORCA_VERSION` + a signature of the top-level vendor bundle files (`<Vendor>.json`: name, version, mtime, size — cheap, and catches a bind-mounted OrcaSlicer install self-updating a vendor bundle independently of `ORCA_VERSION`) + every file under `/config/user/`. Any preset change on either side voids the cache and forces re-verification. `POST /api/profiles/rescan` forces a rebuild manually (bypassing the cache check), e.g. after editing profiles directly on a bind mount. `GET /api/profiles/broken` lists profiles dropped from the catalog because their `inherits` chain didn't resolve — the signal an OrcaSlicer update renamed or removed a vendor base a user profile depended on.
 
 ### Job state
 `jobs` is a plain in-memory dict — all state is lost on container restart. There is no database or persistence layer.
 
 ### OrcaSlicer system profiles
-OrcaSlicer's built-in profiles use an inheritance chain (`"inherits"` key). They cannot be used directly as user presets. `flatten_profiles.py` recursively resolves inheritance and writes a fully merged, standalone JSON suitable for the `/config/user/` volume. It also patches in required fields (`"from": "user"`, `compatible_printers`, `layer_change_gcode`) that the CLI validator requires.
+Prefer a thin user preset: `"inherits": "<vendor profile name>"` plus only the keys you're overriding. laminus resolves the chain itself at catalog-build and slice time, so this rolls forward with vendor updates automatically.
+
+`flatten_profiles.py` recursively resolves inheritance and writes a fully merged, standalone JSON with no `inherits` — use it only for a permanent fork (the vendor profile is being removed, or you need to diverge for good). A flattened profile is frozen at the OrcaSlicer version it was flattened from and will not receive any later vendor fix. It also patches in required fields (`"from": "user"`, `compatible_printers`, `layer_change_gcode`) that the CLI validator requires.

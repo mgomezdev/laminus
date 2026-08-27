@@ -199,6 +199,23 @@ def test_profile_detail_404(client):
     assert client.get("/api/profiles/no-such-uuid").status_code == 404
 
 
+def test_profiles_broken_fields(client):
+    """Regression: /api/profiles/broken must be registered before
+    /api/profiles/{profile_uuid} - if that ordering regresses, this 404s (swallowed as a
+    UUID lookup) instead of 200ing."""
+    r = client.get("/api/profiles/broken")
+    assert r.status_code == 200
+    body = r.json()
+    assert "count" in body and "broken" in body
+    assert isinstance(body["broken"], list)
+
+
+def test_profiles_rescan_starts(client):
+    r = client.post("/api/profiles/rescan")
+    assert r.status_code == 200
+    assert "status" in r.json()
+
+
 def test_merged_config_returns_dict(client):
     kp = _known_profile(client)
     r = client.post(
