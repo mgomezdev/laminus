@@ -2078,10 +2078,16 @@ async def cleanup_temp(min_age_seconds: int = 300, dry_run: bool = False):
 
 
 @app.get("/api/test/known-profile", include_in_schema=False)
-async def test_known_profile():
-    """Return the first compatible machine/process/filament UUID triple from the loaded catalog.
+async def test_known_profile(machine_name: str | None = None):
+    """Return a machine/process/filament UUID triple from the loaded catalog.
 
-    For E2E tests that need valid profile UUIDs without hardcoding profile names.
+    Without `machine_name`: the first compatible triple, for tests that need
+    valid profile UUIDs without caring which hardware they land on.
+
+    With `machine_name`: the triple for that exact machine, for tests seeding
+    a printer that expects a specific model's profiles (e.g. a named
+    placeholder printer). 404 if no machine in the catalog matches.
+
     Returns 503 while the catalog is building.
     """
     if catalog is None or not catalog.is_built:
@@ -2092,7 +2098,12 @@ async def test_known_profile():
     filaments = data.get("filament", [])
     if not machines or not processes or not filaments:
         raise HTTPException(status_code=503, detail="Catalog is empty.")
-    machine = machines[0]
+    if machine_name is not None:
+        machine = next((m for m in machines if m["name"] == machine_name), None)
+        if machine is None:
+            raise HTTPException(status_code=404, detail=f"Machine {machine_name!r} not in catalog.")
+    else:
+        machine = machines[0]
 
     def _compatible(entry: dict) -> bool:
         cp = entry.get("compatible_printers", [])

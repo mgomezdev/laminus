@@ -248,6 +248,19 @@ def test_known_profile_uuids_in_catalog(client):
         assert r.status_code == 200, f"{field} {uid!r} not in catalog"
 
 
+def test_known_profile_by_machine_name(client):
+    """Requesting the default machine by name returns that same triple."""
+    default = _known_profile(client)
+    r = client.get("/api/test/known-profile", params={"machine_name": default["machine_name"]})
+    assert r.status_code == 200
+    assert r.json() == default
+
+
+def test_known_profile_unknown_machine_name_404s(client):
+    r = client.get("/api/test/known-profile", params={"machine_name": "No Such Printer Ever"})
+    assert r.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # Slice lifecycle
 # ---------------------------------------------------------------------------

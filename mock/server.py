@@ -268,9 +268,14 @@ async def arrange(request: Request):
 
 
 @app.get("/api/test/known-profile", include_in_schema=False)
-async def test_known_profile():
+async def test_known_profile(machine_name: str | None = None):
     """Stable profile UUIDs — use in tests to seed printer/job fixtures without
-    hardcoding UUIDs that may drift. Hidden from the public OpenAPI schema."""
+    hardcoding UUIDs that may drift. Hidden from the public OpenAPI schema.
+
+    The mock only ever knows about one machine, so `machine_name` (if given)
+    must match it exactly — same 404-on-mismatch contract as the real app."""
+    if machine_name is not None and machine_name != _MACHINE["name"]:
+        raise HTTPException(status_code=404, detail=f"Machine {machine_name!r} not in catalog.")
     return {
         "machine_uuid": MACHINE_UUID,
         "machine_name": _MACHINE["name"],
