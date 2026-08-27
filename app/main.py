@@ -23,6 +23,12 @@ logger = logging.getLogger("laminus")
 
 CONFIG_DIR = "/config"
 USER_CONFIG_DIR = os.environ.get("USER_CONFIG_DIR", os.path.join(CONFIG_DIR, "user"))
+# The datadir passed to the OrcaSlicer CLI itself (--datadir). Set by entrypoint.sh to
+# a disposable scratch path, with only user/ and plugins/ symlinked back into the
+# durable CONFIG_DIR — Orca also writes cache/ and log/ under whatever --datadir it's
+# given, and neither belongs in a volume that gets backed up. Falls back to CONFIG_DIR
+# so local (non-Docker, non-entrypoint.sh) dev keeps working.
+ORCA_DATADIR = os.environ.get("ORCA_DATADIR", CONFIG_DIR)
 DATA_DIR = "/data"
 JOBS_DIR = "/tmp/jobs"
 ARRANGE_DIR = "/tmp/arrange"
@@ -303,7 +309,11 @@ def _track_inflight_arrange(job_id: str):
 
 
 _JOBS_FILE = os.path.join(DATA_DIR, "jobs.json")
-_CATALOG_CACHE_FILE = os.path.join(DATA_DIR, "catalog_cache.json")
+# Deliberately NOT under DATA_DIR: this is a rebuildable cache (keyed by ORCA_VERSION +
+# vendor bundle signature + user profile mtimes — see _catalog_cache_key), not durable
+# state. Keeping it off the durable volume means DATA_DIR only ever holds jobs.json and
+# job_history.json, both worth backing up in full.
+_CATALOG_CACHE_FILE = "/tmp/laminus_catalog_cache.json"
 
 
 def _vendor_bundle_signature() -> list[tuple]:
@@ -1615,7 +1625,7 @@ async def pack_stls(
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
             "orcaslicer",
-            "--datadir", CONFIG_DIR,
+            "--datadir", ORCA_DATADIR,
             "--arrange", "1",
             "--orient", "1",
             "--export-3mf", out_file,
@@ -1685,7 +1695,8 @@ async def pack_stls(
         "a 3MF first.\n\n"
         "**Settings preservation:** the input 3MF's `Metadata/project_settings.config` is "
         "passed to OrcaSlicer via `--datadir`, which means OrcaSlicer may load its own "
-        "machine profiles from `/config`. The `Metadata/model_settings.config` (extruder/slot "
+        "machine profiles from the user presets under `/config` (symlinked into Orca's "
+        "datadir — see `ORCA_DATADIR`). The `Metadata/model_settings.config` (extruder/slot "
         "assignments) from the input 3MF is preserved in the output.\n\n"
         "All temporary files are cleaned up after the response is sent, including the "
         "stable output copy used to serve the download."
@@ -1736,7 +1747,7 @@ async def auto_arrange_3mf(
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
             "orcaslicer",
-            "--datadir", CONFIG_DIR,
+            "--datadir", ORCA_DATADIR,
             "--export-3mf", out_file,
         ]
 

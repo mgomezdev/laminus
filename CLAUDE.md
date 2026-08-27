@@ -42,10 +42,14 @@ curl http://localhost:5000/api/health
 ## Architecture
 
 ### Runtime paths (inside container)
-- `/config/user/default/{machine,process,filament}/` — user-supplied OrcaSlicer preset JSON files (mounted from `./config` on host)
-- `/data/` — general data volume (mounted from `./data` on host)
+- `/config/user/default/{machine,process,filament}/` — user-supplied OrcaSlicer preset JSON files. Durable volume — this is the whole reason `/config` is mounted.
+- `/config/plugins/` — OrcaSlicer plugins (e.g. network plugins), installed once and expected to survive redeploys. Same durable volume as `/config/user/`.
+- `/data/jobs.json`, `/data/job_history.json` — job queue/history state. Durable volume; both files are small and worth backing up whole.
+- `ORCA_DATADIR` (default `/var/lib/laminus/orca-scratch`, set by `entrypoint.sh`) — the `--datadir` actually handed to the OrcaSlicer CLI. **Not mounted.** Orca writes its own `cache/` and `log/` here as a side effect of running — `cache/` is pure rebuildable scratch and `log/` grows without bound, neither belongs in a backed-up volume. `entrypoint.sh` symlinks `$ORCA_DATADIR/user` → `/config/user` and `$ORCA_DATADIR/plugins` → `/config/plugins`, so Orca sees a normal-looking datadir while the durable `/config` volume only ever contains the two subtrees worth keeping. Falls back to `CONFIG_DIR` (`/config`) when unset, for local non-Docker dev.
 - `/tmp/jobs/{job_id}/` — per-job working directories created at runtime; not persisted
 - `/tmp/arrange/{job_id}/` — temp dirs for arrange operations; cleaned up after response
+- `/tmp/laminus_catalog_cache.json` — rebuildable catalog cache (see Profile resolution below); deliberately not on a durable volume
+- `/opt/orcaslicer/` — extracted OrcaSlicer AppImage, on its own cache volume (`laminus-slicer`); wiped and re-extracted when `ORCA_VERSION` changes, not backed up
 
 ### Request flow for slicing
 1. `POST /api/slice/start` saves the uploaded file to `/tmp/jobs/{uuid}/input/`, creates an in-memory job entry in the global `jobs` dict, and dispatches `run_orcaslicer_task` as a FastAPI `BackgroundTask`.
@@ -61,7 +65,7 @@ curl http://localhost:5000/api/health
 
 Because resolution happens against the profile tree *as it currently is*, a thin user profile (`"inherits": "<vendor name>"` + only the keys it changes) automatically picks up vendor updates on the next catalog build — no reflattening step needed. This is why `flatten_profiles.py` should be a last resort, not the default path (see below).
 
-The catalog is cached to `<DATA_DIR>/catalog_cache.json`, keyed by `ORCA_VERSION` + a signature of the top-level vendor bundle files (`<Vendor>.json`: name, version, mtime, size — cheap, and catches a bind-mounted OrcaSlicer install self-updating a vendor bundle independently of `ORCA_VERSION`) + every file under `/config/user/`. Any preset change on either side voids the cache and forces re-verification. `POST /api/profiles/rescan` forces a rebuild manually (bypassing the cache check), e.g. after editing profiles directly on a bind mount. `GET /api/profiles/broken` lists profiles dropped from the catalog because their `inherits` chain didn't resolve — the signal an OrcaSlicer update renamed or removed a vendor base a user profile depended on.
+The catalog is cached to `/tmp/laminus_catalog_cache.json` (deliberately not the durable `/data` volume — it's fully rebuildable), keyed by `ORCA_VERSION` + a signature of the top-level vendor bundle files (`<Vendor>.json`: name, version, mtime, size — cheap, and catches a bind-mounted OrcaSlicer install self-updating a vendor bundle independently of `ORCA_VERSION`) + every file under `/config/user/`. Any preset change on either side voids the cache and forces re-verification. `POST /api/profiles/rescan` forces a rebuild manually (bypassing the cache check), e.g. after editing profiles directly on a bind mount. `GET /api/profiles/broken` lists profiles dropped from the catalog because their `inherits` chain didn't resolve — the signal an OrcaSlicer update renamed or removed a vendor base a user profile depended on.
 
 ### Job state
 `jobs` is a plain in-memory dict — all state is lost on container restart. There is no database or persistence layer.

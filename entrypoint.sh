@@ -32,4 +32,16 @@ fi
 # Symlink may be absent if the volume was freshly mounted; always (re)create it.
 ln -sf "${ORCA_INSTALL_DIR}/AppRun" /usr/local/bin/orcaslicer
 
+# OrcaSlicer is given its own --datadir (ORCA_DATADIR, read by main.py), not the
+# durable /config volume directly. Left to itself Orca fills --datadir with cache/
+# and log/ alongside user/ and plugins/ — cache/ is pure rebuildable scratch and
+# log/ grows without bound, neither belongs in a volume that gets backed up. Orca
+# gets a disposable datadir instead, and only the two subtrees worth keeping are
+# symlinked back into /config, so the durable volume never contains anything but
+# user presets and installed plugins.
+export ORCA_DATADIR="/var/lib/laminus/orca-scratch"
+mkdir -p "$ORCA_DATADIR" /config/user /config/plugins
+ln -sfn /config/user "$ORCA_DATADIR/user"
+ln -sfn /config/plugins "$ORCA_DATADIR/plugins"
+
 exec "$@"
