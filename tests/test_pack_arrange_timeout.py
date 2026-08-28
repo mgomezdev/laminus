@@ -35,13 +35,21 @@ def _make_timeout_subprocess(processes: list):
         proc = AsyncMock()
         proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
         proc.kill = MagicMock()
+        proc.pid = 12345
         proc.returncode = None
         processes.append(proc)
         return proc
     return _create
 
 
-def test_pack_kills_process_on_timeout():
+def test_pack_kills_process_on_timeout(monkeypatch):
+    # The timeout path runs the real _kill_process_group(), which calls
+    # os.killpg(process.pid, ...) before falling back to process.kill(). Since
+    # `proc` above is a mock, not a real subprocess, os.killpg must be patched
+    # here too -- otherwise process.pid (a mock, coercing to int() == 1 if left
+    # unset) reaches a REAL os.killpg(1, SIGKILL), which is not a fake process
+    # group, but is process group 1 on this actual machine.
+    monkeypatch.setattr("os.killpg", lambda pid, sig: (_ for _ in ()).throw(ProcessLookupError()), raising=False)
     processes: list = []
     client = TestClient(app)
     with patch("asyncio.create_subprocess_exec", new=_make_timeout_subprocess(processes)):
@@ -56,7 +64,10 @@ def test_pack_kills_process_on_timeout():
     processes[0].wait.assert_awaited_once()
 
 
-def test_arrange_kills_process_on_timeout():
+def test_arrange_kills_process_on_timeout(monkeypatch):
+    # See test_pack_kills_process_on_timeout: os.killpg must be patched so a
+    # mock process never reaches the real syscall.
+    monkeypatch.setattr("os.killpg", lambda pid, sig: (_ for _ in ()).throw(ProcessLookupError()), raising=False)
     processes: list = []
     client = TestClient(app)
     with patch("asyncio.create_subprocess_exec", new=_make_timeout_subprocess(processes)):
