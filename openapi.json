@@ -128,6 +128,29 @@
         }
       }
     },
+    "/api/profiles/broken": {
+      "get": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "List profiles excluded from the catalog",
+        "description": "Profiles dropped by the last catalog build, each with the reason. An unresolvable `inherits` parent here is the signal that an OrcaSlicer update renamed or removed a vendor base that a user profile was building on.\n\nMust be registered before `/api/profiles/{profile_uuid}` \u2014 Starlette matches path routes in registration order, and `{profile_uuid}` would otherwise swallow this path as a literal UUID lookup and always 404.\n\nReturns **503** while the catalog is still building.",
+        "operationId": "get_broken_profiles_api_profiles_broken_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "503": {
+            "description": "Catalog not yet ready"
+          }
+        }
+      }
+    },
     "/api/profiles/{profile_uuid}": {
       "get": {
         "tags": [
@@ -467,7 +490,7 @@
           "arrange"
         ],
         "summary": "Auto-arrange and orient objects in a 3MF (synchronous)",
-        "description": "Runs OrcaSlicer's plate-packing (`--arrange 1`) and auto-orientation (`--orient 1`) on an existing `.3mf` and returns the rearranged `.3mf` directly as `application/octet-stream`.\n\n**Blocking:** waits up to `ARRANGE_TIMEOUT_SECONDS` (default 120 s) for OrcaSlicer to finish. No job tracking \u2014 call completes synchronously.\n\n**When to use this vs `POST /api/pack`:**\n- Use `POST /api/arrange` when you already have a `.3mf` with the correct geometry and want to repack it (e.g., after hand-editing or re-importing).\n- Use `POST /api/pack` when starting from STL files that need to be combined into a 3MF first.\n\n**Settings preservation:** the input 3MF's `Metadata/project_settings.config` is passed to OrcaSlicer via `--datadir`, which means OrcaSlicer may load its own machine profiles from `/config`. The `Metadata/model_settings.config` (extruder/slot assignments) from the input 3MF is preserved in the output.\n\nAll temporary files are cleaned up after the response is sent, including the stable output copy used to serve the download.",
+        "description": "Runs OrcaSlicer's plate-packing (`--arrange 1`) and auto-orientation (`--orient 1`) on an existing `.3mf` and returns the rearranged `.3mf` directly as `application/octet-stream`.\n\n**Blocking:** waits up to `ARRANGE_TIMEOUT_SECONDS` (default 120 s) for OrcaSlicer to finish. No job tracking \u2014 call completes synchronously.\n\n**When to use this vs `POST /api/pack`:**\n- Use `POST /api/arrange` when you already have a `.3mf` with the correct geometry and want to repack it (e.g., after hand-editing or re-importing).\n- Use `POST /api/pack` when starting from STL files that need to be combined into a 3MF first.\n\n**Settings preservation:** the input 3MF's `Metadata/project_settings.config` is passed to OrcaSlicer via `--datadir`, which means OrcaSlicer may load its own machine profiles from the user presets under `/config` (symlinked into Orca's datadir \u2014 see `ORCA_DATADIR`). The `Metadata/model_settings.config` (extruder/slot assignments) from the input 3MF is preserved in the output.\n\nAll temporary files are cleaned up after the response is sent, including the stable output copy used to serve the download.",
         "operationId": "auto_arrange_3mf_api_arrange_post",
         "requestBody": {
           "content": {
@@ -516,7 +539,7 @@
           "profiles"
         ],
         "summary": "Upload a user profile JSON",
-        "description": "Upload a flat OrcaSlicer preset JSON into the user config volume at `/config/user/default/{type}/`. A catalog rebuild is triggered in the background automatically \u2014 wait ~5 s and call `GET /api/profiles` to confirm the profile appears before using it in a slice job.\n\n**Requirements for the JSON file:**\n- Must have a `.json` extension\n- Must be a *fully-flattened* preset with no `inherits` chain. If the profile relies on a system base profile, flatten it first using `flatten_profiles.py` inside the container: `docker exec laminus python /workspace/app/flatten_profiles.py --profile 'Elegoo Centauri Carbon 0.4 nozzle'`\n- `type` must be exactly `machine`, `process`, or `filament`\n\n**Profile persistence:** the uploaded file is written to a Docker volume (`/config/user/`). It survives container restarts but is not baked into the image. Re-upload after replacing the container with a clean image.\n\n**UUID stability:** user profiles receive a UUID derived from `(user, rel_path)` so the UUID changes if the file is renamed or moved.",
+        "description": "Upload a flat OrcaSlicer preset JSON into the user config volume at `/config/user/default/{type}/`. A catalog rebuild is triggered in the background automatically \u2014 wait ~5 s and call `GET /api/profiles` to confirm the profile appears before using it in a slice job.\n\n**Requirements for the JSON file:**\n- Must have a `.json` extension\n- `type` must be exactly `machine`, `process`, or `filament`\n\n**Prefer a thin preset over a flattened one.** Declare `inherits` naming the vendor base plus only the keys you are actually changing. Inheritance is resolved against the profile tree as it exists at slice time, so an OrcaSlicer update that improves the vendor base rolls straight through into your profile. A fully-flattened preset (no `inherits`) is frozen at the version it was flattened from and silently misses every later vendor fix \u2014 use it only when you want a permanent fork.\n\nIf the base is renamed or removed by a later OrcaSlicer release the profile is dropped from the catalog rather than served half-resolved; `GET /api/profiles/broken` reports it.\n\n**Profile persistence:** the uploaded file is written to a Docker volume (`/config/user/`). It survives container restarts but is not baked into the image. Re-upload after replacing the container with a clean image.\n\n**UUID stability:** user profiles receive a UUID derived from `(user, rel_path)` so the UUID changes if the file is renamed or moved.",
         "operationId": "upload_profile_api_profiles_upload_post",
         "requestBody": {
           "content": {
@@ -553,13 +576,33 @@
         }
       }
     },
+    "/api/profiles/rescan": {
+      "post": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "Rescan profiles and rebuild the catalog",
+        "description": "Re-walks the system and user profile trees, re-verifies every `inherits` chain, and rebuilds the catalog dictionary.\n\nThe catalog is normally rebuilt automatically \u2014 the cache key covers the OrcaSlicer version, the vendor profile bundles, and every file under `/config/user/`, so any preset change voids it. Use this endpoint to force the work anyway: after editing profiles in place on a bind mount, or to re-check which profiles are broken after an OrcaSlicer upgrade.\n\nReturns immediately; the rebuild runs in the background. Poll `GET /api/health` until `catalog_building` is `false`, then call `GET /api/profiles/broken` for profiles whose inheritance no longer resolves.",
+        "operationId": "rescan_profiles_api_profiles_rescan_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/health": {
       "get": {
         "tags": [
           "health"
         ],
         "summary": "Service health check",
-        "description": "Returns service readiness information. **Always call this first** \u2014 profile and slice endpoints return **503** while `catalog_loading` is `true`.\n\n**Response fields:**\n- `status` \u2014 always `\"healthy\"` when the process is running\n- `orcaslicer_installed` \u2014 whether the OrcaSlicer binary exists at `/usr/local/bin/orcaslicer`\n- `orcaslicer_version` \u2014 version string from `orcaslicer --version`, or `null` if the binary is not installed or timed out\n- `config_mounted` \u2014 whether `/config` exists (volume mount check)\n- `system_profiles_available` \u2014 whether the OrcaSlicer AppImage's profiles directory is present (required for catalog build)\n- `catalog_loaded` \u2014 `true` when the profile catalog is fully built and ready; `false` during initial startup or rebuild\n- `catalog_building` \u2014 `true` while a catalog rebuild is in progress\n- `catalog_profile_count` \u2014 `{machine: N, process: N, filament: N}` when loaded, otherwise `null`\n- `active_jobs` \u2014 number of jobs currently in `slicing` status",
+        "description": "Returns service readiness information. **Always call this first** \u2014 profile and slice endpoints return **503** while `catalog_loading` is `true`.\n\n**Response fields:**\n- `status` \u2014 always `\"healthy\"` when the process is running\n- `orcaslicer_installed` \u2014 whether the OrcaSlicer binary exists at `/usr/local/bin/orcaslicer`\n- `orcaslicer_version` \u2014 version string from `orcaslicer --version`, or `null` if the binary is not installed or timed out\n- `config_mounted` \u2014 whether `/config` exists (volume mount check)\n- `system_profiles_available` \u2014 whether the OrcaSlicer AppImage's profiles directory is present (required for catalog build)\n- `catalog_loaded` \u2014 `true` when the profile catalog is fully built and ready; `false` during initial startup or rebuild\n- `catalog_building` \u2014 `true` while a catalog rebuild is in progress\n- `catalog_profile_count` \u2014 `{machine: N, process: N, filament: N}` when loaded, otherwise `null`\n- `catalog_skipped_count` \u2014 number of profiles excluded from the catalog on the last build (unresolvable `inherits` parent, unparseable JSON, etc.) \u2014 call `GET /api/profiles/broken` for which profiles and why; `null` if not yet built\n- `active_jobs` \u2014 number of jobs currently in `slicing` status",
         "operationId": "health_check_api_health_get",
         "responses": {
           "200": {
