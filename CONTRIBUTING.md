@@ -6,6 +6,12 @@ This repo is named `orca` on disk but the service is called **Laminus**.
 
 ---
 
+## About this project
+
+Laminus (and its sibling services Themis and Ordinus) is being built as an exercise in full agent coding with human oversight: Claude Code sessions do the implementation, coordinating with each other across repos, while a human reviews and approves the consequential steps (merges, pushes, destructive changes). It's a working tool first, but also a practical testbed for prompt design, multi-agent workflows, and harnessing techniques as they're used to build it.
+
+---
+
 ## Stack
 
 | Layer | Technology |
@@ -13,7 +19,7 @@ This repo is named `orca` on disk but the service is called **Laminus**.
 | Runtime | Python 3 / FastAPI / uvicorn |
 | OrcaSlicer | AppImage downloaded at container start, extracted via `--appimage-extract` |
 | Display | Xvfb (X virtual framebuffer) — OrcaSlicer requires X11 even headless |
-| Persistence | No database — job state in memory + `/data/jobs.json`; catalog cache in `/data/catalog_cache.json` |
+| Persistence | No database — job state/history write-through to `/data/jobs.json` + `/data/job_history.json`; catalog cache in `/tmp/laminus_catalog_cache.json` (deliberately off the durable volume — it's fully rebuildable) |
 | Container | Port 5000 internal only (no host port exposed) |
 
 ---

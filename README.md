@@ -34,15 +34,20 @@ ORCA_VERSION=2.4.1   # default
 
 ## API Reference
 
-See [`openapi.yaml`](openapi.yaml) for the full OpenAPI 3.0 spec.
+See [`openapi.json`](openapi.json) for the full OpenAPI 3.0 spec (CI-regenerated, so it always matches the running code), or [`docs/laminus-api-for-agents.md`](docs/laminus-api-for-agents.md) for a walked-through guide to the full slice workflow, including profile discovery and UUID stability.
 
 ### Slice a model
+
+Profiles are referenced by UUID, resolved via `GET /api/profiles` (or `machine_uuid` directly if you already have it — see the agent doc above):
 
 ```bash
 # Start job
 curl -X POST http://localhost:5000/api/slice/start \
   -F "file=@model.stl" \
-  -F 'config={"printer":"default/machine/Creality Ender-3 0.4 nozzle.json","process":"default/process/0.16mm Optimal @Creality Ender3 0.4.json","filaments":{"1":"default/filament/Creality Generic PLA.json"}}'
+  -F "machine_uuid=<uuid-from-catalog>" \
+  -F "process_uuid=<uuid-from-catalog>" \
+  -F 'filament_uuids=["<uuid-from-catalog>"]' \
+  -F "plate=1"
 
 # Poll status
 curl http://localhost:5000/api/slice/status/<job_id>
@@ -72,7 +77,9 @@ curl http://localhost:5000/api/profiles
 
 ## Loading Profiles
 
-OrcaSlicer's built-in profiles use inheritance and cannot be used directly. Use `flatten_profiles.py` inside the container to resolve the inheritance chain and write a standalone user preset:
+Prefer a thin user preset: drop a JSON file into `./config/user/default/{machine,process,filament}/` with `"inherits": "<vendor profile name>"` plus only the keys you're overriding. Laminus resolves the inheritance chain itself at catalog-build and slice time, so this rolls forward with vendor OrcaSlicer updates automatically — no reflattening needed.
+
+Use `flatten_profiles.py` only as a last resort, for a permanent fork (the vendor profile is being removed, or you need to diverge for good). A flattened profile is frozen at the OrcaSlicer version it was flattened from and won't pick up later vendor fixes:
 
 ```bash
 docker exec laminus python3 /workspace/flatten_profiles.py \
@@ -99,7 +106,7 @@ curl http://localhost:5000/api/health
 
 ## Notes
 
-- Slicing jobs run asynchronously; job state is in-memory and does not survive container restarts.
+- Slicing jobs run asynchronously; job status/history is persisted to the `/data` volume, but any job still `pending`/`slicing` when the container stops comes back as `failed` on restart (its temp files are gone).
 - The arrange endpoint is synchronous with a 35-second timeout.
 - OrcaSlicer requires a virtual display; the container uses `xvfb-run` automatically.
 - `shm_size: 1gb` in `docker-compose.yml` is required for OrcaSlicer's renderer.

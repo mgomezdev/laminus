@@ -68,7 +68,10 @@ Because resolution happens against the profile tree *as it currently is*, a thin
 The catalog is cached to `/tmp/laminus_catalog_cache.json` (deliberately not the durable `/data` volume — it's fully rebuildable), keyed by `ORCA_VERSION` + a signature of the top-level vendor bundle files (`<Vendor>.json`: name, version, mtime, size — cheap, and catches a bind-mounted OrcaSlicer install self-updating a vendor bundle independently of `ORCA_VERSION`) + every file under `/config/user/`. Any preset change on either side voids the cache and forces re-verification. `POST /api/profiles/rescan` forces a rebuild manually (bypassing the cache check), e.g. after editing profiles directly on a bind mount. `GET /api/profiles/broken` lists profiles dropped from the catalog because their `inherits` chain didn't resolve — the signal an OrcaSlicer update renamed or removed a vendor base a user profile depended on.
 
 ### Job state
-`jobs` is a plain in-memory dict — all state is lost on container restart. There is no database or persistence layer.
+`jobs` is an in-memory dict, but it's write-through: `_save_jobs()` snapshots serialisable job metadata to `/data/jobs.json` on every change, and `_load_jobs_on_startup()` restores it on boot — any job that was `pending`/`slicing` when the process stopped is marked `failed` on reload (its disk files are gone, so it comes back as a status-only stub). `job_history` is a separate, longer-lived `OrderedDict` backed by `/data/job_history.json`, capped at `JOB_HISTORY_LIMIT` (default 200); it survives a job's eviction from `jobs` (by download or the TTL sweep) so `GET /api/jobs` can still show what happened. Neither file is a database — both are just JSON dumps on the durable `/data` volume.
+
+### API reference for agents
+`docs/laminus-api-for-agents.md` documents the full request/response shape for every endpoint (canonical slice workflow, UUID stability, error shapes) — read it before calling the API rather than inferring the contract from this file or from `openapi.json` directly.
 
 ### OrcaSlicer system profiles
 Prefer a thin user preset: `"inherits": "<vendor profile name>"` plus only the keys you're overriding. laminus resolves the chain itself at catalog-build and slice time, so this rolls forward with vendor updates automatically.

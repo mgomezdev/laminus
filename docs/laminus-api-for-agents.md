@@ -2,7 +2,7 @@
 
 Base URL: `http://localhost:5000` (adjust to wherever the container is exposed)
 
-Full OpenAPI 3.0 spec: [`docs/laminus-openapi.yaml`](laminus-openapi.yaml)
+Full OpenAPI 3.0 spec: [`openapi.json`](../openapi.json) (CI-regenerated, always matches the running code)
 Live Swagger UI (container must be running): `http://localhost:5000/docs`
 Live OpenAPI JSON: `http://localhost:5000/openapi.json`
 
@@ -121,16 +121,30 @@ Content-Type: multipart/form-data
 | Field              | Type    | Required | Description                                              |
 |--------------------|---------|----------|----------------------------------------------------------|
 | `file`             | file    | yes      | `.3mf` or `.stl` model                                  |
-| `manufacturer`     | string  | yes      | e.g. `"Bambu Lab"`                                       |
-| `model`            | string  | yes      | e.g. `"P1S"`                                             |
-| `nozzle`           | string  | yes      | e.g. `"0.4"`                                             |
+| `machine_uuid`     | string  | one of*  | UUID of a `machine` profile — **preferred**, stable across catalog rebuilds |
+| `manufacturer`     | string  | one of*  | e.g. `"Bambu Lab"` — fallback when you don't have `machine_uuid` |
+| `model`            | string  | one of*  | e.g. `"P1S"` — fallback, provide with `manufacturer` + `nozzle` |
+| `nozzle`           | string  | one of*  | e.g. `"0.4"` — fallback, provide with `manufacturer` + `model` |
 | `process_uuid`     | string  | yes      | UUID of a `process` profile                              |
 | `filament_uuids`   | string  | yes      | JSON array of filament UUIDs, e.g. `'["uuid1"]'`         |
 | `plate`            | int     | yes      | Build plate number (1-based)                             |
 | `export_3mf`       | string  | no       | Output 3MF filename; omit to get GCode only              |
 | `geometry_only_retry` | bool | no      | Default `true` — retry stripping model_settings on fail  |
+| `extra_config`     | string  | no       | JSON object merged into project settings after profile resolution |
 
-**curl example:**
+\* Provide `machine_uuid` **or** all three of `manufacturer` + `model` + `nozzle`.
+
+**curl example (preferred — `machine_uuid`):**
+```bash
+curl -X POST http://localhost:5000/api/slice/start \
+  -F "file=@model.3mf" \
+  -F "machine_uuid=<uuid-from-catalog>" \
+  -F 'process_uuid=<uuid-from-catalog>' \
+  -F 'filament_uuids=["<uuid-from-catalog>"]' \
+  -F "plate=1"
+```
+
+**curl example (fallback — manufacturer/model/nozzle):**
 ```bash
 curl -X POST http://localhost:5000/api/slice/start \
   -F "file=@model.3mf" \
