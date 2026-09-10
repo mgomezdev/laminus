@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-ORCA_VERSION="${ORCA_VERSION:-2.4.1}"
+ORCA_VERSION="${ORCA_VERSION:-2.4.2}"
 ORCA_INSTALL_DIR="/opt/orcaslicer"
 ORCA_VERSION_FILE="${ORCA_INSTALL_DIR}/.version"
 

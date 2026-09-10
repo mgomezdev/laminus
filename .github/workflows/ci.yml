@@ -1,0 +1,192 @@
+name: ci
+
+# Laminus already had solid unit tests, but nothing ran them on a pull request --
+# the workflow only triggered on push to main, after the merge it should have
+# gated. This adds the pull-request trigger, and the cross-service check that
+# matters for the one repo Themis is tightly coupled to.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  spec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - run: pip install -r requirements.txt
+      - run: python scripts/export_openapi.py
+      - name: Fail if spec is stale
+        run: git diff --exit-code openapi.json
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # xvfb-run must exist on PATH even with the fake slicer, because every
+      # OrcaSlicer invocation is wrapped in it unconditionally.
+      - name: Install system dependencies
+        run: sudo apt-get install -y xvfb
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt pytest pytest-asyncio httpx
+
+      # mock/orca_cli.py stands in for the real 200 MB AppImage so the suite
+      # never downloads it. tests/test_mock_contract.py separately asserts the
+      # HTTP mock and the real app satisfy identical contracts -- which is what
+      # lets Themis gate against mock-laminus instead of real OrcaSlicer.
+      - name: Install mock OrcaSlicer
+        run: |
+          chmod +x mock/orca_cli.py
+          sudo ln -sf "$(pwd)/mock/orca_cli.py" /usr/local/bin/orcaslicer
+
+      - name: Run tests
+        env:
+          SYSTEM_PROFILES_DIR: ${{ github.workspace }}/tests/fixtures/profiles
+          USER_CONFIG_DIR: /tmp/laminus-test-user
+          CONFIG_DIR: /tmp/laminus-test-config
+          DATA_DIR: /tmp/laminus-test-data
+        run: pytest tests/ -v -ra
+
+  # Build the mock image this change produces and hand it to the cross-service
+  # suite. Themis's e2e runs entirely against this mock, so a change that breaks
+  # it breaks Themis -- that has to surface on the Laminus pull request, not
+  # later on an unrelated Themis one.
+  mock-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build mock image
+        uses: docker/build-push-action@v6
+        with:
+          context: mock
+          push: false
+          load: true
+          tags: laminus-mock:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Export image
+        run: docker save laminus-mock:ci -o /tmp/laminus-mock-ci.tar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: laminus-mock-ci-image
+          path: /tmp/laminus-mock-ci.tar
+          retention-days: 1
+
+  # Ordinus is not started: it never talks to Laminus.
+  e2e-core:
+    needs: [mock-image]
+    uses: mgomezdev/concordia/.github/workflows/e2e.yml@main
+    with:
+      profile: core
+      image_artifact: laminus-mock-ci-image
+      mock_laminus_image: laminus-mock:ci
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  publish:
+    needs: [spec, test, mock-image, e2e-core]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/mgomezdev/laminus
+            ninjabuffalo/laminus
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=sha-
+
+      - name: Build and push app image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Extract metadata (mock)
+        id: meta-mock
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/mgomezdev/laminus-mock
+            ninjabuffalo/laminus-mock
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=sha-
+
+      - name: Build and push mock image
+        uses: docker/build-push-action@v6
+        with:
+          context: mock
+          push: true
+          tags: ${{ steps.meta-mock.outputs.tags }}
+          labels: ${{ steps.meta-mock.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Attach spec to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: openapi.json
