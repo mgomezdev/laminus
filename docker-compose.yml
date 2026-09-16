@@ -21,7 +21,7 @@ services:
     environment:
       - TZ=Etc/UTC
       - PYTHONUNBUFFERED=1
-      - ORCA_VERSION=${ORCA_VERSION:-2.4.1}
+      - ORCA_VERSION=${ORCA_VERSION:-2.4.2}
     shm_size: "1gb"
     restart: unless-stopped
 
