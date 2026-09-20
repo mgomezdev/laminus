@@ -20,7 +20,7 @@ To upgrade OrcaSlicer without rebuilding the image, set `ORCA_VERSION` to the ne
 
 ```bash
 # .env or shell export
-ORCA_VERSION=2.4.1   # default
+ORCA_VERSION=2.4.2   # default
 ```
 
 ## Volumes

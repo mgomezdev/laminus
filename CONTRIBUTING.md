@@ -254,7 +254,7 @@ POST /api/pack
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ORCA_VERSION` | `2.4.1` | OrcaSlicer AppImage version to download |
+| `ORCA_VERSION` | `2.4.2` | OrcaSlicer AppImage version to download |
 | `SYSTEM_PROFILES_DIR` | `/opt/orcaslicer/resources/profiles` | System OrcaSlicer profiles |
 | `USER_CONFIG_DIR` | `/config/user` | User OrcaSlicer profiles |
 | `SLICE_TIMEOUT_SECONDS` | `600` | SIGKILL timeout for slice subprocess |
