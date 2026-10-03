@@ -39,6 +39,8 @@ MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "4"))
 THUMBNAIL_TIMEOUT = 120
 
 SYSTEM_PROFILES_DIR = os.environ.get("SYSTEM_PROFILES_DIR", "/opt/orcaslicer/resources/profiles")
+# entrypoint.sh writes the extracted AppImage's version to <install dir>/.version
+ORCA_VERSION_FILE = os.environ.get("ORCA_VERSION_FILE", "/opt/orcaslicer/.version")
 SLICE_TIMEOUT = int(os.environ.get("SLICE_TIMEOUT_SECONDS", "600"))
 ARRANGE_TIMEOUT = int(os.environ.get("ARRANGE_TIMEOUT_SECONDS", "120"))
 JOB_LOG_MAX_LINES = int(os.environ.get("JOB_LOG_MAX_LINES", "2000"))
@@ -1904,6 +1906,19 @@ async def rescan_profiles():
     }
 
 
+def _orca_version() -> Optional[str]:
+    """Installed OrcaSlicer release (e.g. "2.4.2"): the version entrypoint.sh actually
+    extracted, falling back to the ORCA_VERSION env var; None if neither is known."""
+    try:
+        with open(ORCA_VERSION_FILE, encoding="utf-8") as f:
+            v = f.read().strip()
+        if v:
+            return v
+    except OSError:
+        pass
+    return os.environ.get("ORCA_VERSION") or None
+
+
 @app.get(
     "/api/health",
     tags=["health"],
@@ -1917,6 +1932,9 @@ async def rescan_profiles():
         "`/usr/local/bin/orcaslicer`\n"
         "- `orcaslicer_version` — version string from `orcaslicer --version`, or `null` "
         "if the binary is not installed or timed out\n"
+        "- `orca_version` — installed OrcaSlicer release (e.g. `\"2.4.2\"`), read from the "
+        "install's `.version` marker, falling back to the `ORCA_VERSION` env var; `null` if "
+        "neither is available\n"
         "- `config_mounted` — whether `/config` exists (volume mount check)\n"
         "- `system_profiles_available` — whether the OrcaSlicer AppImage's profiles "
         "directory is present (required for catalog build)\n"
@@ -1937,6 +1955,7 @@ async def health_check():
         "status": "healthy",
         "orcaslicer_installed": os.path.exists("/usr/local/bin/orcaslicer"),
         "orcaslicer_version": _orcaslicer_version,
+        "orca_version": _orca_version(),
         "config_mounted": os.path.exists(CONFIG_DIR),
         "system_profiles_available": os.path.isdir(SYSTEM_PROFILES_DIR),
         "catalog_loaded": catalog is not None and catalog.is_built,

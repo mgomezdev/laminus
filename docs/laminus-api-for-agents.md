@@ -42,6 +42,7 @@ builds in the background after container startup (~10–60 seconds depending on 
   "status": "healthy",
   "orcaslicer_installed": true,
   "orcaslicer_version": "OrcaSlicer-2.2.0",
+  "orca_version": "2.2.0",
   "config_mounted": true,
   "system_profiles_available": true,
   "catalog_loaded": true,
