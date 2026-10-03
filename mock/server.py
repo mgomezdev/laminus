@@ -158,6 +158,7 @@ async def health():
         "status": "healthy",
         "orcaslicer_installed": True,
         "orcaslicer_version": "mock-2.4.2",
+        "orca_version": "2.4.2",
         "config_mounted": True,
         "system_profiles_available": True,
         "catalog_loaded": True,
