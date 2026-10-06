@@ -77,7 +77,7 @@ def client(request):
 # Field sets — the contract
 # ---------------------------------------------------------------------------
 
-HEALTH_FIELDS = {"status", "catalog_loaded", "catalog_building", "active_jobs"}
+HEALTH_FIELDS = {"status", "orca_version", "catalog_loaded", "catalog_building", "active_jobs"}
 MACHINE_FIELDS = {"uuid", "name", "manufacturer", "model", "nozzle", "bed_size_x", "bed_size_y", "extruder_count"}
 PROCESS_FIELDS = {"uuid", "name", "layer_height", "compatible_printers"}
 FILAMENT_FIELDS = {"uuid", "name", "filament_type", "compatible_printers"}
