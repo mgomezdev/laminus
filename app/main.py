@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSO
 from fastapi.middleware.cors import CORSMiddleware
 from app.profile_catalog import ProfileCatalog
 from app.project_config_builder import build_project_settings, embed_project_settings
+from app import subset_3mf as _subset
 from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf, inject_stls_into_3mf as _inject_stls_into_3mf, strip_application_version as _strip_app_version
 
 logging.basicConfig(level=logging.INFO)
@@ -1807,6 +1808,158 @@ async def auto_arrange_3mf(
             background_tasks.add_task(cleanup_directory, job_dir)
             logger.exception("System exception during arrange operation")
             raise HTTPException(status_code=500, detail=f"System error during arrangement: {str(e)}")
+
+
+@app.post(
+    "/api/3mf/objects",
+    tags=["arrange"],
+    summary="List the objects in an OrcaSlicer/Bambu .3mf",
+    description=(
+        "Returns each object's `id`, `name`, extruder, per-object override keys, part "
+        "subtypes (e.g. `modifier_part`) and current instance count. Use the names/ids in "
+        "`POST /api/arrange/subset`. Names are not unique in a project; ids are."
+    ),
+    responses={400: {"description": "Not a readable .3mf"}},
+)
+async def list_3mf_objects(file: UploadFile = File(...)):
+    job_dir = os.path.join(ARRANGE_DIR, f"objs_{uuid.uuid4()}")
+    os.makedirs(job_dir, exist_ok=True)
+    try:
+        path = os.path.join(job_dir, "in.3mf")
+        with open(path, "wb") as buf:
+            await asyncio.to_thread(shutil.copyfileobj, file.file, buf)
+        try:
+            return {"objects": await asyncio.to_thread(_subset.list_objects, path)}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Cannot read 3MF: {e}")
+    finally:
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+
+@app.post(
+    "/api/arrange/subset",
+    tags=["arrange"],
+    summary="Keep only chosen objects (x quantity) from a .3mf and arrange them on the fewest plates",
+    description=(
+        "Takes a `.3mf`, a `selection` (JSON list of `{\"name\"|\"id\": ..., \"qty\": n}`) and "
+        "optionally a `machine_uuid`, and returns a `.3mf` containing only those objects, "
+        "`qty` copies each, arranged by OrcaSlicer across as many plates as needed.\n\n"
+        "**Preservation:** the returned file is the source project with only the chosen "
+        "objects kept; meshes and `model_settings.config` are copied byte-for-byte, so "
+        "per-object/per-part overrides, modifier parts, height-range modifiers and painted "
+        "data (colour, supports, seam, fuzzy skin) survive. OrcaSlicer is used only to "
+        "compute the layout (plate membership + instance transforms), which is written "
+        "into that file; OrcaSlicer's own re-export is not returned because it splits "
+        "cross-plate instances into clone objects that lose name/overrides/extruder.\n\n"
+        "**Printer:** when `machine_uuid` is given, the bed/printer keys of the project "
+        "are replaced from that machine preset and the embedded process preset's "
+        "printer-compatibility list is cleared. Process/filament settings are otherwise "
+        "left as in the source project.\n\n"
+        "**Plates:** OrcaSlicer's multi-plate arrange is used as-is; response header "
+        "`X-Plate-Count` reports the result. Selector names matching several objects are "
+        "rejected (422) — use `id`.\n\n"
+        "Blocking; limited by `ARRANGE_TIMEOUT_SECONDS`."
+    ),
+    responses={
+        400: {"description": "Unreadable 3MF or Orca arrange failed"},
+        408: {"description": "Arrange timed out"},
+        422: {"description": "Bad selection, unknown/ambiguous object, unknown machine_uuid"},
+        503: {"description": "machine_uuid given but catalog not ready"},
+    },
+)
+async def arrange_subset(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    selection: str = Form(..., description='JSON: [{"name": "Lid", "qty": 4}, {"id": 12, "qty": 1}]'),
+    machine_uuid: Optional[str] = Form(None),
+    allow_rotations: bool = Form(False),
+):
+    try:
+        sel = json.loads(selection)
+        if not isinstance(sel, list) or not all(isinstance(x, dict) for x in sel):
+            raise ValueError
+    except ValueError:
+        raise HTTPException(status_code=422, detail="selection must be a JSON list of objects.")
+    try:
+        safe_name = _safe_filename(file.filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not safe_name.lower().endswith(".3mf"):
+        raise HTTPException(status_code=400, detail="Only .3mf files are supported.")
+
+    printer_cfg = None
+    if machine_uuid:
+        if catalog is None:
+            raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
+        entry = catalog.get_by_uuid(machine_uuid)
+        if entry is None or entry.get("type") != "machine":
+            raise HTTPException(status_code=422, detail=f"Machine UUID '{machine_uuid}' not found.")
+        printer_cfg = await asyncio.to_thread(catalog.resolved, entry["uuid"])
+
+    job_id = str(uuid.uuid4())
+    with _track_inflight_arrange(job_id):
+        job_dir = os.path.join(ARRANGE_DIR, f"subset_{job_id}")
+        os.makedirs(job_dir, exist_ok=True)
+        background_tasks.add_task(cleanup_directory, job_dir)
+        in_file = os.path.join(job_dir, "in.3mf")
+        sub_file = os.path.join(job_dir, "subset.3mf")
+        oracle_in = os.path.join(job_dir, "oracle_in.3mf")
+        out_file = os.path.join(job_dir, "arranged.3mf")
+        final_file = os.path.join(job_dir, "final.3mf")
+        with open(in_file, "wb") as buf:
+            await asyncio.to_thread(shutil.copyfileobj, file.file, buf)
+
+        def _build():
+            want = _subset.resolve_selection(_subset.list_objects(in_file), sel)
+            summary = _subset.build_subset(in_file, sub_file, want, printer_cfg=printer_cfg)
+            _subset.expand_instances(sub_file, oracle_in)
+            return summary
+
+        try:
+            summary = await asyncio.to_thread(_build)
+        except _subset.SubsetError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Cannot process 3MF: {e}")
+
+        cmd = ["xvfb-run", "-a", "--server-args=-screen 0 1024x768x24", "orcaslicer",
+               "--datadir", ORCA_DATADIR, "--arrange", "1"]
+        if allow_rotations:
+            cmd.append("--allow-rotations")
+        cmd += ["--export-3mf", out_file, oracle_in]
+        logger.info("Running subset arrange: %s", " ".join(cmd))
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True)
+            try:
+                stdout, _ = await asyncio.wait_for(process.communicate(), timeout=float(ARRANGE_TIMEOUT))
+            except asyncio.TimeoutError:
+                await _kill_process_group(process)
+                raise HTTPException(status_code=408, detail=f"Arrange timed out after {ARRANGE_TIMEOUT} seconds.")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("System error during subset arrange")
+            raise HTTPException(status_code=500, detail=f"System error: {e}")
+        if process.returncode != 0 or not os.path.exists(out_file):
+            logger.error("Subset arrange failed (exit %s):\n%s", process.returncode,
+                         stdout.decode("utf-8", errors="replace") if stdout else "(no output)")
+            raise HTTPException(status_code=400, detail=f"Slicer arrange failed (exit {process.returncode}). Check server logs.")
+
+        # Orca's own export of the arranged file is lossy (clones objects, drops overrides),
+        # so only its layout is used; it is transplanted into the byte-intact subset.
+        try:
+            plates = await asyncio.to_thread(_subset.transplant_layout, sub_file, out_file, final_file)
+        except Exception as e:
+            logger.exception("Layout transplant failed")
+            raise HTTPException(status_code=500, detail=f"Could not apply arranged layout: {e}")
+        stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_subset.3mf")
+        shutil.copy2(final_file, stable_out)
+        background_tasks.add_task(cleanup_file, stable_out)
+        headers = {"X-Instance-Count": str(summary["instances"]), "X-Plate-Count": str(plates)}
+        return FileResponse(path=stable_out, filename=f"subset_{safe_name}",
+                            media_type="application/octet-stream", headers=headers)
 
 
 @app.post(

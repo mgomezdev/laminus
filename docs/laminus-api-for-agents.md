@@ -275,6 +275,32 @@ curl -X POST http://localhost:5000/api/arrange \
 
 ---
 
+## Arrange a subset (pick objects × qty from a 3MF)
+
+```
+POST /api/3mf/objects          # list objects: id, name, extruder, override keys, parts, instances
+POST /api/arrange/subset       # multipart/form-data
+```
+
+| Field             | Type   | Required | Description |
+|-------------------|--------|----------|-------------|
+| `file`            | file   | yes      | Orca/Bambu `.3mf` |
+| `selection`       | string | yes      | JSON `[{"name":"Lid","qty":4},{"id":12,"qty":1}]`. A name shared by several objects → 422, use `id` |
+| `machine_uuid`    | string | no       | Retarget bed/printer keys to this machine preset (catalog UUID) |
+| `allow_rotations` | bool   | no       | Pass `--allow-rotations` to the arranger |
+
+Returns a `.3mf` with only the selected objects (qty copies each, as instances) arranged over as many plates as OrcaSlicer needs. Headers: `X-Plate-Count`, `X-Instance-Count`. Per-object/part overrides, modifier parts, height ranges and painted data are preserved; process/filament settings are *not* remapped to the new printer. See `docs/experiments/subset-arrange.md`.
+
+```bash
+curl -X POST http://localhost:5000/api/arrange/subset \
+  -F "file=@project.3mf" \
+  -F 'selection=[{"name":"Lid","qty":6},{"id":12,"qty":2}]' \
+  -F "machine_uuid=8aaac37c-14a7-5a53-b9f7-3dd1df210919" \
+  -o subset.3mf -D -
+```
+
+---
+
 ## Upload a user profile
 
 ```

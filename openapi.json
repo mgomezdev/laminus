@@ -533,6 +533,91 @@
         }
       }
     },
+    "/api/3mf/objects": {
+      "post": {
+        "tags": [
+          "arrange"
+        ],
+        "summary": "List the objects in an OrcaSlicer/Bambu .3mf",
+        "description": "Returns each object's `id`, `name`, extruder, per-object override keys, part subtypes (e.g. `modifier_part`) and current instance count. Use the names/ids in `POST /api/arrange/subset`. Names are not unique in a project; ids are.",
+        "operationId": "list_3mf_objects_api_3mf_objects_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_list_3mf_objects_api_3mf_objects_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Not a readable .3mf"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/arrange/subset": {
+      "post": {
+        "tags": [
+          "arrange"
+        ],
+        "summary": "Keep only chosen objects (x quantity) from a .3mf and arrange them on the fewest plates",
+        "description": "Takes a `.3mf`, a `selection` (JSON list of `{\"name\"|\"id\": ..., \"qty\": n}`) and optionally a `machine_uuid`, and returns a `.3mf` containing only those objects, `qty` copies each, arranged by OrcaSlicer across as many plates as needed.\n\n**Preservation:** the returned file is the source project with only the chosen objects kept; meshes and `model_settings.config` are copied byte-for-byte, so per-object/per-part overrides, modifier parts, height-range modifiers and painted data (colour, supports, seam, fuzzy skin) survive. OrcaSlicer is used only to compute the layout (plate membership + instance transforms), which is written into that file; OrcaSlicer's own re-export is not returned because it splits cross-plate instances into clone objects that lose name/overrides/extruder.\n\n**Printer:** when `machine_uuid` is given, the bed/printer keys of the project are replaced from that machine preset and the embedded process preset's printer-compatibility list is cleared. Process/filament settings are otherwise left as in the source project.\n\n**Plates:** OrcaSlicer's multi-plate arrange is used as-is; response header `X-Plate-Count` reports the result. Selector names matching several objects are rejected (422) \u2014 use `id`.\n\nBlocking; limited by `ARRANGE_TIMEOUT_SECONDS`.",
+        "operationId": "arrange_subset_api_arrange_subset_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_arrange_subset_api_arrange_subset_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Unreadable 3MF or Orca arrange failed"
+          },
+          "408": {
+            "description": "Arrange timed out"
+          },
+          "422": {
+            "description": "Bad selection, unknown/ambiguous object, unknown machine_uuid"
+          },
+          "503": {
+            "description": "machine_uuid given but catalog not ready"
+          }
+        }
+      }
+    },
     "/api/profiles/upload": {
       "post": {
         "tags": [
@@ -722,6 +807,42 @@
   },
   "components": {
     "schemas": {
+      "Body_arrange_subset_api_arrange_subset_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "selection": {
+            "type": "string",
+            "title": "Selection",
+            "description": "JSON: [{\"name\": \"Lid\", \"qty\": 4}, {\"id\": 12, \"qty\": 1}]"
+          },
+          "machine_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Machine Uuid"
+          },
+          "allow_rotations": {
+            "type": "boolean",
+            "title": "Allow Rotations",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "file",
+          "selection"
+        ],
+        "title": "Body_arrange_subset_api_arrange_subset_post"
+      },
       "Body_auto_arrange_3mf_api_arrange_post": {
         "properties": {
           "file": {
@@ -745,6 +866,20 @@
           "file"
         ],
         "title": "Body_auto_arrange_3mf_api_arrange_post"
+      },
+      "Body_list_3mf_objects_api_3mf_objects_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_list_3mf_objects_api_3mf_objects_post"
       },
       "Body_pack_stls_api_pack_post": {
         "properties": {
