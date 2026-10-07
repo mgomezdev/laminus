@@ -275,6 +275,84 @@ curl -X POST http://localhost:5000/api/arrange \
 
 ---
 
+## List objects with plate names and previews
+
+```
+POST /api/3mf/previews         # multipart/form-data
+```
+
+| Field    | Type | Required | Description |
+|----------|------|----------|-------------|
+| `file`   | file | yes      | Orca/Bambu `.3mf` |
+| `size`   | int  | no       | Preview edge in px, 32-1024 (default 256) |
+| `images` | bool | no       | `false` = names/plates only, no rendering (fast) |
+
+```json
+{"objects": [{
+  "id": 8, "name": "insert", "extruder": "1",
+  "plates": [{"plate": 3, "name": "regular pot", "instances": 1}],
+  "preview": {"mime": "image/png", "width": 256, "height": 256, "data_base64": "iVBORw0..."}
+}]}
+```
+
+`plates[].name` is the plate's name in the project, or `Plate N` when unnamed; an object on several plates lists each. `preview` renders **the object itself** (3/4 view, transparent background, tinted with its filament colour, modifier parts omitted), or is `null` if nothing printable. Use `id` in `/api/arrange/subset` / `/api/arrange/merge` selections. Rendering is CPU-bound (~0.5 s/object; a 21-object project ~12 s) - use `images=false` when only names are needed. Requires `numpy` (in `requirements.txt`).
+
+---
+
+## Arrange a subset (pick objects × qty from a 3MF)
+
+```
+POST /api/3mf/objects          # list objects: id, name, extruder, override keys, parts, instances
+POST /api/arrange/subset       # multipart/form-data
+```
+
+| Field             | Type   | Required | Description |
+|-------------------|--------|----------|-------------|
+| `file`            | file   | yes      | Orca/Bambu `.3mf` |
+| `selection`       | string | yes      | JSON `[{"name":"Lid","qty":4},{"id":12,"qty":1}]`. A name shared by several objects → 422, use `id` |
+| `machine_uuid`    | string | no       | Retarget bed/printer keys to this machine preset (catalog UUID) |
+| `allow_rotations` | bool   | no       | Pass `--allow-rotations` to the arranger |
+
+Returns a `.3mf` with only the selected objects (qty copies each, as instances) arranged over as many plates as OrcaSlicer needs. Headers: `X-Plate-Count`, `X-Instance-Count`, `X-Warnings` (objects not resting on the bed; empty when fine). Per-object/part overrides, modifier parts, height ranges and painted data are preserved; process/filament settings are *not* remapped to the new printer. See `docs/experiments/subset-arrange.md`.
+
+```bash
+curl -X POST http://localhost:5000/api/arrange/subset \
+  -F "file=@project.3mf" \
+  -F 'selection=[{"name":"Lid","qty":6},{"id":12,"qty":2}]' \
+  -F "machine_uuid=8aaac37c-14a7-5a53-b9f7-3dd1df210919" \
+  -o subset.3mf -D -
+```
+
+---
+
+## Merge selections from several 3MFs into one
+
+```
+POST /api/arrange/merge        # multipart/form-data, repeated `files` parts
+```
+
+| Field             | Type   | Required | Description |
+|-------------------|--------|----------|-------------|
+| `files`           | file[] | yes      | Two or more `.3mf`. **The first upload is the base**: its process/filament/printer settings, thumbnails and metadata are used for the whole result |
+| `selection`       | string | yes      | JSON list. Each entry names its source with `file` (uploaded filename, or 0-based upload index) plus `id` / `name` / `plate` and `qty` |
+| `machine_uuid`    | string | no       | Retarget bed/printer keys (as in `/api/arrange/subset`) |
+| `allow_rotations` | bool   | no       | Pass `--allow-rotations` to the arranger |
+
+`{"plate": N, "qty": q}` = everything on source plate N (each object x its count there x q); it also works in `/api/arrange/subset`. Entries for the same object accumulate.
+
+Response: one `.3mf`. Headers `X-Plate-Count`, `X-Instance-Count`, and `X-Merge-Warnings` (non-empty when a non-base source used a different process/filament preset, has painted data with a different filament count, or an object ends up not resting on the bed - floating/sunk by more than 0.5 mm). Errors: 422 (bad selection / unknown file / base not selected / non-base object uses a filament slot the base lacks), 400, 408, 503.
+
+```bash
+curl -X POST http://localhost:5000/api/arrange/merge   -F "files=@Hex-Moss-Pole.3mf"   -F "files=@cloud pots.3mf"   -F 'selection=[
+        {"file":"Hex-Moss-Pole.3mf","plate":1,"qty":2},
+        {"file":"Hex-Moss-Pole.3mf","plate":6},
+        {"file":"Hex-Moss-Pole.3mf","plate":7},
+        {"file":"cloud pots.3mf","plate":3,"qty":2},
+        {"file":"cloud pots.3mf","id":8,"qty":1}]'   -F "machine_uuid=0f0a771f-0a29-5077-8571-e1fee605f432"   -o merged.3mf -D -
+```
+
+---
+
 ## Upload a user profile
 
 ```
