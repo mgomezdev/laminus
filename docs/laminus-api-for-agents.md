@@ -275,6 +275,30 @@ curl -X POST http://localhost:5000/api/arrange \
 
 ---
 
+## List objects with plate names and previews
+
+```
+POST /api/3mf/previews         # multipart/form-data
+```
+
+| Field    | Type | Required | Description |
+|----------|------|----------|-------------|
+| `file`   | file | yes      | Orca/Bambu `.3mf` |
+| `size`   | int  | no       | Preview edge in px, 32-1024 (default 256) |
+| `images` | bool | no       | `false` = names/plates only, no rendering (fast) |
+
+```json
+{"objects": [{
+  "id": 8, "name": "insert", "extruder": "1",
+  "plates": [{"plate": 3, "name": "regular pot", "instances": 1}],
+  "preview": {"mime": "image/png", "width": 256, "height": 256, "data_base64": "iVBORw0..."}
+}]}
+```
+
+`plates[].name` is the plate's name in the project, or `Plate N` when unnamed; an object on several plates lists each. `preview` renders **the object itself** (3/4 view, transparent background, tinted with its filament colour, modifier parts omitted), or is `null` if nothing printable. Use `id` in `/api/arrange/subset` / `/api/arrange/merge` selections. Rendering is CPU-bound (~0.5 s/object; a 21-object project ~12 s) - use `images=false` when only names are needed. Requires `numpy` (in `requirements.txt`).
+
+---
+
 ## Arrange a subset (pick objects × qty from a 3MF)
 
 ```

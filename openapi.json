@@ -576,6 +576,42 @@
         }
       }
     },
+    "/api/3mf/previews": {
+      "post": {
+        "tags": [
+          "arrange"
+        ],
+        "summary": "List a .3mf's objects with plate names and a preview image of each object",
+        "description": "For each object: `id`, `name`, `extruder`, `plates` (`[{plate, name, instances}]` - `name` is the plate's name in the project, or `Plate N` when unnamed) and `preview`.\n\n`preview` is a rendering of **the object itself** (not the plate): a 3/4-view PNG, transparent background, tinted with the object's filament colour, modifier/negative parts omitted; `{mime, width, height, data_base64}`, or `null` when the object has nothing printable. Use the `id`s with `/api/arrange/subset` or `/api/arrange/merge`.\n\n`size` is the square image edge in px (32-1024, default 256). Set `images=false` for names/plates only (fast). Rendering is CPU-bound: roughly 0.5 s per object for typical models, so a 20-object project takes ~10 s.",
+        "operationId": "preview_3mf_objects_api_3mf_previews_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_preview_3mf_objects_api_3mf_previews_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Not a readable .3mf"
+          },
+          "422": {
+            "description": "size out of range"
+          }
+        }
+      }
+    },
     "/api/arrange/subset": {
       "post": {
         "tags": [
@@ -1061,6 +1097,30 @@
           "files"
         ],
         "title": "Body_pack_stls_api_pack_post"
+      },
+      "Body_preview_3mf_objects_api_3mf_previews_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "size": {
+            "type": "integer",
+            "title": "Size",
+            "default": 256
+          },
+          "images": {
+            "type": "boolean",
+            "title": "Images",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_preview_3mf_objects_api_3mf_previews_post"
       },
       "Body_slice_prepared_api_slice_prepared_post": {
         "properties": {

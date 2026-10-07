@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSO
 from fastapi.middleware.cors import CORSMiddleware
 from app.profile_catalog import ProfileCatalog
 from app.project_config_builder import build_project_settings, embed_project_settings
+from app import preview_3mf as _preview
 from app import subset_3mf as _subset
 from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf, inject_stls_into_3mf as _inject_stls_into_3mf, strip_application_version as _strip_app_version
 
@@ -1873,6 +1874,48 @@ async def _oracle_arrange_and_transplant(sub_file: str, oracle_in: str, out_file
         logger.exception("Layout transplant failed")
         raise HTTPException(status_code=500, detail=f"Could not apply arranged layout: {e}")
     return plates
+
+
+@app.post(
+    "/api/3mf/previews",
+    tags=["arrange"],
+    summary="List a .3mf's objects with plate names and a preview image of each object",
+    description=(
+        "For each object: `id`, `name`, `extruder`, `plates` (`[{plate, name, instances}]` - "
+        "`name` is the plate's name in the project, or `Plate N` when unnamed) and `preview`.\n\n"
+        "`preview` is a rendering of **the object itself** (not the plate): a 3/4-view PNG, "
+        "transparent background, tinted with the object's filament colour, modifier/negative "
+        "parts omitted; `{mime, width, height, data_base64}`, or `null` when the object has "
+        "nothing printable. Use the `id`s with `/api/arrange/subset` or `/api/arrange/merge`.\n\n"
+        "`size` is the square image edge in px (32-1024, default 256). Set `images=false` for "
+        "names/plates only (fast). Rendering is CPU-bound: roughly 0.5 s per object for typical "
+        "models, so a 20-object project takes ~10 s."
+    ),
+    responses={
+        400: {"description": "Not a readable .3mf"},
+        422: {"description": "size out of range"},
+    },
+)
+async def preview_3mf_objects(
+    file: UploadFile = File(...),
+    size: int = Form(256),
+    images: bool = Form(True),
+):
+    if not 32 <= size <= 1024:
+        raise HTTPException(status_code=422, detail="size must be between 32 and 1024.")
+    job_dir = os.path.join(ARRANGE_DIR, f"prev_{uuid.uuid4()}")
+    os.makedirs(job_dir, exist_ok=True)
+    try:
+        path = os.path.join(job_dir, "in.3mf")
+        with open(path, "wb") as buf:
+            await asyncio.to_thread(shutil.copyfileobj, file.file, buf)
+        try:
+            objs = await asyncio.to_thread(_preview.object_previews, path, size, images)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Cannot read 3MF: {e}")
+        return {"objects": objs}
+    finally:
+        shutil.rmtree(job_dir, ignore_errors=True)
 
 
 @app.post(

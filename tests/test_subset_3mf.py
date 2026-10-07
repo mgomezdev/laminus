@@ -460,3 +460,42 @@ def test_endpoint_merge_selection_validation(src, selection, code):
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
         r = TestClient(app).post("/api/arrange/merge", files=files, data={"selection": selection})
     assert r.status_code == code, r.text
+
+
+# ------------------------------------------------------------------ previews
+
+def _named_plate_copy(src, tmp_path, name):
+    dst = str(tmp_path / "named.3mf")
+    with zipfile.ZipFile(src) as zi, zipfile.ZipFile(dst, "w") as zo:
+        for item in zi.infolist():
+            data = zi.read(item.filename)
+            if item.filename == s.MODEL_SETTINGS:
+                data = data.replace(
+                    b'<metadata key="plater_id" value="1"/>',
+                    b'<metadata key="plater_id" value="1"/><metadata key="plater_name" value="' + name.encode() + b'"/>')
+            zo.writestr(item, data)
+    return dst
+
+
+def test_object_previews_names_plates_and_png(src, tmp_path):
+    from app import preview_3mf as pv
+    objs = {o["name"]: o for o in pv.object_previews(src, size=64)}
+    assert set(objs) == {"Lid", "Base"}
+    assert objs["Lid"]["plates"] == [{"plate": 1, "name": "Plate 1", "instances": 1}]
+    png = __import__("base64").b64decode(objs["Lid"]["preview"]["data_base64"])
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    assert objs["Lid"]["preview"]["width"] == 64
+    named = {o["name"]: o for o in pv.object_previews(_named_plate_copy(src, tmp_path, "Lids and bases"), 64, False)}
+    assert named["Base"]["plates"][0]["name"] == "Lids and bases"
+    assert named["Base"]["preview"] is None
+
+
+def test_endpoint_previews(src):
+    c = TestClient(app)
+    r = c.post("/api/3mf/previews", files=[_upload(src)], data={"size": "48"})
+    assert r.status_code == 200, r.text
+    objs = r.json()["objects"]
+    assert {o["name"] for o in objs} == {"Lid", "Base"} and all(o["preview"]["height"] == 48 for o in objs)
+    r = c.post("/api/3mf/previews", files=[_upload(src)], data={"images": "false"})
+    assert all(o["preview"] is None and o["plates"] for o in r.json()["objects"])
+    assert c.post("/api/3mf/previews", files=[_upload(src)], data={"size": "5"}).status_code == 422
