@@ -11,6 +11,7 @@ import base64
 import re
 import struct
 import zipfile
+import xml.etree.ElementTree as ET
 import zlib
 from typing import Optional
 
@@ -322,3 +323,41 @@ def object_previews(src_path: str, size: int = 256, with_images: bool = True) ->
                     }
             out.append(entry)
     return out
+
+
+def bed_clearance_warnings(src_path: str, tol: float = 0.5) -> list[str]:
+    """Warn for every build item whose lowest printed vertex is not on the bed (z ~ 0).
+
+    Catches layout / merge corruption such as objects floating above or sunk below the
+    plate. Modifier / negative / blocker parts are ignored. ``tol`` is in mm.
+    """
+    warnings: list[str] = []
+    with zipfile.ZipFile(src_path) as z:
+        model = _parse(z.read(MODEL))
+        ms = _parse(z.read(MODEL_SETTINGS))
+        res_by_id = {o.get("id"): o for o in model.find(_q("resources")).findall(_q("object"))}
+        info = {o.get("id"): (_meta(o, "name") or f"object_{o.get('id')}",
+                              {int(p.get("id")) for p in o.findall("part")
+                               if p.get("subtype") in _NON_PRINTED_PARTS})
+                for o in ms.findall("object")}
+        src = _Source(z)
+        items_by_obj: dict[str, list[tuple[int, ET.Element]]] = {}
+        seen: dict[str, int] = {}
+        for it in model.find(_q("build")).findall(_q("item")):
+            oid = it.get("objectid")
+            seen[oid] = seen.get(oid, -1) + 1
+            items_by_obj.setdefault(oid, []).append((seen[oid], it))
+        for oid, its in items_by_obj.items():          # one object's meshes in memory at a time
+            if oid not in res_by_id or oid not in info:
+                continue
+            geo = _object_geometry(src, res_by_id[oid], res_by_id, info[oid][1])
+            if not geo:
+                continue
+            for k, it in its:
+                m, t = _mats(it.get("transform"))
+                zmin = min(float((v @ m[:, 2]).min()) for v, _ in geo) + float(t[2])
+                if abs(zmin) > tol:
+                    where = "floating above" if zmin > 0 else "below"
+                    warnings.append(f"{info[oid][0]} (id {oid}, instance {k}): lowest point is "
+                                    f"{abs(zmin):.1f} mm {where} the bed")
+    return warnings

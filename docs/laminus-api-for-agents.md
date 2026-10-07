@@ -313,7 +313,7 @@ POST /api/arrange/subset       # multipart/form-data
 | `machine_uuid`    | string | no       | Retarget bed/printer keys to this machine preset (catalog UUID) |
 | `allow_rotations` | bool   | no       | Pass `--allow-rotations` to the arranger |
 
-Returns a `.3mf` with only the selected objects (qty copies each, as instances) arranged over as many plates as OrcaSlicer needs. Headers: `X-Plate-Count`, `X-Instance-Count`. Per-object/part overrides, modifier parts, height ranges and painted data are preserved; process/filament settings are *not* remapped to the new printer. See `docs/experiments/subset-arrange.md`.
+Returns a `.3mf` with only the selected objects (qty copies each, as instances) arranged over as many plates as OrcaSlicer needs. Headers: `X-Plate-Count`, `X-Instance-Count`, `X-Warnings` (objects not resting on the bed; empty when fine). Per-object/part overrides, modifier parts, height ranges and painted data are preserved; process/filament settings are *not* remapped to the new printer. See `docs/experiments/subset-arrange.md`.
 
 ```bash
 curl -X POST http://localhost:5000/api/arrange/subset \
@@ -340,7 +340,7 @@ POST /api/arrange/merge        # multipart/form-data, repeated `files` parts
 
 `{"plate": N, "qty": q}` = everything on source plate N (each object x its count there x q); it also works in `/api/arrange/subset`. Entries for the same object accumulate.
 
-Response: one `.3mf`. Headers `X-Plate-Count`, `X-Instance-Count`, and `X-Merge-Warnings` (non-empty when a non-base source used a different process/filament preset, or has painted data with a different filament count). Errors: 422 (bad selection / unknown file / base not selected / non-base object uses a filament slot the base lacks), 400, 408, 503.
+Response: one `.3mf`. Headers `X-Plate-Count`, `X-Instance-Count`, and `X-Merge-Warnings` (non-empty when a non-base source used a different process/filament preset, has painted data with a different filament count, or an object ends up not resting on the bed - floating/sunk by more than 0.5 mm). Errors: 422 (bad selection / unknown file / base not selected / non-base object uses a filament slot the base lacks), 400, 408, 503.
 
 ```bash
 curl -X POST http://localhost:5000/api/arrange/merge   -F "files=@Hex-Moss-Pole.3mf"   -F "files=@cloud pots.3mf"   -F 'selection=[

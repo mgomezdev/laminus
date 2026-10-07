@@ -1939,7 +1939,8 @@ async def preview_3mf_objects(
         "printer-compatibility list is cleared. Process/filament settings are otherwise "
         "left as in the source project.\n\n"
         "**Plates:** OrcaSlicer's multi-plate arrange is used as-is; response header "
-        "`X-Plate-Count` reports the result. Selector names matching several objects are "
+        "`X-Plate-Count` reports the result; `X-Warnings` lists any object not resting on "
+        "the bed (empty when fine). Selector names matching several objects are "
         "rejected (422) — use `id`.\n\n"
         "Blocking; limited by `ARRANGE_TIMEOUT_SECONDS`."
     ),
@@ -2011,7 +2012,9 @@ async def arrange_subset(
         stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_subset.3mf")
         shutil.copy2(final_file, stable_out)
         background_tasks.add_task(cleanup_file, stable_out)
-        headers = {"X-Instance-Count": str(summary["instances"]), "X-Plate-Count": str(plates)}
+        warn = " | ".join(await asyncio.to_thread(_preview.bed_clearance_warnings, final_file))
+        headers = {"X-Instance-Count": str(summary["instances"]), "X-Plate-Count": str(plates),
+                   "X-Warnings": warn.encode("ascii", "replace").decode()}
         return FileResponse(path=stable_out, filename=f"subset_{safe_name}",
                             media_type="application/octet-stream", headers=headers)
 
@@ -2029,7 +2032,7 @@ async def arrange_subset(
         "Returns one `.3mf`. Per-object/part overrides, modifiers and painted data travel with "
         "each object. **Project-wide settings (process, filament, printer, thumbnails) come from "
         "the first uploaded file** (the base); differences in the other sources are listed in "
-        "the `X-Merge-Warnings` header. A non-base object using a filament slot the base does not "
+        "the `X-Merge-Warnings` header, which also reports any object that ends up not resting on the bed (floating/sunk). A non-base object using a filament slot the base does not "
         "have is rejected (422). `machine_uuid` retargets the bed/printer as in `/api/arrange/subset`.\n\n"
         "Headers: `X-Plate-Count`, `X-Instance-Count`, `X-Merge-Warnings`. Blocking; limited by "
         "`ARRANGE_TIMEOUT_SECONDS`."
@@ -2133,7 +2136,9 @@ async def arrange_merge(
         stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_merge.3mf")
         shutil.copy2(final_file, stable_out)
         background_tasks.add_task(cleanup_file, stable_out)
-        warn = " | ".join(summary["warnings"]).encode("ascii", "replace").decode()
+        warnings = summary["warnings"] + await asyncio.to_thread(
+            _preview.bed_clearance_warnings, final_file)
+        warn = " | ".join(warnings).encode("ascii", "replace").decode()
         headers = {"X-Instance-Count": str(summary["instances"]), "X-Plate-Count": str(plates),
                    "X-Merge-Warnings": warn}
         return FileResponse(path=stable_out, filename="merged.3mf",

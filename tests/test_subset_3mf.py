@@ -518,3 +518,36 @@ def test_merge_makes_inner_object_ids_unique_across_sources(src, tmp_path):
     assert len(ids) == len(set(ids))
     assert sorted(ids) == sorted(comp_ids)           # each component points at a distinct mesh object
     assert len(part_ids) == len(set(part_ids))
+
+
+def test_bed_clearance_warns_for_floating_and_sunk_items(src, tmp_path):
+    from app import preview_3mf as pv
+    sub = str(tmp_path / "sub.3mf")
+    s.build_subset(src, sub, {2: 2, 4: 1})
+    assert pv.bed_clearance_warnings(sub) == []
+    bad = str(tmp_path / "bad.3mf")
+    with zipfile.ZipFile(sub) as zi, zipfile.ZipFile(bad, "w") as zo:
+        for item in zi.infolist():
+            data = zi.read(item.filename)
+            if item.filename == s.MODEL:
+                data = data.replace(b"50 50 0", b"50 50 7", 1).replace(b"150 50 0", b"150 50 -3", 1)
+            zo.writestr(item, data)
+    w = pv.bed_clearance_warnings(bad)
+    assert len(w) == 2
+    assert any("Lid" in x and "7.0 mm floating above" in x for x in w)
+    assert any("Base" in x and "3.0 mm below" in x for x in w)
+
+
+def test_endpoints_report_empty_warnings_for_flat_layout(src):
+    async def _fake_orca(*args, **kwargs):
+        a = list(args)
+        _fake_two_plates(a[-1], a[a.index("--export-3mf") + 1])
+        proc = AsyncMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"ok", None))
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", new=_fake_orca):
+        r = TestClient(app).post("/api/arrange/subset", files=[_upload(src)],
+                                 data={"selection": json.dumps([{"name": "Lid", "qty": 3}])})
+    assert r.status_code == 200 and r.headers["X-Warnings"] == ""
