@@ -59,3 +59,9 @@ curl -F file=@project.3mf localhost:5000/api/3mf/objects
 curl -F file=@project.3mf -F 'selection=[{"id":6,"qty":3}]' -F machine_uuid=<uuid> \
      localhost:5000/api/arrange/subset -o out.3mf -D -
 ```
+
+## Extension: merge several 3MFs (`POST /api/arrange/merge`)
+
+Each source goes through `build_subset` (with `plate` selectors resolved via `plate_members`), then `merge_subsets` folds them into the first (base): object ids renumbered, colliding mesh files renamed (`x.model` -> `x__m1.model`, rels extended), `model_settings` objects / `assemble` / `layer_config_ranges.xml` / `cut_information.xml` entries appended, one plate listing every instance. The merged file then goes through the same oracle + transplant. Project-wide settings are the base's; differences are reported in `X-Merge-Warnings` (not baked into per-object overrides: sources written by different slicer versions differ in ~100 keys by format alone, so a diff would be mostly noise).
+
+Test: Hex Moss Pole (Bambu, P1S preset) plates 1x2, 6, 7 + cloud pots (Orca, Elegoo preset) plate 3 x2 + insert x1 -> 9 instances, 5 objects, 1 plate; sliced OK for Bambu P1S and Snapmaker U1.

@@ -31,7 +31,7 @@ def make_3mf(path, extra_project=None):
     """Two objects: 'Lid' (painted supports, modifier part, height range) and 'Base'."""
     project = {"printable_area": ["0x0", "100x0", "100x100", "0x100"], "printable_height": "50",
                "printer_settings_id": "Old Printer", "print_compatible_printers": ["Old Printer"],
-               "raft_first_layer_expansion": "-1"}
+               "raft_first_layer_expansion": "-1", "filament_colour": ["#FFFFFF", "#000000"]}
     project.update(extra_project or {})
     model = (
         f'<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" {MODEL_NS}>'
@@ -184,7 +184,7 @@ def test_no_printer_keeps_project_bed(src, tmp_path):
     ([{"name": "Nope", "qty": 1}], "No object named"),
     ([{"id": 99, "qty": 1}], "No object with id"),
     ([{"name": "Lid", "qty": 0}], "qty must be"),
-    ([{"qty": 1}], "needs 'id' or 'name'"),
+    ([{"qty": 1}], "needs 'id', 'name' or 'plate'"),
 ])
 def test_bad_selection(src, selection, msg):
     with pytest.raises(s.SubsetError, match=msg):
@@ -350,3 +350,113 @@ def test_endpoint_rejects_non_3mf():
         "/api/arrange/subset", files=[("file", ("m.stl", b"x", "application/octet-stream"))],
         data={"selection": "[]"})
     assert r.status_code == 400
+
+
+# ------------------------------------------------------------------ plate selector + merge
+
+def test_plate_selector_expands_to_plate_members_times_qty(src):
+    objs, plates = s.list_objects(src), s.plate_members(src)
+    assert plates == {1: {2: 1, 4: 1}}
+    assert s.resolve_selection(objs, [{"plate": 1, "qty": 2}, {"id": 4}], plates) == {2: 2, 4: 3}
+    with pytest.raises(s.SubsetError, match="No plate 9"):
+        s.resolve_selection(objs, [{"plate": 9}], plates)
+
+
+def _merged(src, tmp_path, second_project=None):
+    """Lid x1 from A, plus Lid x2 + Base x1 from B (same ids and mesh file names as A)."""
+    b = str(tmp_path / "b.3mf")
+    make_3mf(b, second_project)
+    sa, sb, out = (str(tmp_path / n) for n in ("sa.3mf", "sb.3mf", "m.3mf"))
+    s.build_subset(src, sa, {2: 1})
+    s.build_subset(b, sb, {2: 2, 4: 1})
+    return out, s.merge_subsets([sa, sb], out, ["A", "B"])
+
+
+def test_merge_renumbers_objects_and_renames_colliding_meshes(src, tmp_path):
+    out, summary = _merged(src, tmp_path)
+    assert summary["objects"] == 3 and summary["instances"] == 4 and summary["warnings"] == []
+    with zipfile.ZipFile(out) as z:
+        names = z.namelist()
+        assert "3D/Objects/lid.model" in names and "3D/Objects/lid__m1.model" in names
+        assert "3D/Objects/base.model" in names
+        rels = z.read("3D/_rels/3dmodel.model.rels").decode()
+        for n in names:
+            if n.startswith("3D/Objects/"):
+                assert f'Target="/{n}"' in rels
+        import xml.etree.ElementTree as ET
+        ids = [o.get("id") for o in ET.fromstring(z.read("Metadata/model_settings.config")).findall("object")]
+        assert len(ids) == len(set(ids)) == 3
+        ranges = [o.get("id") for o in ET.fromstring(z.read("Metadata/layer_config_ranges.xml")).findall("object")]
+        assert sorted(ranges) == sorted(ids)  # every merged object kept its height-range modifier
+        ms = z.read("Metadata/model_settings.config").decode()
+        assert ms.count("<model_instance") == 4
+    fp = s.fingerprint(out)
+    assert sorted(v["instances"] for v in fp.values()) == [1, 1, 2]
+    assert all(v["paint"]["paint_supports"] == 1 for k, v in fp.items() if k.startswith("Lid"))
+    assert s.count_plates(out) == 1
+
+
+def test_merge_warns_when_process_presets_differ(src, tmp_path):
+    base = str(tmp_path / "base.3mf")
+    make_3mf(base, {"print_settings_id": "Base process"})
+    sa, sb, out = (str(tmp_path / n) for n in ("sa.3mf", "sb.3mf", "m.3mf"))
+    s.build_subset(base, sa, {2: 1})
+    s.build_subset(src, sb, {4: 1})
+    summary = s.merge_subsets([sa, sb], out, ["base.3mf", "other.3mf"])
+    assert any("other.3mf" in w and "print_settings_id" in w for w in summary["warnings"])
+
+
+def test_merge_rejects_extruder_the_base_does_not_have(src, tmp_path):
+    sa, sb, out = (str(tmp_path / n) for n in ("sa.3mf", "sb.3mf", "m.3mf"))
+    one = str(tmp_path / "one.3mf")
+    make_3mf(one, {"filament_colour": ["#FFFFFF"]})
+    s.build_subset(one, sa, {4: 1})          # base: one filament
+    s.build_subset(src, sb, {2: 1})          # Lid uses extruder 2
+    with pytest.raises(s.SubsetError, match="extruder"):
+        s.merge_subsets([sa, sb], out, ["A", "B"])
+
+
+def test_endpoint_merge_two_files(src, tmp_path):
+    other = str(tmp_path / "other.3mf")
+    make_3mf(other)
+
+    async def _fake_orca(*args, **kwargs):
+        a = list(args)
+        _fake_two_plates(a[-1], a[a.index("--export-3mf") + 1])
+        proc = AsyncMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"ok", None))
+        return proc
+
+    files = [("files", ("first.3mf", open(src, "rb"), "application/octet-stream")),
+             ("files", ("second.3mf", open(other, "rb"), "application/octet-stream"))]
+    sel = [{"file": "first.3mf", "plate": 1, "qty": 2}, {"file": 1, "name": "Lid", "qty": 1}]
+    with patch("asyncio.create_subprocess_exec", new=_fake_orca):
+        r = TestClient(app).post("/api/arrange/merge", files=files, data={"selection": json.dumps(sel)})
+    assert r.status_code == 200, r.text
+    assert r.headers["X-Instance-Count"] == "5" and r.headers["X-Plate-Count"] == "2"
+    fp = s.fingerprint(io.BytesIO(r.content))
+    assert sorted(v["instances"] for v in fp.values()) == [1, 2, 2]
+
+
+@pytest.mark.parametrize("selection,code", [
+    ('[{"file": "first.3mf", "id": 2}]', 200),      # sanity: valid single-source merge is allowed
+    ('[{"file": "nope.3mf", "id": 2}]', 422),
+    ('[{"file": 7, "id": 2}]', 422),
+    ('[{"id": 2}]', 422),
+    ('[{"file": 1, "id": 2}]', 422),                # base (first upload) not selected
+])
+def test_endpoint_merge_selection_validation(src, selection, code):
+    async def _fake_orca(*args, **kwargs):
+        a = list(args)
+        _fake_two_plates(a[-1], a[a.index("--export-3mf") + 1])
+        proc = AsyncMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"ok", None))
+        return proc
+
+    files = [("files", ("first.3mf", open(src, "rb"), "application/octet-stream")),
+             ("files", ("second.3mf", open(src, "rb"), "application/octet-stream"))]
+    with patch("asyncio.create_subprocess_exec", new=_fake_orca):
+        r = TestClient(app).post("/api/arrange/merge", files=files, data={"selection": selection})
+    assert r.status_code == code, r.text

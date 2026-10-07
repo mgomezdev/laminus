@@ -103,9 +103,25 @@ def list_objects(src: str) -> list[dict]:
     return out
 
 
-def resolve_selection(objects: list[dict], selection: list[dict]) -> dict[int, int]:
-    """Map selector list ([{"id"|"name": ..., "qty": n}]) to {object_id: qty}.
+def plate_members(src: str) -> dict[int, dict[int, int]]:
+    """{plate_no: {object_id: instances_on_that_plate}} as laid out in the source project."""
+    with zipfile.ZipFile(src) as z:
+        settings = _parse(z.read(MODEL_SETTINGS))
+    out: dict[int, dict[int, int]] = {}
+    for n, pl in enumerate(settings.findall("plate"), start=1):
+        members = out.setdefault(int(_meta(pl, "plater_id") or n), {})
+        for mi in pl.findall("model_instance"):
+            oid = int(_meta(mi, "object_id"))
+            members[oid] = members.get(oid, 0) + 1
+    return out
 
+
+def resolve_selection(objects: list[dict], selection: list[dict],
+                      plates: Optional[dict[int, dict[int, int]]] = None) -> dict[int, int]:
+    """Map selector list to {object_id: qty}.
+
+    Selectors: ``{"id"|"name": ..., "qty": n}`` for one object, or ``{"plate": p, "qty": n}``
+    for everything on source plate ``p`` (each object x its count on that plate x ``qty``).
     A name matching several objects is ambiguous (e.g. four distinct "Platte 1.stl") and
     is rejected with the candidate ids rather than guessed at.
     """
@@ -115,6 +131,13 @@ def resolve_selection(objects: list[dict], selection: list[dict]) -> dict[int, i
         qty = int(sel.get("qty", 1))
         if qty < 1:
             raise SubsetError(f"qty must be >= 1 for {sel!r}")
+        if "plate" in sel:
+            pl = int(sel["plate"])
+            if not (plates or {}).get(pl):
+                raise SubsetError(f"No plate {pl} (or it is empty)")
+            for oid, cnt in plates[pl].items():
+                want[oid] = want.get(oid, 0) + cnt * qty
+            continue
         if "id" in sel:
             oid = int(sel["id"])
             if oid not in by_id:
@@ -127,7 +150,7 @@ def resolve_selection(objects: list[dict], selection: list[dict]) -> dict[int, i
                 raise SubsetError(f"Name {sel['name']!r} is ambiguous; use id (candidates: {hits})")
             oid = hits[0]
         else:
-            raise SubsetError(f"Selector needs 'id' or 'name': {sel!r}")
+            raise SubsetError(f"Selector needs 'id', 'name' or 'plate': {sel!r}")
         want[oid] = want.get(oid, 0) + qty
     if not want:
         raise SubsetError("Selection is empty")
@@ -284,6 +307,167 @@ def build_subset(src: str, dst: str, want: dict[int, int],
 def count_plates(path: str) -> int:
     with zipfile.ZipFile(path) as z:
         return len(_parse(z.read(MODEL_SETTINGS)).findall("plate"))
+
+
+# ----------------------------------------------------------- merge several subsets
+#
+# Each source is first reduced with build_subset(); merge_subsets() then folds the extra
+# subsets into the first one (the "base"). Per-object data travels with the object (ids
+# renumbered, mesh files renamed on collision); project-wide data (process / filament /
+# printer settings, thumbnails, Auxiliaries) comes from the base only.
+
+_REL_MODEL_TYPE = "http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"
+
+
+def _filament_count(cfg: dict) -> int:
+    fc = cfg.get("filament_colour")
+    return len(fc) if isinstance(fc, list) else 1
+
+
+def merge_subsets(parts: list[str], dst: str, labels: Optional[list[str]] = None) -> dict:
+    """Merge subset files (build_subset output) into ``dst``; ``parts[0]`` is the base.
+
+    Returns {"objects", "instances", "warnings": [str]}.
+    """
+    if not parts:
+        raise SubsetError("Nothing to merge")
+    labels = labels or [f"source {i}" for i in range(len(parts))]
+    warnings: list[str] = []
+    zb = zipfile.ZipFile(parts[0])
+    base_names = zb.namelist()
+    model = _parse(zb.read(MODEL))
+    ms = _parse(zb.read(MODEL_SETTINGS))
+    resources = model.find(_q("resources"))
+    build = model.find(_q("build"))
+    asm = ms.find("assemble")
+    base_cfg = json.loads(zb.read(PROJECT_SETTINGS)) if PROJECT_SETTINGS in base_names else {}
+    n_fil = _filament_count(base_cfg)
+    side = {n: _parse(zb.read(n)) for n in _PER_OBJECT_FILES if n in base_names}
+    rels_text = zb.read(MODEL_RELS).decode("utf-8") if MODEL_RELS in base_names else None
+    taken = set(base_names)
+    used_ids = {int(o.get("id")) for o in resources.findall(_q("object"))}
+    new_files: dict[str, bytes] = {}
+    new_rels: list[str] = []
+
+    for idx, path in enumerate(parts[1:], start=1):
+        label = labels[idx]
+        with zipfile.ZipFile(path) as zp:
+            pmodel = _parse(zp.read(MODEL))
+            pms = _parse(zp.read(MODEL_SETTINGS))
+            pcfg = json.loads(zp.read(PROJECT_SETTINGS)) if PROJECT_SETTINGS in zp.namelist() else {}
+            # project-wide settings come from the base; say so where this source differed
+            for key in ("print_settings_id", "filament_settings_id"):
+                if pcfg.get(key) != base_cfg.get(key):
+                    warnings.append(f"{label}: {key} {pcfg.get(key)!r} differs from base "
+                                    f"{base_cfg.get(key)!r}; base project settings are used")
+            for o in pms.findall("object"):
+                ext = _meta(o, "extruder")
+                if ext and ext.isdigit() and int(ext) > n_fil:
+                    raise SubsetError(f"{label}: object {o.get('id')} uses filament/extruder "
+                                      f"{ext} but the base project only has {n_fil}")
+            if _filament_count(pcfg) != n_fil and any(
+                    sum(v["paint"].values()) for v in fingerprint(path).values()):
+                warnings.append(f"{label}: has painted data but {_filament_count(pcfg)} filament "
+                                f"slots vs base {n_fil}; painted filament indices are not remapped")
+
+            remap: dict[str, str] = {}
+            for o in pmodel.find(_q("resources")).findall(_q("object")):
+                remap[o.get("id")] = str(max(used_ids | {0}) + 1)
+                used_ids.add(int(remap[o.get("id")]))
+
+            # mesh files: every part-source mesh is renamed on collision with an existing name
+            path_map: dict[str, str] = {}
+            for comp in pmodel.iter(_q("component")):
+                cp = comp.get(_p("path"))
+                if cp and cp not in path_map:
+                    rel = cp.lstrip("/")
+                    new = rel
+                    if new in taken:
+                        stem, _, ext = rel.rpartition(".")
+                        new = f"{stem}__m{idx}.{ext}"
+                    taken.add(new)
+                    path_map[cp] = "/" + new
+                    new_files[new] = zp.read(rel)
+                    new_rels.append(f'<Relationship Target="/{new}" Id="rel-m{idx}-{len(new_rels)}" '
+                                    f'Type="{_REL_MODEL_TYPE}"/>')
+
+            for o in pmodel.find(_q("resources")).findall(_q("object")):
+                o.set("id", remap[o.get("id")])
+                for comp in o.iter(_q("component")):
+                    cp = comp.get(_p("path"))
+                    if cp:
+                        comp.set(_p("path"), path_map[cp])
+                    elif comp.get("objectid") in remap:
+                        comp.set("objectid", remap[comp.get("objectid")])
+                resources.append(o)
+            for it in pmodel.find(_q("build")).findall(_q("item")):
+                it.set("objectid", remap[it.get("objectid")])
+                build.append(it)
+            for o in pms.findall("object"):
+                o.set("id", remap[o.get("id")])
+                ms.insert(len(ms.findall("object")), o)
+            pasm = pms.find("assemble")
+            if pasm is not None:
+                if asm is None:
+                    asm = ET.SubElement(ms, "assemble")
+                for ai in pasm:
+                    if ai.get("object_id") in remap:
+                        ai.set("object_id", remap[ai.get("object_id")])
+                        asm.append(ai)
+            for n in _PER_OBJECT_FILES:
+                if n in zp.namelist():
+                    proot = _parse(zp.read(n))
+                    for o in proot.findall("object"):
+                        if o.get("id") in remap:
+                            o.set("id", remap[o.get("id")])
+                            side.setdefault(n, ET.Element(proot.tag, proot.attrib)).append(o)
+
+    if rels_text is not None and new_rels:
+        rels_text = rels_text.replace("</Relationships>", " " + "\n ".join(new_rels) + "\n</Relationships>")
+
+    # one plate carrying every instance (the arranger spreads them afterwards)
+    instances: list[tuple[str, int]] = []
+    seen: dict[str, int] = {}
+    for it in build.findall(_q("item")):
+        oid = it.get("objectid")
+        instances.append((oid, seen.get(oid, 0)))
+        seen[oid] = seen.get(oid, 0) + 1
+    plates = ms.findall("plate")
+    if plates:
+        for pl in plates[1:]:
+            ms.remove(pl)
+        for mi in plates[0].findall("model_instance"):
+            plates[0].remove(mi)
+        for n, (oid, k) in enumerate(instances):
+            mi = ET.SubElement(plates[0], "model_instance")
+            for key, val in (("object_id", oid), ("instance_id", str(k)),
+                             ("identify_id", str(1000 + n))):
+                ET.SubElement(mi, "metadata", {"key": key, "value": val})
+
+    def ser(el: ET.Element) -> bytes:
+        return ET.tostring(el, encoding="UTF-8", xml_declaration=True)
+
+    with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+        for n in base_names:
+            if n == MODEL:
+                data = ser(model)
+            elif n == MODEL_SETTINGS:
+                data = ser(ms)
+            elif n == MODEL_RELS and rels_text is not None:
+                data = rels_text.encode("utf-8")
+            elif n in side:
+                data = ser(side[n])
+            else:
+                data = zb.read(n)
+            zout.writestr(n, data, zipfile.ZIP_DEFLATED)
+        for n, root in side.items():
+            if n not in base_names:
+                zout.writestr(n, ser(root), zipfile.ZIP_DEFLATED)
+        for n, data in new_files.items():
+            zout.writestr(n, data, zipfile.ZIP_DEFLATED)
+    zb.close()
+    return {"objects": len(resources.findall(_q("object"))), "instances": len(instances),
+            "warnings": warnings}
 
 
 # ----------------------------------------------------------- layout via oracle

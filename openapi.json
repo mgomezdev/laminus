@@ -582,7 +582,7 @@
           "arrange"
         ],
         "summary": "Keep only chosen objects (x quantity) from a .3mf and arrange them on the fewest plates",
-        "description": "Takes a `.3mf`, a `selection` (JSON list of `{\"name\"|\"id\": ..., \"qty\": n}`) and optionally a `machine_uuid`, and returns a `.3mf` containing only those objects, `qty` copies each, arranged by OrcaSlicer across as many plates as needed.\n\n**Preservation:** the returned file is the source project with only the chosen objects kept; meshes and `model_settings.config` are copied byte-for-byte, so per-object/per-part overrides, modifier parts, height-range modifiers and painted data (colour, supports, seam, fuzzy skin) survive. OrcaSlicer is used only to compute the layout (plate membership + instance transforms), which is written into that file; OrcaSlicer's own re-export is not returned because it splits cross-plate instances into clone objects that lose name/overrides/extruder.\n\n**Printer:** when `machine_uuid` is given, the bed/printer keys of the project are replaced from that machine preset and the embedded process preset's printer-compatibility list is cleared. Process/filament settings are otherwise left as in the source project.\n\n**Plates:** OrcaSlicer's multi-plate arrange is used as-is; response header `X-Plate-Count` reports the result. Selector names matching several objects are rejected (422) \u2014 use `id`.\n\nBlocking; limited by `ARRANGE_TIMEOUT_SECONDS`.",
+        "description": "Takes a `.3mf`, a `selection` (JSON list of `{\"name\"|\"id\"|\"plate\": ..., \"qty\": n}`; `plate` selects everything on that source plate) and optionally a `machine_uuid`, and returns a `.3mf` containing only those objects, `qty` copies each, arranged by OrcaSlicer across as many plates as needed.\n\n**Preservation:** the returned file is the source project with only the chosen objects kept; meshes and `model_settings.config` are copied byte-for-byte, so per-object/per-part overrides, modifier parts, height-range modifiers and painted data (colour, supports, seam, fuzzy skin) survive. OrcaSlicer is used only to compute the layout (plate membership + instance transforms), which is written into that file; OrcaSlicer's own re-export is not returned because it splits cross-plate instances into clone objects that lose name/overrides/extruder.\n\n**Printer:** when `machine_uuid` is given, the bed/printer keys of the project are replaced from that machine preset and the embedded process preset's printer-compatibility list is cleared. Process/filament settings are otherwise left as in the source project.\n\n**Plates:** OrcaSlicer's multi-plate arrange is used as-is; response header `X-Plate-Count` reports the result. Selector names matching several objects are rejected (422) \u2014 use `id`.\n\nBlocking; limited by `ARRANGE_TIMEOUT_SECONDS`.",
         "operationId": "arrange_subset_api_arrange_subset_post",
         "requestBody": {
           "content": {
@@ -611,6 +611,48 @@
           },
           "422": {
             "description": "Bad selection, unknown/ambiguous object, unknown machine_uuid"
+          },
+          "503": {
+            "description": "machine_uuid given but catalog not ready"
+          }
+        }
+      }
+    },
+    "/api/arrange/merge": {
+      "post": {
+        "tags": [
+          "arrange"
+        ],
+        "summary": "Combine selections from several .3mf files into one .3mf, arranged on the fewest plates",
+        "description": "Upload several `.3mf` files as repeated `files` parts and a `selection` JSON list whose entries each name their source with `file` (the uploaded filename, or the 0-based upload index) plus one of `id` / `name` / `plate` and a `qty`:\n\n`[{\"file\": \"hex.3mf\", \"plate\": 1, \"qty\": 2}, {\"file\": 1, \"id\": 8, \"qty\": 1}]`\n\n`plate` selects every object on that plate of the source (x its count there x `qty`). Returns one `.3mf`. Per-object/part overrides, modifiers and painted data travel with each object. **Project-wide settings (process, filament, printer, thumbnails) come from the first uploaded file** (the base); differences in the other sources are listed in the `X-Merge-Warnings` header. A non-base object using a filament slot the base does not have is rejected (422). `machine_uuid` retargets the bed/printer as in `/api/arrange/subset`.\n\nHeaders: `X-Plate-Count`, `X-Instance-Count`, `X-Merge-Warnings`. Blocking; limited by `ARRANGE_TIMEOUT_SECONDS`.",
+        "operationId": "arrange_merge_api_arrange_merge_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_arrange_merge_api_arrange_merge_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Unreadable 3MF or Orca arrange failed"
+          },
+          "408": {
+            "description": "Arrange timed out"
+          },
+          "422": {
+            "description": "Bad selection, unknown/ambiguous object, unknown file, unknown machine_uuid, incompatible sources"
           },
           "503": {
             "description": "machine_uuid given but catalog not ready"
@@ -807,6 +849,45 @@
   },
   "components": {
     "schemas": {
+      "Body_arrange_merge_api_arrange_merge_post": {
+        "properties": {
+          "files": {
+            "items": {
+              "type": "string",
+              "contentMediaType": "application/octet-stream"
+            },
+            "type": "array",
+            "title": "Files"
+          },
+          "selection": {
+            "type": "string",
+            "title": "Selection",
+            "description": "JSON: [{\"file\": \"a.3mf\", \"plate\": 1, \"qty\": 2}, {\"file\": 1, \"id\": 8, \"qty\": 1}]"
+          },
+          "machine_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Machine Uuid"
+          },
+          "allow_rotations": {
+            "type": "boolean",
+            "title": "Allow Rotations",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "files",
+          "selection"
+        ],
+        "title": "Body_arrange_merge_api_arrange_merge_post"
+      },
       "Body_arrange_subset_api_arrange_subset_post": {
         "properties": {
           "file": {
