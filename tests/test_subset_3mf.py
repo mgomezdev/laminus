@@ -499,3 +499,22 @@ def test_endpoint_previews(src):
     r = c.post("/api/3mf/previews", files=[_upload(src)], data={"images": "false"})
     assert all(o["preview"] is None and o["plates"] for o in r.json()["objects"])
     assert c.post("/api/3mf/previews", files=[_upload(src)], data={"size": "5"}).status_code == 422
+
+
+def test_merge_makes_inner_object_ids_unique_across_sources(src, tmp_path):
+    """Regression: Orca resolves parts by id alone, so colliding inner ids floated objects."""
+    import re
+    out, _ = _merged(src, tmp_path)
+    with zipfile.ZipFile(out) as z:
+        mesh_ids = []
+        for n in z.namelist():
+            if n.startswith("3D/Objects/"):
+                mesh_ids += re.findall(rb'<object [^>]*?\bid="(\d+)"', z.read(n))
+        model = s._parse(z.read(s.MODEL))
+        comp_ids = [c.get("objectid") for c in model.iter(s._q("component")) if c.get(s._p("path"))]
+        ms = s._parse(z.read(s.MODEL_SETTINGS))
+        part_ids = [p.get("id") for o in ms.findall("object") for p in o.findall("part")]
+    ids = [i.decode() for i in mesh_ids]
+    assert len(ids) == len(set(ids))
+    assert sorted(ids) == sorted(comp_ids)           # each component points at a distinct mesh object
+    assert len(part_ids) == len(set(part_ids))

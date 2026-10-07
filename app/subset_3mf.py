@@ -316,7 +316,8 @@ def count_plates(path: str) -> int:
 # renumbered, mesh files renamed on collision); project-wide data (process / filament /
 # printer settings, thumbnails, Auxiliaries) comes from the base only.
 
-_REL_MODEL_TYPE = "http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"
+_OBJECT_ID_ATTR = re.compile(rb'(<object\b[^>]*?\bid=")(\d+)(")')
+_REL_MODEL_TYPE ="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"
 
 
 def _filament_count(cfg: dict) -> int:
@@ -348,6 +349,12 @@ def merge_subsets(parts: list[str], dst: str, labels: Optional[list[str]] = None
     used_ids = {int(o.get("id")) for o in resources.findall(_q("object"))}
     new_files: dict[str, bytes] = {}
     new_rels: list[str] = []
+    inner_taken: set[int] = set()
+    for c in resources.iter(_q("component")):
+        if c.get(_p("path")):
+            inner_taken.add(int(c.get("objectid")))
+    for o in ms.findall("object"):
+        inner_taken |= {int(p.get("id")) for p in o.findall("part")}
 
     for idx, path in enumerate(parts[1:], start=1):
         label = labels[idx]
@@ -375,6 +382,27 @@ def merge_subsets(parts: list[str], dst: str, labels: Optional[list[str]] = None
                 remap[o.get("id")] = str(max(used_ids | {0}) + 1)
                 used_ids.add(int(remap[o.get("id")]))
 
+            # Inner ids (the <object id> inside a mesh file == component objectid == model_settings
+            # <part id>) must be unique across the *whole* merged project: OrcaSlicer resolves
+            # parts by id alone, so two sources both using e.g. id 5 make it attach the wrong
+            # mesh (the merged pots floated 60 mm above the bed). Renumber every non-base one.
+            def _fresh() -> str:
+                v = max(inner_taken | used_ids | {0}) + 1
+                inner_taken.add(v)
+                return str(v)
+
+            inner_map: dict[tuple[str, str], str] = {}      # (mesh path, old id) -> new id
+            part_map: dict[str, str] = {}                   # old part id -> new id (first mesh wins)
+            for c in pmodel.iter(_q("component")):
+                key = (c.get(_p("path")) or "", c.get("objectid"))
+                if key[0] and key not in inner_map:
+                    inner_map[key] = _fresh()
+                    part_map.setdefault(key[1], inner_map[key])
+            for o in pms.findall("object"):
+                for part in o.findall("part"):
+                    if part.get("id") not in part_map:
+                        part_map[part.get("id")] = _fresh()
+
             # mesh files: every part-source mesh is renamed on collision with an existing name
             path_map: dict[str, str] = {}
             for comp in pmodel.iter(_q("component")):
@@ -387,7 +415,10 @@ def merge_subsets(parts: list[str], dst: str, labels: Optional[list[str]] = None
                         new = f"{stem}__m{idx}.{ext}"
                     taken.add(new)
                     path_map[cp] = "/" + new
-                    new_files[new] = zp.read(rel)
+                    new_files[new] = _OBJECT_ID_ATTR.sub(
+                        lambda m, cp=cp: m.group(1) + inner_map.get(
+                            (cp, m.group(2).decode()), m.group(2).decode()).encode() + m.group(3),
+                        zp.read(rel))
                     new_rels.append(f'<Relationship Target="/{new}" Id="rel-m{idx}-{len(new_rels)}" '
                                     f'Type="{_REL_MODEL_TYPE}"/>')
 
@@ -397,6 +428,7 @@ def merge_subsets(parts: list[str], dst: str, labels: Optional[list[str]] = None
                     cp = comp.get(_p("path"))
                     if cp:
                         comp.set(_p("path"), path_map[cp])
+                        comp.set("objectid", inner_map[(cp, comp.get("objectid"))])
                     elif comp.get("objectid") in remap:
                         comp.set("objectid", remap[comp.get("objectid")])
                 resources.append(o)
@@ -405,6 +437,8 @@ def merge_subsets(parts: list[str], dst: str, labels: Optional[list[str]] = None
                 build.append(it)
             for o in pms.findall("object"):
                 o.set("id", remap[o.get("id")])
+                for part in o.findall("part"):
+                    part.set("id", part_map[part.get("id")])
                 ms.insert(len(ms.findall("object")), o)
             pasm = pms.find("assemble")
             if pasm is not None:
