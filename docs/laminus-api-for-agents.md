@@ -112,6 +112,58 @@ Returns the full profile dict for inspection. Same 503 behaviour.
 
 ---
 
+## 2b — Neutral lookups (model / nozzle variant → machine, presets)
+
+Resolve profiles from neutral inputs instead of Orca preset names. Pure catalog lookups: no
+engine needed, answered from the cached catalog.
+
+**Common to all four endpoints**
+- Header `X-Catalog-Version` = body `catalog_version` (opaque; changes only when preset identity or
+  compatibility data changes). Revalidate stored refs when it changes.
+- `"stale": true` in the body when served from an older on-disk cache (no live catalog yet) or
+  while a rebuild runs. No catalog at all: **503** `{"error": "catalog_unavailable"}`.
+- **Refs** are `<kind>:<slug(name)>` (lowercase, runs of non `[a-z0-9.]` → `-`), e.g.
+  `machine:bambu-lab-p1s-0.4-nozzle`, `process:0.20mm-p1s`. Stable across rebuilds while the
+  preset keeps its name. Every item also carries its `uuid`, which the slice endpoints take.
+- `flow` is `high_flow` when the preset name contains "High Flow", else `standard`.
+
+```
+POST /api/profiles/machines/suggest   {"manufacturer": "Bambu Lab", "model": "P1S", "model_key": "p1s"}
+→ {"catalog_version": "…", "candidates": [
+     {"ref": "machine:bambu-lab-p1s-0.4-nozzle", "uuid": "…", "name": "Bambu Lab P1S 0.4 nozzle",
+      "nozzle_diameter_mm": 0.4, "flow": "standard", "confidence": 1.0, "match_reason": "exact_model"}, … ]}
+```
+`match_reason`: `exact_model` | `fuzzy_name` | `vendor_only` (same vendor, other model, conf 0.1,
+max 5). Sorted by confidence, then 0.4 standard first, then nozzle. Max 20. No match → `[]`, 200.
+
+```
+POST /api/profiles/models/variants    {"manufacturer": "Bambu Lab", "model": "P1S"}
+→ {"catalog_version": "…", "variants": [
+     {"ref": …, "uuid": …, "name": …, "nozzle_diameter_mm": 0.4, "flow": "standard", "is_default_guess": true},
+     {… 0.4 high_flow, false}, {… 0.6 standard, false} ]}
+```
+Best-matching model only; ordered by nozzle then standard-before-high-flow. Exactly one
+`is_default_guess` (0.4 standard, else smallest standard). Unknown model → `[]`.
+
+```
+GET /api/profiles/machines/{machine_ref}/presets?kind=process|filament   (default: both)
+→ {"catalog_version": "…", "machine_ref": "…", "presets": [
+     {"ref": "process:0.20mm-p1s", "uuid": "…", "name": "0.20mm P1S", "kind": "process",
+      "compatible_models": ["Bambu Lab P1S"]}, … ]}
+```
+Applies inheritance, then `compatible_printers`. Empty = universal within the machine's own vendor bundle, plus user presets and the shared `OrcaFilamentLibrary` (`compatible_models` omitted
+then). Abstract bases (`instantiation: false`) are excluded. `compatible_printers_condition` is not evaluated. 404 `{"error": "unknown_machine_ref"}`;
+bad `kind` → 422 `{"error": "invalid_kind"}`.
+
+```
+GET /api/profiles/machines/{machine_ref}/supports?bed_x=256&bed_y=256
+→ {"catalog_version": "…", "machine_ref": "…", "supported": true, "reason": null}
+```
+Always 200. `reason`: `unknown_machine_ref` | `bed_mismatch` (>1 mm off; a machine with no
+declared bed size is never ruled out).
+
+---
+
 ## 3a — Slice with UUID-based profile resolution
 
 ```

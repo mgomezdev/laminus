@@ -159,6 +159,10 @@ def resolve_inheritance(
     return result
 
 
+# Bump when catalog entries gain/change fields, so a cache written by older code is rebuilt
+# rather than served without them (the cache key only tracks profile *files*).
+_CACHE_SCHEMA = 2
+
 SYSTEM_PROFILE_TYPES = ("machine", "process", "filament")
 
 # Upper bound on lazily-resolved presets held in memory. A slice job touches a machine,
@@ -170,6 +174,19 @@ _RESOLVED_MEMO_MAX = 256
 def _display_name(name: str) -> str:
     at = name.find(" @")
     return name[:at].strip() if at != -1 else name.strip()
+
+
+def _bed_size(resolved: dict) -> tuple:
+    """(x, y) bed extents in mm: explicit bed_size_x/y if present, else the bounding box of
+    `printable_area` ("0x0", "256x0", ...), which is what real vendor machine presets use."""
+    x, y = resolved.get("bed_size_x"), resolved.get("bed_size_y")
+    if x is not None and y is not None:
+        return x, y
+    try:
+        pts = [tuple(float(v) for v in p.split("x")) for p in resolved.get("printable_area") or []]
+        return max(p[0] for p in pts), max(p[1] for p in pts)
+    except (ValueError, AttributeError, IndexError):
+        return x, y
 
 
 def _first_or_default(raw, default):
@@ -195,6 +212,7 @@ class ProfileCatalog:
         # merged dict for every profile (37 MB of an 87 MB cache file was these blobs);
         # slicing needs only the handful of presets it actually uses.
         self._resolved_memo: "OrderedDict[str, dict]" = OrderedDict()
+        self._neutral = None
 
     def build(self) -> None:
         catalog: dict[str, list[dict]] = {"machine": [], "process": [], "filament": []}
@@ -247,6 +265,7 @@ class ProfileCatalog:
         self._name_index = name_index
         self._resolved_memo.clear()
         self._dict_cache = None  # invalidate on rebuild
+        self._neutral = None
         self._built = True
         self._broken = broken
         if broken:
@@ -265,12 +284,14 @@ class ProfileCatalog:
                 make_machine_uuid(manufacturer, model, nozzle)
                 if parsed else make_profile_uuid(source, rel_path)
             )
+            bed_x, bed_y = _bed_size(resolved)
             return {
                 "uuid": entry_uuid, "type": "machine", "name": name, "source": source,
                 "rel_path": rel_path, "manufacturer": manufacturer, "model": model, "nozzle": nozzle,
                 "nozzle_diameter": resolved.get("nozzle_diameter"),
-                "bed_size_x": resolved.get("bed_size_x"), "bed_size_y": resolved.get("bed_size_y"),
+                "bed_size_x": bed_x, "bed_size_y": bed_y,
                 "extruder_count": resolved.get("extruder_count", 1),
+                "instantiation": resolved.get("instantiation"),
             }
 
         if ptype == "filament":
@@ -293,6 +314,7 @@ class ProfileCatalog:
                 "bed_temperature": resolved.get("bed_temperature"),
                 "bed_temperature_initial_layer": resolved.get("bed_temperature_initial_layer"),
                 "compatible_printers": resolved.get("compatible_printers", []),
+                "instantiation": resolved.get("instantiation"),
             }
 
         return {
@@ -301,6 +323,7 @@ class ProfileCatalog:
             "layer_height": resolved.get("layer_height"),
             "speed": resolved.get("speed"),
             "compatible_printers": resolved.get("compatible_printers", []),
+            "instantiation": resolved.get("instantiation"),
         }
 
     def get_by_uuid(self, uid: str) -> Optional[dict]:
@@ -377,6 +400,14 @@ class ProfileCatalog:
         return result
 
     @property
+    def neutral(self):
+        """Ref/model-keyed views (see app.neutral_profiles), built lazily per catalog."""
+        if self._neutral is None:
+            from app.neutral_profiles import NeutralIndex
+            self._neutral = NeutralIndex(self)
+        return self._neutral
+
+    @property
     def is_built(self) -> bool:
         return self._built
 
@@ -407,20 +438,25 @@ class ProfileCatalog:
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({
-                "cache_key": cache_key, "catalog": self._catalog,
+                "cache_key": cache_key, "schema": _CACHE_SCHEMA, "catalog": self._catalog,
                 "broken": self._broken, "name_index": self._name_index,
             }, f)
         os.replace(tmp, path)
 
     @classmethod
-    def load_from_cache(cls, path: str, expected_key: str, system_dir: str, user_dir: str) -> "ProfileCatalog | None":
-        """Return a pre-built ProfileCatalog from cache, or None if stale/missing."""
+    def load_from_cache(cls, path: str, expected_key: Optional[str], system_dir: str, user_dir: str) -> "ProfileCatalog | None":
+        """Return a pre-built ProfileCatalog from cache, or None if stale/missing.
+
+        `expected_key=None` accepts a cache of any key - for serving read-only neutral
+        lookups from a stale cache while a fresh build is pending."""
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, ValueError):
             return None
-        if data.get("cache_key") != expected_key:
+        if expected_key is not None and (
+            data.get("cache_key") != expected_key or data.get("schema") != _CACHE_SCHEMA
+        ):
             return None
         cat = cls(system_dir=system_dir, user_dir=user_dir)
         cat._catalog = data["catalog"]

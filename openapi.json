@@ -151,6 +151,224 @@
         }
       }
     },
+    "/api/profiles/machines/suggest": {
+      "post": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "Suggest machine presets for a printer model",
+        "description": "Candidate machine presets for (manufacturer, model), best first. Empty `candidates` (not 404) when nothing matches. `match_reason`: `exact_model`, `fuzzy_name`, `vendor_only` (same vendor, different model; low confidence, capped).\n\nEvery response carries `catalog_version` (also as `X-Catalog-Version`); `stale: true` when served from a cached catalog while a fresh one is pending.",
+        "operationId": "suggest_machines_api_profiles_machines_suggest_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NeutralModelQuery"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "503": {
+            "description": "No catalog, live or cached: `{\"error\": \"catalog_unavailable\"}`"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/profiles/models/variants": {
+      "post": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "List nozzle variants of a printer model",
+        "description": "Machine presets that are nozzle variants of the best-matching model, ordered by diameter then flow. Exactly one has `is_default_guess` (0.4 standard if present, else the smallest standard variant). Empty `variants` when the model is unknown.",
+        "operationId": "model_variants_api_profiles_models_variants_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NeutralModelQuery"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "503": {
+            "description": "No catalog, live or cached: `{\"error\": \"catalog_unavailable\"}`"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/profiles/machines/{machine_ref}/presets": {
+      "get": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "Process/filament presets compatible with a machine",
+        "description": "Presets whose resolved `compatible_printers` is empty or names this machine. `kind=process|filament` narrows; default both. `compatible_models` is omitted for universal presets. 404 `{\"error\": \"unknown_machine_ref\"}`, 422 `{\"error\": \"invalid_kind\"}`.",
+        "operationId": "machine_presets_api_profiles_machines__machine_ref__presets_get",
+        "parameters": [
+          {
+            "name": "machine_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Machine Ref"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "503": {
+            "description": "No catalog, live or cached: `{\"error\": \"catalog_unavailable\"}`"
+          },
+          "404": {
+            "description": "unknown_machine_ref"
+          },
+          "422": {
+            "description": "invalid_kind"
+          }
+        }
+      }
+    },
+    "/api/profiles/machines/{machine_ref}/supports": {
+      "get": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "Can this machine ref (and bed) be sliced for?",
+        "description": "Always 200. `supported` is false with `reason` `unknown_machine_ref` or `bed_mismatch` (`bed_x`/`bed_y` in mm, 1 mm tolerance; a machine with no declared bed size is never ruled out). `reason` is null when supported.",
+        "operationId": "machine_supports_api_profiles_machines__machine_ref__supports_get",
+        "parameters": [
+          {
+            "name": "machine_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Machine Ref"
+            }
+          },
+          {
+            "name": "bed_x",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Bed X"
+            }
+          },
+          {
+            "name": "bed_y",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Bed Y"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "503": {
+            "description": "No catalog, live or cached: `{\"error\": \"catalog_unavailable\"}`"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/profiles/{profile_uuid}": {
       "get": {
         "tags": [
@@ -1063,6 +1281,38 @@
           "filament_uuids"
         ],
         "title": "MergedConfigRequest"
+      },
+      "NeutralModelQuery": {
+        "properties": {
+          "manufacturer": {
+            "type": "string",
+            "title": "Manufacturer",
+            "description": "Printer manufacturer display name, e.g. 'Bambu Lab'."
+          },
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "Printer model display name, e.g. 'P1S'."
+          },
+          "model_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Key",
+            "description": "Caller's own model key; matched alongside `model`."
+          }
+        },
+        "type": "object",
+        "required": [
+          "manufacturer",
+          "model"
+        ],
+        "title": "NeutralModelQuery"
       },
       "ValidationError": {
         "properties": {

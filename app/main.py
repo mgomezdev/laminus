@@ -673,6 +673,133 @@ async def get_broken_profiles():
     return {"count": len(broken), "broken": broken}
 
 
+# ---- neutral (model / nozzle-variant) profile API --------------------------------
+# Answered purely from the catalog, so it works with the engine down: while the live
+# catalog is still (re)building, a previously cached one is served with `stale: true`.
+
+_stale_catalog: Optional[ProfileCatalog] = None
+
+
+class NeutralModelQuery(BaseModel):
+    manufacturer: str = Field(..., description="Printer manufacturer display name, e.g. 'Bambu Lab'.")
+    model: str = Field(..., description="Printer model display name, e.g. 'P1S'.")
+    model_key: Optional[str] = Field(None, description="Caller's own model key; matched alongside `model`.")
+
+
+def _neutral_catalog() -> tuple[Optional[ProfileCatalog], bool]:
+    """(catalog, stale). Falls back to the on-disk cache, whatever its key, when no live
+    catalog exists yet; (None, False) when there is nothing to serve at all."""
+    global _stale_catalog
+    if catalog is not None:
+        _stale_catalog = None
+        return catalog, _catalog_building
+    if _stale_catalog is None:
+        _stale_catalog = ProfileCatalog.load_from_cache(
+            _CATALOG_CACHE_FILE, None, SYSTEM_PROFILES_DIR, USER_CONFIG_DIR,
+        )
+    return (_stale_catalog, True) if _stale_catalog is not None else (None, False)
+
+
+def _neutral_json(cat: ProfileCatalog, stale: bool, body: dict, status_code: int = 200) -> JSONResponse:
+    version = cat.neutral.version
+    payload = {"catalog_version": version, **body}
+    if stale:
+        payload["stale"] = True
+    return JSONResponse(status_code=status_code, content=payload, headers={"X-Catalog-Version": version})
+
+
+_NEUTRAL_RESPONSES = {503: {"description": "No catalog, live or cached: `{\"error\": \"catalog_unavailable\"}`"}}
+
+
+def _catalog_unavailable() -> JSONResponse:
+    return JSONResponse(status_code=503, content={"error": "catalog_unavailable"})
+
+
+@app.post(
+    "/api/profiles/machines/suggest",
+    tags=["profiles"],
+    summary="Suggest machine presets for a printer model",
+    description=(
+        "Candidate machine presets for (manufacturer, model), best first. Empty `candidates` "
+        "(not 404) when nothing matches. `match_reason`: `exact_model`, `fuzzy_name`, "
+        "`vendor_only` (same vendor, different model; low confidence, capped).\n\n"
+        "Every response carries `catalog_version` (also as `X-Catalog-Version`); `stale: true` "
+        "when served from a cached catalog while a fresh one is pending."
+    ),
+    responses=_NEUTRAL_RESPONSES,
+)
+async def suggest_machines(body: NeutralModelQuery):
+    cat, stale = _neutral_catalog()
+    if cat is None:
+        return _catalog_unavailable()
+    candidates = cat.neutral.suggest_machines(body.manufacturer, body.model, body.model_key)
+    return _neutral_json(cat, stale, {"candidates": candidates})
+
+
+@app.post(
+    "/api/profiles/models/variants",
+    tags=["profiles"],
+    summary="List nozzle variants of a printer model",
+    description=(
+        "Machine presets that are nozzle variants of the best-matching model, ordered by "
+        "diameter then flow. Exactly one has `is_default_guess` (0.4 standard if present, else "
+        "the smallest standard variant). Empty `variants` when the model is unknown."
+    ),
+    responses=_NEUTRAL_RESPONSES,
+)
+async def model_variants(body: NeutralModelQuery):
+    cat, stale = _neutral_catalog()
+    if cat is None:
+        return _catalog_unavailable()
+    variants = cat.neutral.model_variants(body.manufacturer, body.model, body.model_key)
+    return _neutral_json(cat, stale, {"variants": variants})
+
+
+@app.get(
+    "/api/profiles/machines/{machine_ref}/presets",
+    tags=["profiles"],
+    summary="Process/filament presets compatible with a machine",
+    description=(
+        "Presets whose resolved `compatible_printers` is empty or names this machine. "
+        "`kind=process|filament` narrows; default both. `compatible_models` is omitted for "
+        "universal presets. 404 `{\"error\": \"unknown_machine_ref\"}`, 422 `{\"error\": \"invalid_kind\"}`."
+    ),
+    responses={**_NEUTRAL_RESPONSES, 404: {"description": "unknown_machine_ref"}, 422: {"description": "invalid_kind"}},
+)
+async def machine_presets(machine_ref: str, kind: Optional[str] = None):
+    cat, stale = _neutral_catalog()
+    if cat is None:
+        return _catalog_unavailable()
+    if kind not in (None, "process", "filament"):
+        return _neutral_json(cat, stale, {"error": "invalid_kind"}, 422)
+    machine = cat.neutral.machine_by_ref.get(machine_ref)
+    if machine is None:
+        return _neutral_json(cat, stale, {"error": "unknown_machine_ref"}, 404)
+    kinds = (kind,) if kind else ("process", "filament")
+    return _neutral_json(cat, stale, {
+        "machine_ref": machine_ref, "presets": cat.neutral.machine_presets(machine, kinds),
+    })
+
+
+@app.get(
+    "/api/profiles/machines/{machine_ref}/supports",
+    tags=["profiles"],
+    summary="Can this machine ref (and bed) be sliced for?",
+    description=(
+        "Always 200. `supported` is false with `reason` `unknown_machine_ref` or `bed_mismatch` "
+        "(`bed_x`/`bed_y` in mm, 1 mm tolerance; a machine with no declared bed size is never "
+        "ruled out). `reason` is null when supported."
+    ),
+    responses=_NEUTRAL_RESPONSES,
+)
+async def machine_supports(machine_ref: str, bed_x: Optional[float] = None, bed_y: Optional[float] = None):
+    cat, stale = _neutral_catalog()
+    if cat is None:
+        return _catalog_unavailable()
+    supported, reason = cat.neutral.supports(machine_ref, bed_x, bed_y)
+    return _neutral_json(cat, stale, {"machine_ref": machine_ref, "supported": supported, "reason": reason})
+
+
 @app.get(
     "/api/profiles/{profile_uuid}",
     tags=["profiles"],
