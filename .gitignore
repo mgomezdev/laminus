@@ -15,3 +15,8 @@ data/
 
 # Job temp dirs (runtime)
 /tmp/
+
+# Local agent tooling (personal skill installs, not project config)
+.claude/
+.agents/
+skills-lock.json
