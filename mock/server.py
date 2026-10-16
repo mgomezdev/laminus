@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import uuid
 import zipfile
 from typing import Optional
@@ -192,6 +193,94 @@ async def rescan_profiles():
 @app.get("/api/profiles/broken")
 async def get_broken_profiles():
     return {"count": 0, "broken": []}
+
+
+# ---- neutral (model / nozzle-variant) API -------------------------------------
+# Mirrors app/neutral_profiles.py for the mock's single machine. Constant version.
+
+CATALOG_VERSION = "mock-catalog-v1"
+
+
+def _ref(kind: str, name: str) -> str:
+    return f"{kind}:{re.sub(r'[^a-z0-9.]+', '-', name.lower()).strip('-')}"
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+
+MACHINE_REF = _ref("machine", _MACHINE["name"])
+
+
+def _query(body: dict) -> dict:
+    for k in ("manufacturer", "model"):
+        if not isinstance(body.get(k), str):
+            raise HTTPException(422, f"'{k}' is required.")
+    return body
+
+
+def _neutral(body: dict, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(
+        {"catalog_version": CATALOG_VERSION, **body},
+        status_code=status_code,
+        headers={"X-Catalog-Version": CATALOG_VERSION},
+    )
+
+
+def _machine_json() -> dict:
+    return {
+        "ref": MACHINE_REF, "uuid": MACHINE_UUID, "name": _MACHINE["name"],
+        "nozzle_diameter_mm": _MACHINE["nozzle_diameter"], "flow": "standard",
+    }
+
+
+def _match(body: dict) -> Optional[str]:
+    q = _query(body)
+    mfr = _norm(_MACHINE["manufacturer"])
+    if _norm(q["manufacturer"]) not in mfr and mfr not in _norm(q["manufacturer"]):
+        return None
+    keys = {_norm(q["model"]), _norm(q.get("model_key") or "")}
+    return "exact_model" if _norm(_MACHINE["model"]) in keys else "vendor_only"
+
+
+@app.post("/api/profiles/machines/suggest")
+async def suggest_machines(body: dict):
+    reason = _match(body)
+    cands = [] if reason is None else [
+        {**_machine_json(), "confidence": 1.0 if reason == "exact_model" else 0.1, "match_reason": reason}
+    ]
+    return _neutral({"candidates": cands})
+
+
+@app.post("/api/profiles/models/variants")
+async def model_variants(body: dict):
+    variants = [{**_machine_json(), "is_default_guess": True}] if _match(body) == "exact_model" else []
+    return _neutral({"variants": variants})
+
+
+@app.get("/api/profiles/machines/{machine_ref}/presets")
+async def machine_presets(machine_ref: str, kind: Optional[str] = None):
+    if kind not in (None, "process", "filament"):
+        return _neutral({"error": "invalid_kind"}, 422)
+    if machine_ref != MACHINE_REF:
+        return _neutral({"error": "unknown_machine_ref"}, 404)
+    model = f"{_MACHINE['manufacturer']} {_MACHINE['model']}"
+    presets = [
+        {"ref": _ref(e["type"], e["name"]), "uuid": e["uuid"], "name": e["name"], "kind": e["type"],
+         "compatible_models": [model]}
+        for e in (_PROCESS, _FILAMENT) if kind in (None, e["type"])
+    ]
+    return _neutral({"machine_ref": machine_ref, "presets": presets})
+
+
+@app.get("/api/profiles/machines/{machine_ref}/supports")
+async def machine_supports(machine_ref: str, bed_x: Optional[float] = None, bed_y: Optional[float] = None):
+    reason = None
+    if machine_ref != MACHINE_REF:
+        reason = "unknown_machine_ref"
+    elif any(w is not None and abs(w - h) > 1.0 for w, h in ((bed_x, _MACHINE["bed_size_x"]), (bed_y, _MACHINE["bed_size_y"]))):
+        reason = "bed_mismatch"
+    return _neutral({"machine_ref": machine_ref, "supported": reason is None, "reason": reason})
 
 
 @app.get("/api/profiles/{profile_uuid}")
