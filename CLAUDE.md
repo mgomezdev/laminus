@@ -77,3 +77,6 @@ The catalog is cached to `/tmp/laminus_catalog_cache.json` (deliberately not the
 Prefer a thin user preset: `"inherits": "<vendor profile name>"` plus only the keys you're overriding. laminus resolves the chain itself at catalog-build and slice time, so this rolls forward with vendor updates automatically.
 
 `flatten_profiles.py` recursively resolves inheritance and writes a fully merged, standalone JSON with no `inherits` — use it only for a permanent fork (the vendor profile is being removed, or you need to diverge for good). A flattened profile is frozen at the OrcaSlicer version it was flattened from and will not receive any later vendor fix. It also patches in required fields (`"from": "user"`, `compatible_printers`, `layer_change_gcode`) that the CLI validator requires.
+
+### Neutral profile API
+`app/neutral_profiles.py` (`ProfileCatalog.neutral`) answers model/nozzle-variant lookups (`/api/profiles/machines/suggest`, `/models/variants`, `/machines/{ref}/presets|supports`) purely from the catalog — no engine. Refs are `<kind>:<slug(name)>`; `catalog_version` hashes preset identity+compat data. `main._neutral_catalog()` falls back to the on-disk cache (any key) with `stale: true` when no live catalog exists. Catalog entry shape changes must bump `_CACHE_SCHEMA` in `profile_catalog.py`. Contract in `docs/laminus-api-for-agents.md` §2b.

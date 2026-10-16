@@ -378,3 +378,66 @@ def test_arrange_returns_zip(client):
     )
     assert r.status_code == 200
     assert zipfile.is_zipfile(io.BytesIO(r.content))
+
+
+# ---------------------------------------------------------------------------
+# Neutral (model / nozzle-variant) API
+# ---------------------------------------------------------------------------
+
+CANDIDATE_FIELDS = {"ref", "uuid", "name", "nozzle_diameter_mm", "flow", "confidence", "match_reason"}
+VARIANT_FIELDS = {"ref", "uuid", "name", "nozzle_diameter_mm", "flow", "is_default_guess"}
+PRESET_FIELDS = {"ref", "uuid", "name", "kind"}
+
+
+def _model_query(client: TestClient) -> dict:
+    m = next(m for m in client.get("/api/profiles").json()["machine"] if m.get("manufacturer") and m.get("model"))
+    return {"manufacturer": m["manufacturer"], "model": m["model"]}
+
+
+def _suggested_ref(client: TestClient) -> str:
+    return client.post("/api/profiles/machines/suggest", json=_model_query(client)).json()["candidates"][0]["ref"]
+
+
+def test_neutral_suggest_fields_and_version_header(client):
+    r = client.post("/api/profiles/machines/suggest", json=_model_query(client))
+    assert r.status_code == 200
+    body = r.json()
+    assert r.headers["X-Catalog-Version"] == body["catalog_version"]
+    top = body["candidates"][0]
+    assert not _missing(CANDIDATE_FIELDS, top)
+    assert top["match_reason"] == "exact_model" and top["flow"] in ("standard", "high_flow")
+
+
+def test_neutral_suggest_no_match_is_empty(client):
+    r = client.post("/api/profiles/machines/suggest", json={"manufacturer": "Nobody", "model": "Zzz9000"})
+    assert r.status_code == 200 and r.json()["candidates"] == []
+
+
+def test_neutral_variants_one_default(client):
+    v = client.post("/api/profiles/models/variants", json=_model_query(client)).json()["variants"]
+    assert v and not _missing(VARIANT_FIELDS, v[0])
+    assert sum(x["is_default_guess"] for x in v) == 1
+
+
+def test_neutral_presets_fields_and_kind_filter(client):
+    ref = _suggested_ref(client)
+    presets = client.get(f"/api/profiles/machines/{ref}/presets").json()["presets"]
+    assert {p["kind"] for p in presets} == {"process", "filament"}
+    assert not _missing(PRESET_FIELDS, presets[0])
+    only = client.get(f"/api/profiles/machines/{ref}/presets?kind=process").json()["presets"]
+    assert only and {p["kind"] for p in only} == {"process"}
+
+
+def test_neutral_presets_unknown_ref_404(client):
+    r = client.get("/api/profiles/machines/machine:nope/presets")
+    assert r.status_code == 404 and r.json()["error"] == "unknown_machine_ref"
+
+
+def test_neutral_supports(client):
+    ref = _suggested_ref(client)
+    ok = client.get(f"/api/profiles/machines/{ref}/supports").json()
+    assert ok["supported"] is True and ok["reason"] is None
+    bad = client.get(f"/api/profiles/machines/{ref}/supports?bed_x=1&bed_y=1").json()
+    assert bad["reason"] == "bed_mismatch"
+    unk = client.get("/api/profiles/machines/machine:nope/supports")
+    assert unk.status_code == 200 and unk.json()["reason"] == "unknown_machine_ref"
