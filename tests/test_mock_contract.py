@@ -390,7 +390,7 @@ PRESET_FIELDS = {"ref", "uuid", "name", "kind"}
 
 
 def _model_query(client: TestClient) -> dict:
-    m = client.get("/api/profiles").json()["machine"][0]
+    m = next(m for m in client.get("/api/profiles").json()["machine"] if m.get("manufacturer") and m.get("model"))
     return {"manufacturer": m["manufacturer"], "model": m["model"]}
 
 
