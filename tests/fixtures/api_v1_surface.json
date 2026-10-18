@@ -1,0 +1,126 @@
+{
+  "GET /api/v1": {
+    "required_body": [],
+    "required_params": [],
+    "responses": [
+      "200"
+    ]
+  },
+  "GET /api/v1/jobs": {
+    "required_body": [],
+    "required_params": [],
+    "responses": [
+      "200",
+      "422"
+    ]
+  },
+  "GET /api/v1/jobs/{job_id}": {
+    "required_body": [],
+    "required_params": [
+      "path:job_id"
+    ],
+    "responses": [
+      "200",
+      "404",
+      "422"
+    ]
+  },
+  "GET /api/v1/jobs/{job_id}/artifact": {
+    "required_body": [],
+    "required_params": [
+      "path:job_id"
+    ],
+    "responses": [
+      "200",
+      "404",
+      "409",
+      "422"
+    ]
+  },
+  "GET /api/v1/jobs/{job_id}/events": {
+    "required_body": [],
+    "required_params": [
+      "path:job_id"
+    ],
+    "responses": [
+      "200",
+      "404",
+      "422"
+    ]
+  },
+  "GET /api/v1/profiles": {
+    "required_body": [],
+    "required_params": [],
+    "responses": [
+      "200",
+      "422",
+      "503"
+    ]
+  },
+  "GET /api/v1/profiles/{profile_uuid}": {
+    "required_body": [],
+    "required_params": [
+      "path:profile_uuid"
+    ],
+    "responses": [
+      "200",
+      "404",
+      "422",
+      "503"
+    ]
+  },
+  "POST /api/v1/jobs": {
+    "required_body": [
+      "filament_uuids",
+      "file",
+      "plate",
+      "process_uuid"
+    ],
+    "required_params": [],
+    "responses": [
+      "202",
+      "409",
+      "422",
+      "503"
+    ]
+  },
+  "POST /api/v1/projects/inspect": {
+    "required_body": [
+      "file"
+    ],
+    "required_params": [],
+    "responses": [
+      "200",
+      "400",
+      "422"
+    ]
+  },
+  "POST /api/v1/projects/merge": {
+    "required_body": [
+      "files",
+      "selection"
+    ],
+    "required_params": [],
+    "responses": [
+      "200",
+      "400",
+      "408",
+      "422",
+      "503"
+    ]
+  },
+  "POST /api/v1/projects/subset": {
+    "required_body": [
+      "file",
+      "selection"
+    ],
+    "required_params": [],
+    "responses": [
+      "200",
+      "400",
+      "408",
+      "422",
+      "503"
+    ]
+  }
+}

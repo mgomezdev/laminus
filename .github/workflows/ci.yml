@@ -30,7 +30,7 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python scripts/export_openapi.py
       - name: Fail if spec is stale
-        run: git diff --exit-code openapi.json
+        run: git diff --exit-code openapi.json openapi-v1.json
 
   test:
     runs-on: ubuntu-latest
@@ -196,4 +196,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: openapi.json
+          files: |
+            openapi.json
+            openapi-v1.json

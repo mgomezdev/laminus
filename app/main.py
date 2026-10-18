@@ -1,3 +1,4 @@
+import sys
 import os
 import shutil
 import asyncio
@@ -2601,3 +2602,7 @@ async def test_known_profile(machine_name: str | None = None):
         "filament_uuid": filament["uuid"],
         "filament_name": filament["name"],
     }
+
+
+from app import api_v1 as _api_v1  # noqa: E402  (installs /api/v1 once every legacy route exists)
+_api_v1.install(app, sys.modules[__name__])
