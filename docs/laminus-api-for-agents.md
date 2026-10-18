@@ -366,9 +366,11 @@ POST /api/arrange/subset       # multipart/form-data
 | `file`            | file   | yes      | Orca/Bambu `.3mf` |
 | `selection`       | string | yes      | JSON `[{"name":"Lid","qty":4},{"id":12,"qty":1}]`. A name shared by several objects → 422, use `id` |
 | `machine_uuid`    | string | no       | Retarget bed/printer keys to this machine preset (catalog UUID) |
+| `process_uuid`    | string | no       | Replace the project's process preset with this one (needs `machine_uuid`) |
+| `filament_uuids`  | string | no       | JSON array of filament preset UUIDs, one per slot (needs `machine_uuid`; more than the machine's slots → 422) |
 | `allow_rotations` | bool   | no       | Pass `--allow-rotations` to the arranger |
 
-Returns a `.3mf` with only the selected objects (qty copies each, as instances) arranged over as many plates as OrcaSlicer needs. Headers: `X-Plate-Count`, `X-Instance-Count`, `X-Warnings` (objects not resting on the bed; empty when fine). Per-object/part overrides, modifier parts, height ranges and painted data are preserved; process/filament settings are *not* remapped to the new printer. See `docs/experiments/subset-arrange.md`.
+Returns a `.3mf` with only the selected objects (qty copies each, as instances) arranged over as many plates as OrcaSlicer needs. Headers: `X-Plate-Count`, `X-Instance-Count`, `X-Warnings` (objects not resting on the bed; empty when fine). Per-object/part overrides, modifier parts, height ranges and painted data are preserved; with `machine_uuid`, filament slots are cut to what the machine supports (`nozzle_diameter` count, unless `single_extruder_multi_material`): per-slot settings are truncated and objects/parts/height ranges on a dropped slot move to extruder 1. Painted colours are not remapped. `process_uuid` / `filament_uuids` replace the embedded presets; otherwise embedded presets whose `compatible_printers` exclude the target are reported. `X-Remap-Warnings` lists everything remapped/dropped/incompatible. See `docs/experiments/subset-arrange.md`.
 
 ```bash
 curl -X POST http://localhost:5000/api/arrange/subset \
@@ -391,11 +393,13 @@ POST /api/arrange/merge        # multipart/form-data, repeated `files` parts
 | `files`           | file[] | yes      | Two or more `.3mf`. **The first upload is the base**: its process/filament/printer settings, thumbnails and metadata are used for the whole result |
 | `selection`       | string | yes      | JSON list. Each entry names its source with `file` (uploaded filename, or 0-based upload index) plus `id` / `name` / `plate` and `qty` |
 | `machine_uuid`    | string | no       | Retarget bed/printer keys (as in `/api/arrange/subset`) |
+| `process_uuid`    | string | no       | Replace the project's process preset with this one (needs `machine_uuid`) |
+| `filament_uuids`  | string | no       | JSON array of filament preset UUIDs, one per slot (needs `machine_uuid`; more than the machine's slots → 422) |
 | `allow_rotations` | bool   | no       | Pass `--allow-rotations` to the arranger |
 
 `{"plate": N, "qty": q}` = everything on source plate N (each object x its count there x q); it also works in `/api/arrange/subset`. Entries for the same object accumulate.
 
-Response: one `.3mf`. Headers `X-Plate-Count`, `X-Instance-Count`, and `X-Merge-Warnings` (non-empty when a non-base source used a different process/filament preset, has painted data with a different filament count, or an object ends up not resting on the bed - floating/sunk by more than 0.5 mm). Errors: 422 (bad selection / unknown file / base not selected / non-base object uses a filament slot the base lacks), 400, 408, 503.
+Response: one `.3mf`. Headers `X-Plate-Count`, `X-Instance-Count`, `X-Remap-Warnings` (as in subset, prefixed by source file) and `X-Merge-Warnings` (non-empty when a non-base source used a different process/filament preset, has painted data with a different filament count, or an object ends up not resting on the bed - floating/sunk by more than 0.5 mm). Errors: 422 (bad selection / unknown file / base not selected / non-base object uses a filament slot the base lacks), 400, 408, 503.
 
 ```bash
 curl -X POST http://localhost:5000/api/arrange/merge   -F "files=@Hex-Moss-Pole.3mf"   -F "files=@cloud pots.3mf"   -F 'selection=[
