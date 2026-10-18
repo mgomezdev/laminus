@@ -357,8 +357,8 @@ POST /api/3mf/previews         # multipart/form-data
 ## Arrange a subset (pick objects × qty from a 3MF)
 
 ```
-POST /api/3mf/objects          # list objects: id, name, extruder, override keys, parts, instances
-POST /api/arrange/subset       # multipart/form-data
+POST /api/v1/projects/inspect  # list objects: id, name, extruder, override keys, parts, instances (legacy alias: /api/3mf/objects)
+POST /api/v1/projects/subset   # multipart/form-data (legacy alias: /api/arrange/subset)
 ```
 
 | Field             | Type   | Required | Description |
@@ -373,7 +373,7 @@ POST /api/arrange/subset       # multipart/form-data
 Returns a `.3mf` with only the selected objects (qty copies each, as instances) arranged over as many plates as OrcaSlicer needs. Headers: `X-Plate-Count`, `X-Instance-Count`, `X-Warnings` (objects not resting on the bed; empty when fine). Per-object/part overrides, modifier parts, height ranges and painted data are preserved; with `machine_uuid`, filament slots are cut to what the machine supports (`nozzle_diameter` count, unless `single_extruder_multi_material`): per-slot settings are truncated and objects/parts/height ranges on a dropped slot move to extruder 1. Painted colours are not remapped. `process_uuid` / `filament_uuids` replace the embedded presets; otherwise embedded presets whose `compatible_printers` exclude the target are reported. `X-Remap-Warnings` lists everything remapped/dropped/incompatible. See `docs/experiments/subset-arrange.md`.
 
 ```bash
-curl -X POST http://localhost:5000/api/arrange/subset \
+curl -X POST http://localhost:5000/api/v1/projects/subset \
   -F "file=@project.3mf" \
   -F 'selection=[{"name":"Lid","qty":6},{"id":12,"qty":2}]' \
   -F "machine_uuid=8aaac37c-14a7-5a53-b9f7-3dd1df210919" \
@@ -385,7 +385,7 @@ curl -X POST http://localhost:5000/api/arrange/subset \
 ## Merge selections from several 3MFs into one
 
 ```
-POST /api/arrange/merge        # multipart/form-data, repeated `files` parts
+POST /api/v1/projects/merge    # multipart/form-data, repeated `files` parts (legacy alias: /api/arrange/merge)
 ```
 
 | Field             | Type   | Required | Description |

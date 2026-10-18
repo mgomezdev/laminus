@@ -58,6 +58,8 @@ These need a new major (`/api/v2`):
 | `POST /api/v1/projects/subset` | `POST /api/arrange/subset` |
 | `POST /api/v1/projects/merge` | `POST /api/arrange/merge` |
 
+`projects/subset` and `projects/merge` accept `process_uuid` / `filament_uuids` overrides and report remapped/dropped filament slots and incompatible embedded presets in the `X-Remap-Warnings` header (see `laminus-api-for-agents.md`).
+
 Differences worth knowing: a job record outlives its artifact (`artifact.available: false` after the one-time download or TTL eviction, instead of a 404 on the job); artifact on a not-yet-complete job is 409 (legacy: 400); profile lists are flat with `type`, filtered by `type=`/`q=` and paginated (legacy: grouped, unpaginated).
 
 Not yet in v1 (use legacy routes; they carry no deprecation headers): `health`, `pack`, `arrange`, `slice/prepared`, `slice/thumbnail`, `profiles/*` lookups (`merged-config`, neutral model/nozzle API, `upload`, `rescan`, `broken`), `3mf/previews`, `cleanup`.

@@ -2269,6 +2269,30 @@
             ],
             "title": "Machine Uuid"
           },
+          "process_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Process Uuid",
+            "description": "Override the project's process preset (requires machine_uuid)"
+          },
+          "filament_uuids": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filament Uuids",
+            "description": "JSON array of filament preset UUIDs, one per slot (requires machine_uuid)"
+          },
           "allow_rotations": {
             "type": "boolean",
             "title": "Allow Rotations",
@@ -2304,6 +2328,30 @@
               }
             ],
             "title": "Machine Uuid"
+          },
+          "process_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Process Uuid",
+            "description": "Override the project's process preset (requires machine_uuid)"
+          },
+          "filament_uuids": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filament Uuids",
+            "description": "JSON array of filament preset UUIDs, one per slot (requires machine_uuid)"
           },
           "allow_rotations": {
             "type": "boolean",

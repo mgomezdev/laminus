@@ -659,7 +659,7 @@ class _FakeCatalog:
         return self.cfgs[u]
 
 
-def _post_subset(src_path, **data):
+def _post_subset(src_path, _url="/api/arrange/subset", **data):
     async def _fake_orca(*args, **kwargs):
         a = list(args)
         _fake_two_plates(a[-1], a[a.index("--export-3mf") + 1])
@@ -670,7 +670,7 @@ def _post_subset(src_path, **data):
 
     with patch("app.main.catalog", _FakeCatalog()), \
             patch("asyncio.create_subprocess_exec", new=_fake_orca):
-        return TestClient(app).post("/api/arrange/subset", files=[_upload(src_path)],
+        return TestClient(app).post(_url, files=[_upload(src_path)],
                                     data={"selection": json.dumps([{"name": "Lid", "qty": 1}]), **data})
 
 
@@ -708,3 +708,18 @@ def test_endpoint_override_validation(tmp_path, data, code):
 
 def _cfg_bytes(b):
     return json.loads(zipfile.ZipFile(io.BytesIO(b)).read("Metadata/project_settings.config"))
+
+
+def test_v1_projects_subset_supports_remap_and_enveloped_errors(tmp_path):
+    srcp = str(tmp_path / "m.3mf")
+    _multi(srcp)
+    url = "/api/v1/projects/subset"
+    r = _post_subset(srcp, _url=url, machine_uuid="m1", process_uuid="p1", filament_uuids='["f1"]')
+    assert r.status_code == 200, r.text
+    assert "extruder 2 -> 1" in r.headers["X-Remap-Warnings"]
+    assert r.headers["API-Version"] == "v1" and "Deprecation" not in r.headers
+    bad = _post_subset(srcp, _url=url, machine_uuid="m1", filament_uuids='["f1","f1"]')
+    assert bad.status_code == 422
+    assert bad.json()["error"]["code"] == "unprocessable" and "slot" in bad.json()["error"]["message"]
+    legacy = _post_subset(srcp, machine_uuid="m1")
+    assert legacy.headers["Deprecation"] == "true"
