@@ -8,6 +8,7 @@ import glob
 import time
 import logging
 import json
+import zipfile
 from collections import OrderedDict, deque
 from contextlib import asynccontextmanager, contextmanager
 from typing import Dict, List, Optional
@@ -2084,6 +2085,8 @@ async def arrange_subset(
     file: UploadFile = File(...),
     selection: str = Form(..., description='JSON: [{"name": "Lid", "qty": 4}, {"id": 12, "qty": 1}]'),
     machine_uuid: Optional[str] = Form(None),
+    process_uuid: Optional[str] = Form(None, description="Override the project's process preset (requires machine_uuid)"),
+    filament_uuids: Optional[str] = Form(None, description='JSON array of filament preset UUIDs, one per slot (requires machine_uuid)'),
     allow_rotations: bool = Form(False),
 ):
     try:
@@ -2099,14 +2102,7 @@ async def arrange_subset(
     if not safe_name.lower().endswith(".3mf"):
         raise HTTPException(status_code=400, detail="Only .3mf files are supported.")
 
-    printer_cfg = None
-    if machine_uuid:
-        if catalog is None:
-            raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
-        entry = catalog.get_by_uuid(machine_uuid)
-        if entry is None or entry.get("type") != "machine":
-            raise HTTPException(status_code=422, detail=f"Machine UUID '{machine_uuid}' not found.")
-        printer_cfg = await asyncio.to_thread(catalog.resolved, entry["uuid"])
+    target = await _resolve_retarget(machine_uuid, process_uuid, filament_uuids)
 
     job_id = str(uuid.uuid4())
     with _track_inflight_arrange(job_id):
@@ -2124,7 +2120,8 @@ async def arrange_subset(
         def _build():
             want = _subset.resolve_selection(_subset.list_objects(in_file), sel,
                                              _subset.plate_members(in_file))
-            summary = _subset.build_subset(in_file, sub_file, want, printer_cfg=printer_cfg)
+            summary = _subset.build_subset(in_file, sub_file, want, **target.kwargs)
+            summary["remap"] += target.compat_warnings(sub_file)
             _subset.expand_instances(sub_file, oracle_in)
             return summary
 
@@ -2142,9 +2139,73 @@ async def arrange_subset(
         background_tasks.add_task(cleanup_file, stable_out)
         warn = " | ".join(await asyncio.to_thread(_preview.bed_clearance_warnings, final_file))
         headers = {"X-Instance-Count": str(summary["instances"]), "X-Plate-Count": str(plates),
-                   "X-Warnings": warn.encode("ascii", "replace").decode()}
+                   "X-Warnings": warn.encode("ascii", "replace").decode(),
+                   "X-Remap-Warnings": " | ".join(summary["remap"]).encode("ascii", "replace").decode()}
         return FileResponse(path=stable_out, filename=f"subset_{safe_name}",
                             media_type="application/octet-stream", headers=headers)
+
+
+class _Retarget:
+    """Resolved machine/process/filament presets for retargeting a subset/merged 3MF."""
+
+    def __init__(self, machine=None, printer_cfg=None, process_cfg=None, filament_cfgs=None):
+        self.machine, self.printer_cfg = machine, printer_cfg
+        self.process_cfg, self.filament_cfgs = process_cfg, filament_cfgs
+
+    @property
+    def kwargs(self) -> dict:
+        return {"printer_cfg": self.printer_cfg, "process_cfg": self.process_cfg,
+                "filament_cfgs": self.filament_cfgs}
+
+    def compat_warnings(self, path: str) -> list[str]:
+        """Warn when an embedded (not overridden) preset lists printers excluding the target."""
+        if self.machine is None or catalog is None:
+            return []
+        with zipfile.ZipFile(path) as z:
+            cfg = json.loads(z.read(_subset.PROJECT_SETTINGS))
+        wanted = []
+        if self.process_cfg is None:
+            wanted.append(("process", cfg.get("print_settings_id"), "process_uuid"))
+        if self.filament_cfgs is None:
+            ids = cfg.get("filament_settings_id") or []
+            wanted += [("filament", n, "filament_uuids") for n in (ids if isinstance(ids, list) else [ids])]
+        out = []
+        for kind, name, param in wanted:
+            for e in catalog._catalog.get(kind, []):
+                compat = e.get("compatible_printers") or []
+                if e["name"] == name and compat and self.machine["name"] not in compat:
+                    out.append(f"{kind} preset '{name}' is not compatible with '{self.machine['name']}'; "
+                               f"pass {param} to remap")
+                    break
+        return out
+
+
+async def _resolve_retarget(machine_uuid, process_uuid, filament_uuids) -> _Retarget:
+    if not machine_uuid:
+        if process_uuid or filament_uuids:
+            raise HTTPException(status_code=422, detail="process_uuid/filament_uuids require machine_uuid.")
+        return _Retarget()
+    if catalog is None:
+        raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
+
+    async def _load(uid, kind):
+        entry = catalog.get_by_uuid(uid)
+        if entry is None or entry.get("type") != kind:
+            raise HTTPException(status_code=422, detail=f"{kind.capitalize()} UUID '{uid}' not found.")
+        return entry, await asyncio.to_thread(catalog.resolved, entry["uuid"])
+
+    machine, printer_cfg = await _load(machine_uuid, "machine")
+    process_cfg = (await _load(process_uuid, "process"))[1] if process_uuid else None
+    filament_cfgs = None
+    if filament_uuids:
+        try:
+            uids = json.loads(filament_uuids)
+            if not isinstance(uids, list) or not uids or not all(isinstance(u, str) for u in uids):
+                raise ValueError
+        except ValueError:
+            raise HTTPException(status_code=422, detail="filament_uuids must be a non-empty JSON array of strings.")
+        filament_cfgs = [(await _load(u, "filament"))[1] for u in uids]
+    return _Retarget(machine, printer_cfg, process_cfg, filament_cfgs)
 
 
 @app.post(
@@ -2177,6 +2238,8 @@ async def arrange_merge(
     files: List[UploadFile] = File(...),
     selection: str = Form(..., description='JSON: [{"file": "a.3mf", "plate": 1, "qty": 2}, {"file": 1, "id": 8, "qty": 1}]'),
     machine_uuid: Optional[str] = Form(None),
+    process_uuid: Optional[str] = Form(None, description="Override the project's process preset (requires machine_uuid)"),
+    filament_uuids: Optional[str] = Form(None, description='JSON array of filament preset UUIDs, one per slot (requires machine_uuid)'),
     allow_rotations: bool = Form(False),
 ):
     try:
@@ -2214,14 +2277,7 @@ async def arrange_merge(
         raise HTTPException(status_code=422, detail=(
             "The first uploaded file is the base for project settings and must have at least one selection."))
 
-    printer_cfg = None
-    if machine_uuid:
-        if catalog is None:
-            raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
-        entry = catalog.get_by_uuid(machine_uuid)
-        if entry is None or entry.get("type") != "machine":
-            raise HTTPException(status_code=422, detail=f"Machine UUID '{machine_uuid}' not found.")
-        printer_cfg = await asyncio.to_thread(catalog.resolved, entry["uuid"])
+    target = await _resolve_retarget(machine_uuid, process_uuid, filament_uuids)
 
     job_id = str(uuid.uuid4())
     with _track_inflight_arrange(job_id):
@@ -2236,6 +2292,8 @@ async def arrange_merge(
         out_file = os.path.join(job_dir, "arranged.3mf")
         final_file = os.path.join(job_dir, "final.3mf")
 
+        remap: list[str] = []
+
         def _build():
             subs = []
             for i in order:
@@ -2246,7 +2304,8 @@ async def arrange_merge(
                 except _subset.SubsetError as e:
                     raise _subset.SubsetError(f"{names[i]}: {e}")
                 dst = os.path.join(job_dir, f"sub_{i}.3mf")
-                _subset.build_subset(src, dst, want, printer_cfg=printer_cfg)
+                r = _subset.build_subset(src, dst, want, **target.kwargs)
+                remap.extend(f"{names[i]}: {w}" for w in r["remap"] + target.compat_warnings(dst))
                 subs.append(dst)
             summary = _subset.merge_subsets(subs, merged, labels=[names[i] for i in order])
             _subset.expand_instances(merged, oracle_in)
@@ -2268,7 +2327,8 @@ async def arrange_merge(
             _preview.bed_clearance_warnings, final_file)
         warn = " | ".join(warnings).encode("ascii", "replace").decode()
         headers = {"X-Instance-Count": str(summary["instances"]), "X-Plate-Count": str(plates),
-                   "X-Merge-Warnings": warn}
+                   "X-Merge-Warnings": warn,
+                   "X-Remap-Warnings": " | ".join(remap).encode("ascii", "replace").decode()}
         return FileResponse(path=stable_out, filename="merged.3mf",
                             media_type="application/octet-stream", headers=headers)
 

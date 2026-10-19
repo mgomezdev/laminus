@@ -551,3 +551,175 @@ def test_endpoints_report_empty_warnings_for_flat_layout(src):
         r = TestClient(app).post("/api/arrange/subset", files=[_upload(src)],
                                  data={"selection": json.dumps([{"name": "Lid", "qty": 3}])})
     assert r.status_code == 200 and r.headers["X-Warnings"] == ""
+
+
+# ------------------------------------------------- BIZ-292: remap on retarget
+
+def _multi(path):
+    make_3mf(path, {
+        "filament_colour": ["#111111", "#222222", "#333333", "#444444"],
+        "filament_type": ["PLA", "PETG", "ABS", "TPU"],
+        "nozzle_temperature": ["200", "230", "250", "220"],
+        "flush_volumes_matrix": [str(i) for i in range(16)],
+        "flush_volumes_vector": [str(i) for i in range(8)],
+        "filament_settings_id": ["A", "B", "C", "D"],
+        "print_settings_id": "Old process",
+    })
+
+
+_ONE_EXTRUDER = {"name": "Mono", "nozzle_diameter": ["0.4"],
+                 "printable_area": ["0x0", "256x0", "256x256", "0x256"], "printable_height": "256"}
+
+
+def _cfg(path):
+    return json.loads(zipfile.ZipFile(path).read("Metadata/project_settings.config"))
+
+
+def test_retarget_to_single_extruder_truncates_slots_and_remaps_extruders(tmp_path):
+    srcp, dst = str(tmp_path / "m.3mf"), str(tmp_path / "o.3mf")
+    _multi(srcp)
+    summary = s.build_subset(srcp, dst, {2: 1, 4: 1}, printer_cfg=_ONE_EXTRUDER)
+    cfg = _cfg(dst)
+    assert cfg["filament_colour"] == ["#111111"]
+    assert cfg["filament_type"] == ["PLA"]
+    assert cfg["nozzle_temperature"] == ["200"]
+    assert cfg["flush_volumes_matrix"] == ["0"]
+    assert cfg["flush_volumes_vector"] == ["0", "1"]
+    ms = zipfile.ZipFile(dst).read("Metadata/model_settings.config").decode()
+    assert 'key="extruder" value="2"' not in ms          # Lid was on slot 2 -> 1
+    assert ms.count('key="extruder" value="1"') == 2
+    assert any("extruder 2" in w and "Lid" in w for w in summary["remap"])
+
+
+def test_retarget_same_or_larger_target_keeps_slots(tmp_path):
+    srcp, dst = str(tmp_path / "m.3mf"), str(tmp_path / "o.3mf")
+    _multi(srcp)
+    four = {**_ONE_EXTRUDER, "nozzle_diameter": ["0.4"] * 4}
+    summary = s.build_subset(srcp, dst, {2: 1}, printer_cfg=four)
+    assert len(_cfg(dst)["filament_colour"]) == 4
+    assert summary["remap"] == []
+
+
+def test_single_extruder_multi_material_target_keeps_slots(tmp_path):
+    srcp, dst = str(tmp_path / "m.3mf"), str(tmp_path / "o.3mf")
+    _multi(srcp)
+    mmu = {**_ONE_EXTRUDER, "single_extruder_multi_material": "1"}
+    s.build_subset(srcp, dst, {2: 1}, printer_cfg=mmu)
+    assert len(_cfg(dst)["filament_colour"]) == 4
+
+
+def test_explicit_process_and_filament_overrides(tmp_path):
+    srcp, dst = str(tmp_path / "m.3mf"), str(tmp_path / "o.3mf")
+    _multi(srcp)
+    process = {"name": "0.20mm Mono", "layer_height": "0.2", "inherits": "x", "compatible_printers": ["Mono"]}
+    fil = {"name": "PLA Mono", "filament_type": ["PLA"], "nozzle_temperature": ["210"],
+           "filament_colour": ["#ABCDEF"]}
+    summary = s.build_subset(srcp, dst, {2: 1}, printer_cfg=_ONE_EXTRUDER,
+                             process_cfg=process, filament_cfgs=[fil])
+    cfg = _cfg(dst)
+    assert cfg["print_settings_id"] == "0.20mm Mono" and cfg["layer_height"] == "0.2"
+    assert "inherits" not in cfg and cfg["print_compatible_printers"] == []
+    assert cfg["filament_settings_id"] == ["PLA Mono"]
+    assert cfg["nozzle_temperature"] == ["210"] and cfg["filament_colour"] == ["#ABCDEF"]
+    assert any("extruder 2" in w for w in summary["remap"])
+
+
+def test_too_many_override_filaments_for_target_rejected(tmp_path):
+    srcp, dst = str(tmp_path / "m.3mf"), str(tmp_path / "o.3mf")
+    _multi(srcp)
+    with pytest.raises(s.SubsetError, match="slot"):
+        s.build_subset(srcp, dst, {2: 1}, printer_cfg=_ONE_EXTRUDER,
+                       filament_cfgs=[{"name": "a"}, {"name": "b"}])
+
+
+def test_filament_overrides_require_machine(tmp_path):
+    srcp, dst = str(tmp_path / "m.3mf"), str(tmp_path / "o.3mf")
+    _multi(srcp)
+    with pytest.raises(s.SubsetError, match="machine"):
+        s.build_subset(srcp, dst, {2: 1}, process_cfg={"name": "p"})
+
+
+class _FakeCatalog:
+    def __init__(self):
+        self.entries = {
+            "m1": {"uuid": "m1", "type": "machine", "name": "Mono"},
+            "p1": {"uuid": "p1", "type": "process", "name": "0.20mm Mono", "compatible_printers": ["Mono"]},
+            "f1": {"uuid": "f1", "type": "filament", "name": "PLA Mono", "compatible_printers": ["Mono"]},
+            "p_old": {"uuid": "p_old", "type": "process", "name": "Old process", "compatible_printers": ["Other"]},
+        }
+        self.cfgs = {"m1": _ONE_EXTRUDER, "p1": {"name": "0.20mm Mono", "layer_height": "0.2"},
+                     "f1": {"name": "PLA Mono", "filament_type": ["PLA"]}}
+        self._catalog = {k: [e for e in self.entries.values() if e["type"] == k]
+                         for k in ("machine", "process", "filament")}
+
+    def get_by_uuid(self, u):
+        return self.entries.get(u)
+
+    def resolved(self, u):
+        return self.cfgs[u]
+
+
+def _post_subset(src_path, _url="/api/arrange/subset", **data):
+    async def _fake_orca(*args, **kwargs):
+        a = list(args)
+        _fake_two_plates(a[-1], a[a.index("--export-3mf") + 1])
+        proc = AsyncMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"ok", None))
+        return proc
+
+    with patch("app.main.catalog", _FakeCatalog()), \
+            patch("asyncio.create_subprocess_exec", new=_fake_orca):
+        return TestClient(app).post(_url, files=[_upload(src_path)],
+                                    data={"selection": json.dumps([{"name": "Lid", "qty": 1}]), **data})
+
+
+def test_endpoint_reports_remap_and_compat_warnings(tmp_path):
+    srcp = str(tmp_path / "m.3mf")
+    _multi(srcp)
+    r = _post_subset(srcp, machine_uuid="m1")
+    assert r.status_code == 200, r.text
+    h = r.headers["X-Remap-Warnings"]
+    assert "extruder 2 -> 1" in h and "process preset 'Old process' is not compatible" in h
+    assert len(_cfg_bytes(r.content)["filament_colour"]) == 1
+
+
+def test_endpoint_overrides_replace_presets(tmp_path):
+    srcp = str(tmp_path / "m.3mf")
+    _multi(srcp)
+    r = _post_subset(srcp, machine_uuid="m1", process_uuid="p1", filament_uuids='["f1"]')
+    assert r.status_code == 200, r.text
+    cfg = _cfg_bytes(r.content)
+    assert cfg["print_settings_id"] == "0.20mm Mono" and cfg["filament_settings_id"] == ["PLA Mono"]
+    assert "not compatible" not in r.headers["X-Remap-Warnings"]
+
+
+@pytest.mark.parametrize("data,code", [
+    ({"process_uuid": "p1"}, 422),                                   # no machine
+    ({"machine_uuid": "m1", "filament_uuids": "nope"}, 422),
+    ({"machine_uuid": "m1", "filament_uuids": '["f1","f1"]'}, 422),  # 2 slots > 1 extruder
+    ({"machine_uuid": "m1", "process_uuid": "f1"}, 422),             # wrong kind
+])
+def test_endpoint_override_validation(tmp_path, data, code):
+    srcp = str(tmp_path / "m.3mf")
+    _multi(srcp)
+    assert _post_subset(srcp, **data).status_code == code
+
+
+def _cfg_bytes(b):
+    return json.loads(zipfile.ZipFile(io.BytesIO(b)).read("Metadata/project_settings.config"))
+
+
+def test_v1_projects_subset_supports_remap_and_enveloped_errors(tmp_path):
+    srcp = str(tmp_path / "m.3mf")
+    _multi(srcp)
+    url = "/api/v1/projects/subset"
+    r = _post_subset(srcp, _url=url, machine_uuid="m1", process_uuid="p1", filament_uuids='["f1"]')
+    assert r.status_code == 200, r.text
+    assert "extruder 2 -> 1" in r.headers["X-Remap-Warnings"]
+    assert r.headers["API-Version"] == "v1" and "Deprecation" not in r.headers
+    bad = _post_subset(srcp, _url=url, machine_uuid="m1", filament_uuids='["f1","f1"]')
+    assert bad.status_code == 422
+    assert bad.json()["error"]["code"] == "unprocessable" and "slot" in bad.json()["error"]["message"]
+    legacy = _post_subset(srcp, machine_uuid="m1")
+    assert legacy.headers["Deprecation"] == "true"

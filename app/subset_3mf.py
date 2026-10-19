@@ -52,6 +52,92 @@ PRINTER_KEYS = (
 _ORCA_MIN_CLAMP = {"raft_first_layer_expansion": 0, "tree_support_wall_count": 0}
 
 
+# Preset bookkeeping keys that must not be copied from a process/filament preset into the
+# project's flattened settings.
+_PRESET_META = {"name", "inherits", "from", "instantiation", "type", "setting_id", "base_id",
+                "version", "compatible_printers", "compatible_printers_condition",
+                "is_custom_defined", "description", "renamed_from"}
+
+
+def _slot_cap(printer_cfg: dict) -> Optional[int]:
+    """Max filament slots the target machine supports; None = unlimited (MMU-style)."""
+    if str(printer_cfg.get("single_extruder_multi_material", "0")) == "1":
+        return None
+    nd = printer_cfg.get("nozzle_diameter")
+    return len(nd) if isinstance(nd, list) and nd else 1
+
+
+def _resize(vals: list, n: int) -> list:
+    return vals[:n] if len(vals) >= n else vals + [vals[-1]] * (n - len(vals))
+
+
+def _first(v):
+    return v[0] if isinstance(v, list) and v else v
+
+
+def remap_for_target(cfg: dict, printer_cfg: dict, process_cfg: Optional[dict] = None,
+                     filament_cfgs: Optional[list[dict]] = None) -> tuple[dict[int, int], list[str]]:
+    """Adapt process/filament settings in ``cfg`` (mutated) to the target machine.
+
+    Returns ``(extruder_map, warnings)``; extruder_map maps old 1-based slot -> new slot
+    for every slot that moved. Filament slots beyond what the target supports collapse
+    onto slot 1 (lossy, reported). Explicit ``process_cfg`` / ``filament_cfgs`` (resolved
+    presets, one per slot) replace the embedded presets.
+    """
+    warnings: list[str] = []
+    n_src = _filament_count(cfg)
+    cap = _slot_cap(printer_cfg)
+    if filament_cfgs is not None:
+        if not filament_cfgs:
+            raise SubsetError("filament_uuids must not be empty")
+        if cap is not None and len(filament_cfgs) > cap:
+            raise SubsetError(f"{len(filament_cfgs)} filaments requested but the target machine "
+                              f"has only {cap} filament slot(s)")
+        n_new = len(filament_cfgs)
+    else:
+        n_new = n_src if cap is None else min(n_src, cap)
+
+    if n_new != n_src:
+        skip = set(PRINTER_KEYS)
+        for k, v in list(cfg.items()):
+            if k in skip or not isinstance(v, list):
+                continue
+            if k == "flush_volumes_matrix" and len(v) == n_src * n_src:
+                rows = [v[r * n_src:(r + 1) * n_src] for r in range(n_src)]
+                keep = [row[:n_new] for row in _resize(rows, n_new)]
+                cfg[k] = [x for row in keep for x in row]
+            elif k == "flush_volumes_vector" and len(v) == 2 * n_src:
+                cfg[k] = _resize(v, 2 * n_new)
+            elif len(v) == n_src and n_src > 1:
+                cfg[k] = _resize(v, n_new)
+
+    if process_cfg is not None:
+        for k, v in process_cfg.items():
+            if k not in _PRESET_META:
+                cfg[k] = v
+        cfg["print_settings_id"] = process_cfg.get("name", cfg.get("print_settings_id"))
+        warnings.append(f"process preset replaced by '{cfg['print_settings_id']}'")
+    if filament_cfgs is not None:
+        for i, fc in enumerate(filament_cfgs):
+            for k, v in fc.items():
+                if k in _PRESET_META:
+                    continue
+                cur = cfg.get(k)
+                if not isinstance(cur, list) or len(cur) != n_new:
+                    cur = [_first(v)] * n_new
+                cur[i] = _first(v)
+                cfg[k] = cur
+        cfg["filament_settings_id"] = [fc.get("name", "") for fc in filament_cfgs]
+        warnings.append("filament presets replaced by " + ", ".join(
+            f"'{fc.get('name', '?')}'" for fc in filament_cfgs))
+
+    ext_map = {i: 1 for i in range(n_new + 1, n_src + 1)}
+    if ext_map:
+        warnings.append(f"filament slots {n_new + 1}-{n_src} dropped (target supports {n_new}); "
+                        "objects using them now use extruder 1; painted colours are not remapped")
+    return ext_map, warnings
+
+
 class SubsetError(ValueError):
     pass
 
@@ -157,20 +243,34 @@ def resolve_selection(objects: list[dict], selection: list[dict],
     return want
 
 
+def _name_of_obj(o: ET.Element) -> str:
+    for md in o.findall("metadata"):
+        if md.get("key") == "name":
+            return md.get("value", "")
+    return o.get("id", "?")
+
+
 def _fmt(m: list[float]) -> str:
     return " ".join(repr(float(v)) if v != int(v) else str(int(v)) for v in m)
 
 
 def build_subset(src: str, dst: str, want: dict[int, int],
-                 printer_cfg: Optional[dict] = None) -> dict:
+                 printer_cfg: Optional[dict] = None, process_cfg: Optional[dict] = None,
+                 filament_cfgs: Optional[list[dict]] = None) -> dict:
     """Write ``dst`` containing only ``want`` ({object_id: qty}), all on plate 1.
 
     ``printer_cfg`` (a resolved machine preset) retargets bed/printer keys in
-    project_settings.config. Returns a small summary dict.
+    project_settings.config and remaps filament slots to what the machine supports
+    (see ``remap_for_target``); ``process_cfg`` / ``filament_cfgs`` (resolved presets) override the
+    embedded process/filament presets. Returns a summary dict; ``remap`` lists what changed.
     """
+    if printer_cfg is None and (process_cfg is not None or filament_cfgs is not None):
+        raise SubsetError("process/filament overrides require a target machine")
     zin = zipfile.ZipFile(src)
     names = zin.namelist()
     keep_ids = {str(i) for i in want}
+    ext_map: dict[int, int] = {}
+    remap_notes: list[str] = []
 
     model = _parse(zin.read(MODEL))
     # Orca rejects projects stamped by a newer Bambu Studio ("Unsupported 3MF version");
@@ -210,11 +310,23 @@ def build_subset(src: str, dst: str, want: dict[int, int],
             build.append(item)
             instances.append((str(oid), k))
 
+    project = zin.read(PROJECT_SETTINGS) if PROJECT_SETTINGS in names else None
+    cfg = json.loads(project) if project is not None else None
+    if cfg is not None and printer_cfg is not None:
+        ext_map, remap_notes = remap_for_target(cfg, printer_cfg, process_cfg, filament_cfgs)
+
     # --- model_settings: filter objects, collapse to one plate, filter assemble
     ms = _parse(zin.read(MODEL_SETTINGS))
     for o in ms.findall("object"):
         if o.get("id") not in keep_ids:
             ms.remove(o)
+    if ext_map:
+        for o in ms.iter("object"):
+            for md in o.iter("metadata"):
+                if md.get("key") == "extruder" and md.get("value", "").isdigit()                         and int(md.get("value")) in ext_map:
+                    remap_notes.append(
+                        f"object '{_name_of_obj(o)}': extruder {md.get('value')} -> {ext_map[int(md.get('value'))]}")
+                    md.set("value", str(ext_map[int(md.get("value"))]))
     plates = ms.findall("plate")
     if plates:
         template = copy.deepcopy(plates[0])
@@ -250,9 +362,7 @@ def build_subset(src: str, dst: str, want: dict[int, int],
         rels = re.sub(r"<Relationship [^>]*/>\s*", _keep_rel,
                       zin.read(MODEL_RELS).decode("utf-8")).encode("utf-8")
 
-    project = zin.read(PROJECT_SETTINGS) if PROJECT_SETTINGS in names else None
-    if project is not None:
-        cfg = json.loads(project)
+    if cfg is not None:
         for k, floor in _ORCA_MIN_CLAMP.items():
             try:
                 if float(cfg.get(k, floor)) < floor:
@@ -293,6 +403,9 @@ def build_subset(src: str, dst: str, want: dict[int, int],
                 for o in list(root.findall("object")):
                     if o.get("id") not in keep_ids:
                         root.remove(o)
+                for opt in root.iter("option"):
+                    if opt.get("opt_key") == "extruder" and (opt.text or "").strip().isdigit()                             and int(opt.text) in ext_map:
+                        opt.text = str(ext_map[int(opt.text)])
                 data = ser(root)
             else:
                 with zin.open(info) as f:
@@ -301,7 +414,8 @@ def build_subset(src: str, dst: str, want: dict[int, int],
                 continue
             zout.writestr(n, data)
     zin.close()
-    return {"objects": len(want), "instances": len(instances), "mesh_files": sorted(kept_paths)}
+    return {"objects": len(want), "instances": len(instances), "mesh_files": sorted(kept_paths),
+            "remap": remap_notes}
 
 
 def count_plates(path: str) -> int:

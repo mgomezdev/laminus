@@ -44,7 +44,7 @@ Orca's arrange is deterministic and order-insensitive; `--allow-rotations` and `
 
 ## Known limitations / follow-ups
 
-- Process & filament settings are **not** remapped to the target printer — only bed/printer keys. A 4-filament project retargeted to a 1-extruder machine keeps its 4 filament slots.
+- Process/filament remap (BIZ-292): filament slots are truncated to the target's capacity and extruder assignments collapse to 1; `process_uuid`/`filament_uuids` override presets, incompatible embedded presets are only reported (`X-Remap-Warnings`). Paint (`paint_color` extruder indices in meshes) is not remapped.
 - Plate-scoped data (`custom_gcode_per_layer.xml`, plate PNGs, plate names) is dropped; plates are renumbered.
 - Selector names shared by several objects (e.g. 4× "Platte 1.stl") → 422; use `id` (`/api/3mf/objects` lists them).
 - Bambu-isms Orca's CLI rejects are fixed up minimally: `Application` stamp dropped (newer-version check); `raft_first_layer_expansion` / `tree_support_wall_count` −1 → 0 (Orca's minimum). Any other out-of-range Bambu value would still fail (400).
