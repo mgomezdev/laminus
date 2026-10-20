@@ -6,8 +6,7 @@ Contract (see docs/api-versioning.md):
   * list endpoints use opaque keyset cursors: ``{"data": [...], "page": {"limit", "next_cursor"}}``
   * ``POST /api/v1/jobs`` honours ``Idempotency-Key``
   * ``GET /api/v1`` is the capability-discovery document
-  * legacy ``/api/*`` routes keep working unchanged; those with a v1 equivalent carry
-    ``Deprecation`` / ``Link: <v1 route>; rel="successor-version"`` response headers
+  * there are no versionless routes: every endpoint is under ``/api/v1``
 
 The module is installed by ``main.py`` (``install(app, main_module)``) so handlers read the
 live job table / catalog through ``m`` at call time.
@@ -30,20 +29,6 @@ API_VERSION = "v1"
 PREFIX = "/api/v1"
 IDEMPOTENCY_TTL_SECONDS = 24 * 3600
 _MAX_PAGE = 200
-
-# legacy route template -> v1 route template (drives Deprecation / successor-version headers)
-LEGACY_TO_V1 = {
-    "/api/slice/start": f"{PREFIX}/jobs",
-    "/api/slice/status/{job_id}": f"{PREFIX}/jobs/{{job_id}}",
-    "/api/slice/logs/{job_id}": f"{PREFIX}/jobs/{{job_id}}/events",
-    "/api/slice/download/{job_id}": f"{PREFIX}/jobs/{{job_id}}/artifact",
-    "/api/jobs": f"{PREFIX}/jobs",
-    "/api/profiles": f"{PREFIX}/profiles",
-    "/api/profiles/{profile_uuid}": f"{PREFIX}/profiles/{{profile_uuid}}",
-    "/api/3mf/objects": f"{PREFIX}/projects/inspect",
-    "/api/arrange/subset": f"{PREFIX}/projects/subset",
-    "/api/arrange/merge": f"{PREFIX}/projects/merge",
-}
 
 _DEFAULT_CODES = {
     400: "bad_request", 401: "unauthorized", 403: "forbidden", 404: "not_found",
@@ -75,8 +60,9 @@ def _envelope(request: Request, status: int, detail, headers: Optional[dict] = N
     return JSONResponse(status_code=status, content=body, headers=headers)
 
 
-def _is_v1(request: Request) -> bool:
-    return request.url.path == PREFIX or request.url.path.startswith(PREFIX + "/")
+def _is_api(request: Request) -> bool:
+    """Everything under /api is v1; unknown /api/* paths get the envelope too."""
+    return request.url.path == "/api" or request.url.path.startswith("/api/")
 
 
 # ------------------------------------------------------------------ pagination
@@ -110,34 +96,28 @@ def paginate(records: list[dict], key_fn, limit: int, cursor: Optional[str], rev
 # ------------------------------------------------------------------ install
 
 def install(app: FastAPI, m) -> None:
-    """Register v1 routes, error envelope, request ids and legacy deprecation headers."""
+    """Register v1 routes, error envelope and request ids. Every API route lives under /api/v1."""
     idem: dict[str, dict] = {}
 
-    # ---- cross-cutting: request id, version header, deprecation of legacy routes
+    # ---- cross-cutting: request id, version header
     @app.middleware("http")
     async def _headers(request: Request, call_next):
         request.state.request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
         response = await call_next(request)
         response.headers["X-Request-ID"] = request.state.request_id
-        if _is_v1(request):
+        if _is_api(request):
             response.headers["API-Version"] = API_VERSION
-        else:
-            route = request.scope.get("route")
-            successor = LEGACY_TO_V1.get(getattr(route, "path", None))
-            if successor:
-                response.headers["Deprecation"] = "true"
-                response.headers["Link"] = f'<{successor}>; rel="successor-version"'
         return response
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_exc(request: Request, exc: StarletteHTTPException):
-        if _is_v1(request):
+        if _is_api(request):
             return _envelope(request, exc.status_code, exc.detail, getattr(exc, "headers", None))
         return await http_exception_handler(request, exc)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_exc(request: Request, exc: RequestValidationError):
-        if _is_v1(request):
+        if _is_api(request):
             return _envelope(request, 422, json.loads(json.dumps(exc.errors(), default=str)))
         return await request_validation_exception_handler(request, exc)
 
@@ -155,13 +135,13 @@ def install(app: FastAPI, m) -> None:
         return {
             "api_version": API_VERSION,
             "supported_versions": [API_VERSION],
-            "legacy": {"prefix": "/api", "deprecated": True, "sunset": None,
-                       "policy": "docs/api-versioning.md"},
             "engine": {"name": "orcaslicer", "version": m._orca_version(),
                        "binary_version": m._orcaslicer_version},
             "ready": {"catalog": m.catalog is not None and m.catalog.is_built},
             "features": ["jobs", "jobs.idempotency", "jobs.events", "pagination.cursor",
-                         "profiles", "projects.inspect", "projects.subset", "projects.merge"],
+                         "profiles", "projects.inspect", "projects.subset", "projects.merge",
+                         "projects.previews", "pack", "arrange", "slice.prepared",
+                         "slice.thumbnail"],
             "limits": {"max_concurrent_jobs": m.MAX_CONCURRENT_JOBS,
                        "job_history_limit": m.JOB_HISTORY_LIMIT,
                        "max_page_size": _MAX_PAGE},
@@ -194,7 +174,7 @@ def install(app: FastAPI, m) -> None:
         }
 
     @app.post(f"{PREFIX}/jobs", tags=["v1 jobs"], status_code=202, summary="Create a slice job",
-              description="Same inputs as the legacy `POST /api/slice/start`. Send an "
+              description="Upload a model plus profile UUIDs to start a slice. Send an "
                           "`Idempotency-Key` header to make retries safe: the same key with the "
                           "same body returns the original job (`Idempotent-Replay: true`); the same "
                           "key with a different body is a 422 `idempotency_key_reuse`; a key whose "
@@ -361,14 +341,3 @@ def install(app: FastAPI, m) -> None:
         if entry is None:
             raise _err(404, "profile_not_found", f"Profile UUID '{profile_uuid}' not found.")
         return cat._public(entry)
-
-    # ---- projects: same handlers as the legacy 3MF routes, served under v1 (errors enveloped)
-    legacy = {r.path: r for r in app.routes if hasattr(r, "endpoint") and hasattr(r, "methods")}
-    for old, new, summary in (
-            ("/api/3mf/objects", f"{PREFIX}/projects/inspect", "List objects in a 3MF project"),
-            ("/api/arrange/subset", f"{PREFIX}/projects/subset", "Subset a 3MF by object x quantity and arrange"),
-            ("/api/arrange/merge", f"{PREFIX}/projects/merge", "Merge selections from several 3MFs and arrange")):
-        r = legacy[old]
-        app.add_api_route(new, r.endpoint, methods=["POST"], tags=["v1 projects"], summary=summary,
-                          description=r.description, responses=r.responses,
-                          operation_id=f"v1_{r.name}")

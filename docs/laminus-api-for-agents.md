@@ -6,7 +6,7 @@ Full OpenAPI 3.0 spec: [`openapi.json`](../openapi.json) (CI-regenerated, always
 Live Swagger UI (container must be running): `http://localhost:5000/docs`
 Live OpenAPI JSON: `http://localhost:5000/openapi.json`
 
-> **API v1 (`/api/v1`) is the stable, versioned contract**: uniform error envelope, cursor pagination, `Idempotency-Key` on job creation, typed SSE events, `GET /api/v1` discovery. New integrations should use it; the routes below remain supported but carry `Deprecation` headers where a v1 equivalent exists. See [`api-versioning.md`](api-versioning.md) and [`openapi-v1.json`](../openapi-v1.json).
+> **Every route lives under `/api/v1`; there are no versionless `/api/*` routes** (they 404). v1 is the stable, versioned contract: uniform error envelope, cursor pagination, `Idempotency-Key` on job creation, typed SSE events, `GET /api/v1` discovery. See [`api-versioning.md`](api-versioning.md) and [`openapi-v1.json`](../openapi-v1.json).
 
 
 ---
@@ -14,18 +14,18 @@ Live OpenAPI JSON: `http://localhost:5000/openapi.json`
 ## Canonical workflow
 
 ```
-GET  /api/health                        → wait until catalog_loaded = true
-GET  /api/profiles?manufacturer=…&model=…&nozzle=…
+GET  /api/v1/health                        → wait until catalog_loaded = true
+GET  /api/v1/profiles?manufacturer=…&model=…&nozzle=…
                                         → pick process_uuid + filament_uuids
-POST /api/slice/start  (multipart)      → job_id
-loop: GET /api/slice/status/{job_id}    → until status = "completed" | "failed"
-GET  /api/slice/download/{job_id}       → binary GCode (or 3MF)
+POST /api/v1/jobs  (multipart)      → 202 {id, status, links}
+loop: GET /api/v1/jobs/{id}         → until status = "completed" | "failed"
+GET  /api/v1/jobs/{id}/artifact     → binary GCode (or 3MF)
 ```
 
 If you already have a fully-configured 3MF (OrcaSlicer-exported with settings embedded):
 
 ```
-POST /api/slice/prepared  (multipart)   → job_id
+POST /api/v1/slice/prepared  (multipart)   → job_id
 ... same poll/download loop
 ```
 
@@ -34,7 +34,7 @@ POST /api/slice/prepared  (multipart)   → job_id
 ## 1 — Health check
 
 ```
-GET /api/health
+GET /api/v1/health
 ```
 
 **Do not call profile or slice endpoints until `catalog_loaded` is `true`.** The catalog
@@ -59,25 +59,28 @@ builds in the background after container startup (~10–60 seconds depending on 
 ## 2 — Discover profiles
 
 ```
-GET /api/profiles
-GET /api/profiles?manufacturer=Bambu+Lab&model=P1S&nozzle=0.4
+GET /api/v1/profiles
+GET /api/v1/profiles?manufacturer=Bambu+Lab&model=P1S&nozzle=0.4
 ```
 
-Without filters: returns all machines, all processes, all filaments.
+Without filters: returns all machines, all processes, all filaments as one flat,
+cursor-paginated list. Narrow it with `type=machine|process|filament` and `q=<name substring>`;
+page with `limit` (1-200, default 50) and `cursor` (opaque, from `page.next_cursor`).
 
-With filters (supply all three or none): returns the matching machine plus only the
-process and filament presets that are compatible with it.
+With filters (supply all three of manufacturer/model/nozzle or none; partial → 422
+`partial_machine_filter`): returns the matching machine plus only the process and filament
+presets that are compatible with it.
 
-**503 while catalog is building.** Retry.
+**503 `catalog_not_ready` while the catalog is building** (carries `Retry-After`). Retry.
 
 **Response shape:**
 ```json
 {
-  "machine":  [ { ...MachineProfile }, ... ],
-  "process":  [ { ...ProcessProfile }, ... ],
-  "filament": [ { ...FilamentProfile }, ... ]
+  "data": [ { "type": "machine", ...MachineProfile }, { "type": "process", ... }, ... ],
+  "page": { "limit": 50, "next_cursor": "…" }
 }
 ```
+`next_cursor` is `null` on the last page. Items are ordered by name, then uuid.
 
 **MachineProfile key fields:**
 | Field          | Type    | Notes                                        |
@@ -108,10 +111,10 @@ process and filament presets that are compatible with it.
 ### Get one profile by UUID
 
 ```
-GET /api/profiles/{profile_uuid}
+GET /api/v1/profiles/{profile_uuid}
 ```
 
-Returns the full profile dict for inspection. Same 503 behaviour.
+Returns the full profile dict for inspection. Same 503 behaviour; unknown uuid → 404 `profile_not_found`.
 
 ---
 
@@ -124,14 +127,14 @@ engine needed, answered from the cached catalog.
 - Header `X-Catalog-Version` = body `catalog_version` (opaque; changes only when preset identity or
   compatibility data changes). Revalidate stored refs when it changes.
 - `"stale": true` in the body when served from an older on-disk cache (no live catalog yet) or
-  while a rebuild runs. No catalog at all: **503** `{"error": "catalog_unavailable"}`.
+  while a rebuild runs. No catalog at all: **503**, error code `catalog_unavailable`.
 - **Refs** are `<kind>:<slug(name)>` (lowercase, runs of non `[a-z0-9.]` → `-`), e.g.
   `machine:bambu-lab-p1s-0.4-nozzle`, `process:0.20mm-p1s`. Stable across rebuilds while the
   preset keeps its name. Every item also carries its `uuid`, which the slice endpoints take.
 - `flow` is `high_flow` when the preset name contains "High Flow", else `standard`.
 
 ```
-POST /api/profiles/machines/suggest   {"manufacturer": "Bambu Lab", "model": "P1S", "model_key": "p1s"}
+POST /api/v1/profiles/machines/suggest   {"manufacturer": "Bambu Lab", "model": "P1S", "model_key": "p1s"}
 → {"catalog_version": "…", "candidates": [
      {"ref": "machine:bambu-lab-p1s-0.4-nozzle", "uuid": "…", "name": "Bambu Lab P1S 0.4 nozzle",
       "nozzle_diameter_mm": 0.4, "flow": "standard", "confidence": 1.0, "match_reason": "exact_model"}, … ]}
@@ -140,7 +143,7 @@ POST /api/profiles/machines/suggest   {"manufacturer": "Bambu Lab", "model": "P1
 max 5). Sorted by confidence, then 0.4 standard first, then nozzle. Max 20. No match → `[]`, 200.
 
 ```
-POST /api/profiles/models/variants    {"manufacturer": "Bambu Lab", "model": "P1S"}
+POST /api/v1/profiles/models/variants    {"manufacturer": "Bambu Lab", "model": "P1S"}
 → {"catalog_version": "…", "variants": [
      {"ref": …, "uuid": …, "name": …, "nozzle_diameter_mm": 0.4, "flow": "standard", "is_default_guess": true},
      {… 0.4 high_flow, false}, {… 0.6 standard, false} ]}
@@ -149,7 +152,7 @@ Best-matching model only; ordered by nozzle then standard-before-high-flow. Exac
 `is_default_guess` (0.4 standard, else smallest standard). Unknown model → `[]`.
 
 ```
-GET /api/profiles/machines/{machine_ref}/presets?kind=process|filament   (default: both)
+GET /api/v1/profiles/machines/{machine_ref}/presets?kind=process|filament   (default: both)
 → {"catalog_version": "…", "machine_ref": "…", "presets": [
      {"ref": "process:0.20mm-p1s", "uuid": "…", "name": "0.20mm P1S", "kind": "process",
       "compatible_models": ["Bambu Lab P1S"]}, … ]}
@@ -159,7 +162,7 @@ then). Abstract bases (`instantiation: false`) are excluded. `compatible_printer
 bad `kind` → 422 `{"error": "invalid_kind"}`.
 
 ```
-GET /api/profiles/machines/{machine_ref}/supports?bed_x=256&bed_y=256
+GET /api/v1/profiles/machines/{machine_ref}/supports?bed_x=256&bed_y=256
 → {"catalog_version": "…", "machine_ref": "…", "supported": true, "reason": null}
 ```
 Always 200. `reason`: `unknown_machine_ref` | `bed_mismatch` (>1 mm off; a machine with no
@@ -170,7 +173,7 @@ declared bed size is never ruled out).
 ## 3a — Slice with UUID-based profile resolution
 
 ```
-POST /api/slice/start
+POST /api/v1/jobs
 Content-Type: multipart/form-data
 ```
 
@@ -192,7 +195,7 @@ Content-Type: multipart/form-data
 
 **curl example (preferred — `machine_uuid`):**
 ```bash
-curl -X POST http://localhost:5000/api/slice/start \
+curl -X POST http://localhost:5000/api/v1/jobs \
   -F "file=@model.3mf" \
   -F "machine_uuid=<uuid-from-catalog>" \
   -F 'process_uuid=<uuid-from-catalog>' \
@@ -202,7 +205,7 @@ curl -X POST http://localhost:5000/api/slice/start \
 
 **curl example (fallback — manufacturer/model/nozzle):**
 ```bash
-curl -X POST http://localhost:5000/api/slice/start \
+curl -X POST http://localhost:5000/api/v1/jobs \
   -F "file=@model.3mf" \
   -F "manufacturer=Bambu Lab" \
   -F "model=P1S" \
@@ -212,14 +215,29 @@ curl -X POST http://localhost:5000/api/slice/start \
   -F "plate=1"
 ```
 
-**Response:**
+Send an `Idempotency-Key` header (1-255 chars) to make retries safe: the same key with the same
+request returns the original job (`Idempotent-Replay: true`); the same key with a different
+request is 422 `idempotency_key_reuse`; a key whose first request is still running is 409
+`idempotency_in_flight`. Keys live 24 h in memory (cleared on restart).
+
+**Response (`202`, `Location: /api/v1/jobs/{id}`):**
 ```json
-{ "job_id": "550e8400-...", "status": "pending", "message": "Slicing job started." }
+{
+  "id": "550e8400-...",
+  "status": "pending",
+  "filename": "model.3mf",
+  "output_format": "gcode",
+  "error": null,
+  "artifact": { "name": null, "available": false },
+  "created_at": 1760000000.0,
+  "updated_at": 1760000000.0,
+  "links": { "self": "/api/v1/jobs/550e8400-...", "events": "…/events", "artifact": "…/artifact" }
+}
 ```
 
 **Error cases:**
-- `503` — catalog not ready
-- `422` — UUID not found, incompatible profiles, `plate < 1`, malformed `filament_uuids`
+- `503` — catalog not ready, or too many active jobs
+- `422` — UUID not found, incompatible profiles, `plate < 1`, malformed `filament_uuids`, idempotency key reuse
 - `400` — bad filename
 
 ---
@@ -227,7 +245,7 @@ curl -X POST http://localhost:5000/api/slice/start \
 ## 3b — Slice a pre-built 3MF
 
 ```
-POST /api/slice/prepared
+POST /api/v1/slice/prepared
 Content-Type: multipart/form-data
 ```
 
@@ -243,7 +261,7 @@ was exported from OrcaSlicer or assembled externally). No catalog lookup is perf
 
 **curl example:**
 ```bash
-curl -X POST http://localhost:5000/api/slice/prepared \
+curl -X POST http://localhost:5000/api/v1/slice/prepared \
   -F "file=@model_with_settings.3mf" \
   -F "plate=1"
 ```
@@ -253,42 +271,53 @@ curl -X POST http://localhost:5000/api/slice/prepared \
 ## 4 — Poll job status
 
 ```
-GET /api/slice/status/{job_id}
+GET /api/v1/jobs/{job_id}
 ```
 
 Recommended interval: every 2–5 seconds.
 
+Same job object as the create response:
+
 ```json
 {
-  "job_id": "550e8400-...",
+  "id": "550e8400-...",
   "status": "completed",
+  "filename": "model.3mf",
   "output_format": "gcode",
-  "sliced_file": "model_plate1.gcode",
-  "error": null
+  "error": null,
+  "artifact": { "name": "model_plate1.gcode", "available": true },
+  "created_at": 1760000000.0,
+  "updated_at": 1760000012.0,
+  "links": { "self": "…", "events": "…", "artifact": "…" }
 }
 ```
 
 `status` values: `pending` → `slicing` → `completed` | `failed`
 
 `output_format`: `"gcode"` (standard) or `"gcode_3mf"` (when `export_3mf` was set —
-download returns the `.3mf`).
+the artifact is the `.3mf`).
 
-`404` after a job was completed = job was already downloaded and evicted.
+A job record outlives its artifact: after the one-time download or TTL eviction the job is still
+returned, with `artifact.available: false`. Unknown ids are 404 `job_not_found`.
+
+List jobs (newest first, cursor-paginated, optional `status=`): `GET /api/v1/jobs?limit=50&cursor=…`
+→ `{"data": [job, …], "page": {"limit", "next_cursor"}}`.
 
 ---
 
 ## 5 — Download output
 
 ```
-GET /api/slice/download/{job_id}
+GET /api/v1/jobs/{job_id}/artifact
 ```
 
-Only call when `status = "completed"`. Returns `application/octet-stream`.
+Only call when `status = "completed"`. Returns `application/octet-stream`. Not complete → 409
+`job_not_complete` (or `job_failed`); already downloaded/expired → 404 `artifact_gone`.
 
-**Warning:** downloading evicts the job immediately. There is no second download.
+**Warning:** downloading deletes the job's files immediately. There is no second download.
 
 ```bash
-curl http://localhost:5000/api/slice/download/{job_id} -o output.gcode
+curl http://localhost:5000/api/v1/jobs/{job_id}/artifact -o output.gcode
 ```
 
 ---
@@ -296,21 +325,21 @@ curl http://localhost:5000/api/slice/download/{job_id} -o output.gcode
 ## (Optional) Stream logs
 
 ```
-GET /api/slice/logs/{job_id}
+GET /api/v1/jobs/{job_id}/events
 ```
 
-Server-Sent Events. Each event: `data: <log line>\r\n\r\n`.
+Server-Sent Events with sequential `id:` and typed events: `log` and `dropped` (`{"message"}`),
+then one terminal `completed` (`{}`) or `failed` (`{"reason"}`). Reconnect with `Last-Event-ID: N`
+to skip events already seen (the buffer replays from the start on each connect).
 
-Stream ends with `data: __COMPLETED__` (success) or `data: __FAILED__: <reason>`.
-
-Most agents can skip this and just poll `/api/slice/status` instead.
+Most agents can skip this and just poll `/api/v1/jobs/{job_id}` instead.
 
 ---
 
 ## Arrange (synchronous, no job lifecycle)
 
 ```
-POST /api/arrange
+POST /api/v1/arrange
 Content-Type: multipart/form-data
 ```
 
@@ -333,7 +362,7 @@ curl -X POST http://localhost:5000/api/arrange \
 ## List objects with plate names and previews
 
 ```
-POST /api/3mf/previews         # multipart/form-data
+POST /api/v1/projects/previews         # multipart/form-data
 ```
 
 | Field    | Type | Required | Description |
@@ -350,15 +379,15 @@ POST /api/3mf/previews         # multipart/form-data
 }]}
 ```
 
-`plates[].name` is the plate's name in the project, or `Plate N` when unnamed; an object on several plates lists each. `preview` renders **the object itself** (3/4 view, transparent background, tinted with its filament colour, modifier parts omitted), or is `null` if nothing printable. Use `id` in `/api/arrange/subset` / `/api/arrange/merge` selections. Rendering is CPU-bound (~0.5 s/object; a 21-object project ~12 s) - use `images=false` when only names are needed. Requires `numpy` (in `requirements.txt`).
+`plates[].name` is the plate's name in the project, or `Plate N` when unnamed; an object on several plates lists each. `preview` renders **the object itself** (3/4 view, transparent background, tinted with its filament colour, modifier parts omitted), or is `null` if nothing printable. Use `id` in `/api/v1/projects/subset` / `/api/v1/projects/merge` selections. Rendering is CPU-bound (~0.5 s/object; a 21-object project ~12 s) - use `images=false` when only names are needed. Requires `numpy` (in `requirements.txt`).
 
 ---
 
 ## Arrange a subset (pick objects × qty from a 3MF)
 
 ```
-POST /api/v1/projects/inspect  # list objects: id, name, extruder, override keys, parts, instances (legacy alias: /api/3mf/objects)
-POST /api/v1/projects/subset   # multipart/form-data (legacy alias: /api/arrange/subset)
+POST /api/v1/projects/inspect  # list objects: id, name, extruder, override keys, parts, instances
+POST /api/v1/projects/subset   # multipart/form-data
 ```
 
 | Field             | Type   | Required | Description |
@@ -385,24 +414,24 @@ curl -X POST http://localhost:5000/api/v1/projects/subset \
 ## Merge selections from several 3MFs into one
 
 ```
-POST /api/v1/projects/merge    # multipart/form-data, repeated `files` parts (legacy alias: /api/arrange/merge)
+POST /api/v1/projects/merge    # multipart/form-data, repeated `files` parts
 ```
 
 | Field             | Type   | Required | Description |
 |-------------------|--------|----------|-------------|
 | `files`           | file[] | yes      | Two or more `.3mf`. **The first upload is the base**: its process/filament/printer settings, thumbnails and metadata are used for the whole result |
 | `selection`       | string | yes      | JSON list. Each entry names its source with `file` (uploaded filename, or 0-based upload index) plus `id` / `name` / `plate` and `qty` |
-| `machine_uuid`    | string | no       | Retarget bed/printer keys (as in `/api/arrange/subset`) |
+| `machine_uuid`    | string | no       | Retarget bed/printer keys (as in `/api/v1/projects/subset`) |
 | `process_uuid`    | string | no       | Replace the project's process preset with this one (needs `machine_uuid`) |
 | `filament_uuids`  | string | no       | JSON array of filament preset UUIDs, one per slot (needs `machine_uuid`; more than the machine's slots → 422) |
 | `allow_rotations` | bool   | no       | Pass `--allow-rotations` to the arranger |
 
-`{"plate": N, "qty": q}` = everything on source plate N (each object x its count there x q); it also works in `/api/arrange/subset`. Entries for the same object accumulate.
+`{"plate": N, "qty": q}` = everything on source plate N (each object x its count there x q); it also works in `/api/v1/projects/subset`. Entries for the same object accumulate.
 
 Response: one `.3mf`. Headers `X-Plate-Count`, `X-Instance-Count`, `X-Remap-Warnings` (as in subset, prefixed by source file) and `X-Merge-Warnings` (non-empty when a non-base source used a different process/filament preset, has painted data with a different filament count, or an object ends up not resting on the bed - floating/sunk by more than 0.5 mm). Errors: 422 (bad selection / unknown file / base not selected / non-base object uses a filament slot the base lacks), 400, 408, 503.
 
 ```bash
-curl -X POST http://localhost:5000/api/arrange/merge   -F "files=@Hex-Moss-Pole.3mf"   -F "files=@cloud pots.3mf"   -F 'selection=[
+curl -X POST http://localhost:5000/api/v1/projects/merge   -F "files=@Hex-Moss-Pole.3mf"   -F "files=@cloud pots.3mf"   -F 'selection=[
         {"file":"Hex-Moss-Pole.3mf","plate":1,"qty":2},
         {"file":"Hex-Moss-Pole.3mf","plate":6},
         {"file":"Hex-Moss-Pole.3mf","plate":7},
@@ -415,7 +444,7 @@ curl -X POST http://localhost:5000/api/arrange/merge   -F "files=@Hex-Moss-Pole.
 ## Upload a user profile
 
 ```
-POST /api/profiles/upload
+POST /api/v1/profiles/upload
 Content-Type: multipart/form-data
 ```
 
@@ -424,23 +453,26 @@ Content-Type: multipart/form-data
 | `type` | string | `machine`, `process`, `filament` |
 | `file` | file   | Flat OrcaSlicer preset JSON |
 
-Triggers a catalog rebuild. Wait ~5 seconds, then call `GET /api/profiles?refresh=false`
+Triggers a catalog rebuild. Wait ~5 seconds, then call `GET /api/v1/profiles?q=<name>`
 to confirm the new profile appears.
 
 ---
 
 ## Error response shape
 
-All JSON error responses have a single `detail` field:
+Every error under `/api` (including validation 422s and unknown paths) uses one envelope:
 
 ```json
-{ "detail": "Human-readable error message." }
+{
+  "error": { "code": "job_not_found", "message": "Job not found.", "status": 404 },
+  "request_id": "9c1f…"
+}
 ```
 
-The 503 "catalog building" response is the exception:
-```json
-{ "status": "building_catalog", "detail": "Catalog not ready. Retry shortly." }
-```
+Branch on `code`, not `message`. `details` (the field-error list) is present only for
+`validation_error`. `request_id` equals the `X-Request-ID` response header; send your own
+`X-Request-ID` to correlate. The 503 "catalog building" response is `catalog_not_ready` and
+carries `Retry-After: 5`.
 
 ---
 

@@ -5,7 +5,8 @@
 | Version | Prefix | Status |
 |---|---|---|
 | v1 | `/api/v1` | Stable. The contract is `openapi-v1.json` (CI-regenerated) |
-| legacy | `/api/*` (no version) | Deprecated, fully functional. No sunset date set |
+
+**Every API route is under `/api/v1`. There are no versionless `/api/*` routes**; the web UI (`/`) is the only non-versioned path. Anything else under `/api` (including the old `/api/slice/*`, `/api/jobs`, `/api/profiles`, `/api/arrange/*`, `/api/3mf/*`) is a 404 in the standard error envelope.
 
 `GET /api/v1` is the discovery document: supported versions, engine, readiness, `features` flags and limits. Feature-detect from `features`; don't parse version strings.
 
@@ -46,27 +47,24 @@ These need a new major (`/api/v2`):
 
 ## Resource map
 
-| v1 | Replaces (legacy) |
+| Route | Notes |
 |---|---|
-| `POST /api/v1/jobs` (202 + `Location`) | `POST /api/slice/start` |
-| `GET /api/v1/jobs` | `GET /api/jobs` |
-| `GET /api/v1/jobs/{id}` | `GET /api/slice/status/{id}` |
-| `GET /api/v1/jobs/{id}/events` | `GET /api/slice/logs/{id}` |
-| `GET /api/v1/jobs/{id}/artifact` | `GET /api/slice/download/{id}` |
-| `GET /api/v1/profiles`, `GET /api/v1/profiles/{uuid}` | `GET /api/profiles`, `GET /api/profiles/{uuid}` |
-| `POST /api/v1/projects/inspect` | `POST /api/3mf/objects` |
-| `POST /api/v1/projects/subset` | `POST /api/arrange/subset` |
-| `POST /api/v1/projects/merge` | `POST /api/arrange/merge` |
+| `GET /api/v1` | capability discovery |
+| `GET /api/v1/health` | readiness, catalog status, active jobs |
+| `POST /api/v1/jobs` (202 + `Location`), `GET /api/v1/jobs`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/events`, `GET /api/v1/jobs/{id}/artifact` | slice job lifecycle |
+| `POST /api/v1/slice/prepared`, `POST /api/v1/slice/thumbnail` | slice a pre-built 3MF / render a plate thumbnail |
+| `GET /api/v1/profiles`, `GET /api/v1/profiles/{uuid}` | flat, filtered (`type=`, `q=`), cursor-paginated |
+| `POST /api/v1/profiles/{merged-config,upload,rescan}`, `GET /api/v1/profiles/broken` | profile tooling |
+| `POST /api/v1/profiles/machines/suggest`, `POST /api/v1/profiles/models/variants`, `GET /api/v1/profiles/machines/{ref}/{presets,supports}` | neutral model/nozzle lookups |
+| `POST /api/v1/projects/inspect`, `POST /api/v1/projects/previews`, `POST /api/v1/projects/subset`, `POST /api/v1/projects/merge` | 3MF project tools |
+| `POST /api/v1/pack`, `POST /api/v1/arrange` | STL packing / 3MF re-arrange |
+| `POST /api/v1/cleanup` | remove stale temp dirs |
 
 `projects/subset` and `projects/merge` accept `process_uuid` / `filament_uuids` overrides and report remapped/dropped filament slots and incompatible embedded presets in the `X-Remap-Warnings` header (see `laminus-api-for-agents.md`).
 
-Differences worth knowing: a job record outlives its artifact (`artifact.available: false` after the one-time download or TTL eviction, instead of a 404 on the job); artifact on a not-yet-complete job is 409 (legacy: 400); profile lists are flat with `type`, filtered by `type=`/`q=` and paginated (legacy: grouped, unpaginated).
-
-Not yet in v1 (use legacy routes; they carry no deprecation headers): `health`, `pack`, `arrange`, `slice/prepared`, `slice/thumbnail`, `profiles/*` lookups (`merged-config`, neutral model/nozzle API, `upload`, `rescan`, `broken`), `3mf/previews`, `cleanup`.
+A job record outlives its artifact (`artifact.available: false` after the one-time download or TTL eviction, instead of a 404 on the job).
 
 ## Deprecation policy
 
-* Legacy routes that have a v1 equivalent answer with `Deprecation: true` and `Link: </api/v1/…>; rel="successor-version"`. Bodies and status codes are unchanged.
-* A `Sunset` header (RFC 8594) is added only once a removal date is decided, at least **6 months** ahead, and recorded in `GET /api/v1` under `legacy.sunset`.
-* A v1 endpoint is deprecated the same way, only after its replacement in a newer major version is released, and stays for at least one full major cycle.
-* Behaviour changes to legacy routes are limited to bug fixes and security fixes.
+* A v1 endpoint is deprecated only after its replacement in a newer major version is released, and stays for at least one full major cycle.
+* Deprecated endpoints answer with `Deprecation: true` and `Link: <successor>; rel="successor-version"`. A `Sunset` header (RFC 8594) is added only once a removal date is decided, at least **6 months** ahead.

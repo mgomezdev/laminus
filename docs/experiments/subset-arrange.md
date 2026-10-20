@@ -2,7 +2,7 @@
 
 Goal: given a `.3mf`, a list of `{object, qty}` and a printer, return a `.3mf` with only those objects in those quantities on the fewest plates, with every per-object/part override, modifier, and painted layer intact.
 
-Implemented: `app/subset_3mf.py`, `POST /api/3mf/objects`, `POST /api/arrange/subset`, `tests/test_subset_3mf.py`.
+Implemented: `app/subset_3mf.py`, `POST /api/v1/projects/inspect`, `POST /api/v1/projects/subset`, `tests/test_subset_3mf.py`.
 
 ## Design
 
@@ -46,7 +46,7 @@ Orca's arrange is deterministic and order-insensitive; `--allow-rotations` and `
 
 - Process/filament remap (BIZ-292): filament slots are truncated to the target's capacity and extruder assignments collapse to 1; `process_uuid`/`filament_uuids` override presets, incompatible embedded presets are only reported (`X-Remap-Warnings`). Paint (`paint_color` extruder indices in meshes) is not remapped.
 - Plate-scoped data (`custom_gcode_per_layer.xml`, plate PNGs, plate names) is dropped; plates are renumbered.
-- Selector names shared by several objects (e.g. 4× "Platte 1.stl") → 422; use `id` (`/api/3mf/objects` lists them).
+- Selector names shared by several objects (e.g. 4× "Platte 1.stl") → 422; use `id` (`/api/v1/projects/inspect` lists them).
 - Bambu-isms Orca's CLI rejects are fixed up minimally: `Application` stamp dropped (newer-version check); `raft_first_layer_expansion` / `tree_support_wall_count` −1 → 0 (Orca's minimum). Any other out-of-range Bambu value would still fail (400).
 - Oracle holds one mesh reference per instance; a very large qty of a huge mesh costs Orca RAM/time (ZenFlow ×3 ≈ 14 s). `ARRANGE_TIMEOUT_SECONDS` applies.
 - XML from uploads is parsed with stdlib `ElementTree` after rejecting `DOCTYPE`/`ENTITY` (billion-laughs).
@@ -55,12 +55,12 @@ Orca's arrange is deterministic and order-insensitive; `--allow-rotations` and `
 
 ```bash
 python -m pytest tests/test_subset_3mf.py
-curl -F file=@project.3mf localhost:5000/api/3mf/objects
+curl -F file=@project.3mf localhost:5000/api/v1/projects/inspect
 curl -F file=@project.3mf -F 'selection=[{"id":6,"qty":3}]' -F machine_uuid=<uuid> \
-     localhost:5000/api/arrange/subset -o out.3mf -D -
+     localhost:5000/api/v1/projects/subset -o out.3mf -D -
 ```
 
-## Extension: merge several 3MFs (`POST /api/arrange/merge`)
+## Extension: merge several 3MFs (`POST /api/v1/projects/merge`)
 
 Each source goes through `build_subset` (with `plate` selectors resolved via `plate_members`), then `merge_subsets` folds them into the first (base): object ids renumbered, colliding mesh files renamed (`x.model` -> `x__m1.model`, rels extended), `model_settings` objects / `assemble` / `layer_config_ranges.xml` / `cut_information.xml` entries appended, one plate listing every instance. The merged file then goes through the same oracle + transplant. Project-wide settings are the base's; differences are reported in `X-Merge-Warnings` (not baked into per-object overrides: sources written by different slicer versions differ in ~100 keys by format alone, so a diff would be mostly noise).
 

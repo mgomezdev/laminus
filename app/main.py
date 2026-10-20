@@ -143,26 +143,26 @@ app = FastAPI(
         "Laminus is a sidecar service used by Themis; it is not intended to be called directly "
         "by end-users in normal operation.\n\n"
         "## Typical agent workflow\n\n"
-        "1. **`GET /api/health`** — wait until `catalog_loaded: true` before making any other calls.\n"
-        "2. **`GET /api/profiles`** — discover machine / process / filament UUIDs for your printer "
+        "1. **`GET /api/v1/health`** — wait until `catalog_loaded: true` before making any other calls.\n"
+        "2. **`GET /api/v1/profiles`** — discover machine / process / filament UUIDs for your printer "
         "and material. Filter by `manufacturer`, `model`, and `nozzle` to narrow results.\n"
-        "3. **`POST /api/slice/start`** — upload the model (`.3mf` or `.stl`) with the resolved "
+        "3. **`POST /api/v1/jobs`** — upload the model (`.3mf` or `.stl`) with the resolved "
         "UUIDs. The response contains a `job_id`.\n"
-        "4. **`GET /api/slice/status/{job_id}`** — poll every 2–5 s until `status` is `completed` "
+        "4. **`GET /api/v1/jobs/{job_id}`** — poll every 2–5 s until `status` is `completed` "
         "or `failed`.\n"
-        "5. **`GET /api/slice/download/{job_id}`** — retrieve the GCode (or `.3mf` when "
+        "5. **`GET /api/v1/jobs/{job_id}/artifact`** — retrieve the GCode (or `.3mf` when "
         "`export_3mf` was requested). Downloading evicts the job immediately.\n\n"
-        "Alternatively, use **`POST /api/slice/prepared`** when the 3MF already embeds print "
+        "Alternatively, use **`POST /api/v1/slice/prepared`** when the 3MF already embeds print "
         "settings from a previous OrcaSlicer session — no profile resolution is needed.\n\n"
         "## Packing / arrangement\n\n"
-        "Use **`POST /api/pack`** to distribute STL geometry across build plates before slicing. "
+        "Use **`POST /api/v1/pack`** to distribute STL geometry across build plates before slicing. "
         "Three modes: supply a template `.3mf`, profile UUIDs (preferred — catalog-aware), or "
         "explicit bed dimensions. The packed `.3mf` is returned directly (synchronous, up to "
         "120 s).\n\n"
         "## Error conventions\n\n"
         "- **422** — caller-side validation failure (bad UUIDs, missing required fields, etc.).\n"
         "- **503** — Laminus is not yet ready; the catalog is still building. "
-        "Retry after `GET /api/health` reports `catalog_loaded: true`.\n"
+        "Retry after `GET /api/v1/health` reports `catalog_loaded: true`.\n"
         "- **400 / 408 / 500** — OrcaSlicer-side failures; check server logs for details."
     ),
     version="1.0.0",
@@ -171,7 +171,7 @@ app = FastAPI(
         {
             "name": "health",
             "description": (
-                "Service readiness and version information. Always check `/api/health` first — "
+                "Service readiness and version information. Always check `/api/v1/health` first — "
                 "profile and slice endpoints return **503** while `catalog_loading` is `true`."
             ),
         },
@@ -199,8 +199,8 @@ app = FastAPI(
             "description": (
                 "Synchronous plate arrangement and STL packing. No job tracking — responses "
                 "block until OrcaSlicer finishes (up to `ARRANGE_TIMEOUT_SECONDS`, default 120). "
-                "Use `POST /api/pack` to combine multiple STLs into a single multi-plate `.3mf`, "
-                "and `POST /api/arrange` to re-pack an existing `.3mf`."
+                "Use `POST /api/v1/pack` to combine multiple STLs into a single multi-plate `.3mf`, "
+                "and `POST /api/v1/arrange` to re-pack an existing `.3mf`."
             ),
         },
         {
@@ -250,8 +250,8 @@ class MergedConfigRequest(BaseModel):
     machine_uuid: str = Field(
         ...,
         description=(
-            "Stable UUID of the machine (printer) profile. Obtain from `GET /api/profiles` "
-            "or `GET /api/profiles/{uuid}`. Machine UUIDs are derived from the "
+            "Stable UUID of the machine (printer) profile. Obtain from `GET /api/v1/profiles` "
+            "or `GET /api/v1/profiles/{uuid}`. Machine UUIDs are derived from the "
             "(manufacturer, model, nozzle) tuple and are stable across catalog rebuilds."
         ),
     )
@@ -297,8 +297,8 @@ def init_config_directories():
 
 jobs: Dict[str, dict] = {}
 
-# job_ids of in-flight /api/pack, /api/arrange, /api/slice/thumbnail requests. These
-# are synchronous requests tracked in no other registry, so POST /api/cleanup (with
+# job_ids of in-flight /api/v1/pack, /api/v1/arrange, /api/v1/slice/thumbnail requests. These
+# are synchronous requests tracked in no other registry, so POST /api/v1/cleanup (with
 # min_age_seconds=0) would otherwise delete their scratch dirs / stable output copies
 # mid-write. _scan_stale_temp excludes any ARRANGE_DIR entry whose name contains one
 # of these ids, regardless of age.
@@ -444,7 +444,7 @@ async def _evict_stale_jobs():
 
 
 # --- Job history: a longer-lived record of every job, independent of the active `jobs` dict.
-# Backs GET /api/jobs (status + history view in the Web UI). Entries persist across the job's
+# Backs GET /api/v1/jobs (status + history view in the Web UI). Entries persist across the job's
 # eviction from `jobs` (download or TTL sweep) so the UI can still show what happened.
 job_history: "OrderedDict[str, dict]" = OrderedDict()
 _HISTORY_FILE = os.path.join(DATA_DIR, "job_history.json")
@@ -543,59 +543,10 @@ async def get_dashboard():
     return HTMLResponse(content=html_content)
 
 
-@app.get(
-    "/api/profiles",
-    tags=["profiles"],
-    summary="List profiles in the catalog",
-    description=(
-        "Returns all machine, process, and filament presets known to this container.\n\n"
-        "**Filtering:** supply all three of `manufacturer`, `model`, and `nozzle` together "
-        "to receive only the matching machine preset plus all process and filament presets "
-        "that declare that machine in their `compatible_printers` list. Supplying only one "
-        "or two of the three parameters is a **422** error.\n\n"
-        "**Refresh:** pass `refresh=true` to schedule a background catalog rebuild "
-        "(e.g., after uploading new profiles via `POST /api/profiles/upload`). The response "
-        "reflects the *current* catalog immediately; the new catalog is available after ~5 s. "
-        "While rebuilding, `GET /api/health` will show `catalog_building: true`.\n\n"
-        "**Response shape:**\n"
-        "```json\n"
-        "{\n"
-        '  "machine":  [{ "uuid": "...", "name": "...", "manufacturer": "...", "model": "...", "nozzle": "..." }],\n'
-        '  "process":  [{ "uuid": "...", "name": "...", "layer_height": 0.2, "compatible_printers": [...] }],\n'
-        '  "filament": [{ "uuid": "...", "name": "...", "filament_type": "PLA", "filament_colour": "#FFFFFF", ... }]\n'
-        "}\n"
-        "```\n\n"
-        "Returns **503** while the catalog is initialising on container start."
-    ),
-    responses={
-        422: {"description": "Partial filter: supply all three of manufacturer/model/nozzle or none"},
-        503: {"description": "Catalog not yet ready — retry after /api/health reports catalog_loaded: true"},
-    },
-)
-async def get_profiles(
-    manufacturer: Optional[str] = None,
-    model: Optional[str] = None,
-    nozzle: Optional[str] = None,
-    refresh: bool = False,
-):
-    if refresh:
-        _trigger_catalog_rebuild()
-    if catalog is None:
-        return JSONResponse(
-            status_code=503,
-            content={"status": "building_catalog", "detail": "Catalog not ready. Retry shortly."},
-        )
-    tuple_params = [p for p in (manufacturer, model, nozzle) if p is not None]
-    if tuple_params and len(tuple_params) != 3:
-        raise HTTPException(
-            status_code=422,
-            detail="Provide all three of manufacturer, model, and nozzle together, or none.",
-        )
-    return catalog.as_dict(manufacturer=manufacturer, model=model, nozzle=nozzle)
 
 
 @app.post(
-    "/api/profiles/merged-config",
+    "/api/v1/profiles/merged-config",
     tags=["profiles"],
     summary="Get merged project_settings.config for a profile set",
     description=(
@@ -620,14 +571,15 @@ async def get_profiles(
                 "or filament_uuids is empty"
             ),
         },
-        503: {"description": "Catalog not yet ready — retry after /api/health reports catalog_loaded: true"},
+        503: {"description": "Catalog not yet ready — retry after /api/v1/health reports catalog_loaded: true"},
     },
 )
 async def get_merged_config(body: MergedConfigRequest):
     if catalog is None:
-        return JSONResponse(
+        raise HTTPException(
             status_code=503,
-            content={"status": "building_catalog", "detail": "Catalog not ready. Retry shortly."},
+            detail={"code": "catalog_not_ready", "message": "Catalog not ready. Retry shortly."},
+            headers={"Retry-After": "5"},
         )
     machine_entry = catalog.get_by_uuid(body.machine_uuid)
     if machine_entry is None or machine_entry.get("type") != "machine":
@@ -653,14 +605,14 @@ async def get_merged_config(body: MergedConfigRequest):
 
 
 @app.get(
-    "/api/profiles/broken",
+    "/api/v1/profiles/broken",
     tags=["profiles"],
     summary="List profiles excluded from the catalog",
     description=(
         "Profiles dropped by the last catalog build, each with the reason. An unresolvable "
         "`inherits` parent here is the signal that an OrcaSlicer update renamed or removed a "
         "vendor base that a user profile was building on.\n\n"
-        "Must be registered before `/api/profiles/{profile_uuid}` — Starlette matches path "
+        "Must be registered before `/api/v1/profiles/{profile_uuid}` — Starlette matches path "
         "routes in registration order, and `{profile_uuid}` would otherwise swallow this path "
         "as a literal UUID lookup and always 404.\n\n"
         "Returns **503** while the catalog is still building."
@@ -669,9 +621,10 @@ async def get_merged_config(body: MergedConfigRequest):
 )
 async def get_broken_profiles():
     if catalog is None or not catalog.is_built:
-        return JSONResponse(
+        raise HTTPException(
             status_code=503,
-            content={"status": "building_catalog", "detail": "Catalog not ready. Retry shortly."},
+            detail={"code": "catalog_not_ready", "message": "Catalog not ready. Retry shortly."},
+            headers={"Retry-After": "5"},
         )
     broken = catalog.broken
     return {"count": len(broken), "broken": broken}
@@ -712,15 +665,19 @@ def _neutral_json(cat: ProfileCatalog, stale: bool, body: dict, status_code: int
     return JSONResponse(status_code=status_code, content=payload, headers={"X-Catalog-Version": version})
 
 
-_NEUTRAL_RESPONSES = {503: {"description": "No catalog, live or cached: `{\"error\": \"catalog_unavailable\"}`"}}
+_NEUTRAL_RESPONSES = {503: {"description": "No catalog, live or cached: error code `catalog_unavailable`"}}
 
 
-def _catalog_unavailable() -> JSONResponse:
-    return JSONResponse(status_code=503, content={"error": "catalog_unavailable"})
+def _catalog_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={"code": "catalog_unavailable", "message": "No profile catalog, live or cached."},
+        headers={"Retry-After": "5"},
+    )
 
 
 @app.post(
-    "/api/profiles/machines/suggest",
+    "/api/v1/profiles/machines/suggest",
     tags=["profiles"],
     summary="Suggest machine presets for a printer model",
     description=(
@@ -735,13 +692,13 @@ def _catalog_unavailable() -> JSONResponse:
 async def suggest_machines(body: NeutralModelQuery):
     cat, stale = _neutral_catalog()
     if cat is None:
-        return _catalog_unavailable()
+        raise _catalog_unavailable()
     candidates = cat.neutral.suggest_machines(body.manufacturer, body.model, body.model_key)
     return _neutral_json(cat, stale, {"candidates": candidates})
 
 
 @app.post(
-    "/api/profiles/models/variants",
+    "/api/v1/profiles/models/variants",
     tags=["profiles"],
     summary="List nozzle variants of a printer model",
     description=(
@@ -754,13 +711,13 @@ async def suggest_machines(body: NeutralModelQuery):
 async def model_variants(body: NeutralModelQuery):
     cat, stale = _neutral_catalog()
     if cat is None:
-        return _catalog_unavailable()
+        raise _catalog_unavailable()
     variants = cat.neutral.model_variants(body.manufacturer, body.model, body.model_key)
     return _neutral_json(cat, stale, {"variants": variants})
 
 
 @app.get(
-    "/api/profiles/machines/{machine_ref}/presets",
+    "/api/v1/profiles/machines/{machine_ref}/presets",
     tags=["profiles"],
     summary="Process/filament presets compatible with a machine",
     description=(
@@ -773,7 +730,7 @@ async def model_variants(body: NeutralModelQuery):
 async def machine_presets(machine_ref: str, kind: Optional[str] = None):
     cat, stale = _neutral_catalog()
     if cat is None:
-        return _catalog_unavailable()
+        raise _catalog_unavailable()
     if kind not in (None, "process", "filament"):
         return _neutral_json(cat, stale, {"error": "invalid_kind"}, 422)
     machine = cat.neutral.machine_by_ref.get(machine_ref)
@@ -786,7 +743,7 @@ async def machine_presets(machine_ref: str, kind: Optional[str] = None):
 
 
 @app.get(
-    "/api/profiles/machines/{machine_ref}/supports",
+    "/api/v1/profiles/machines/{machine_ref}/supports",
     tags=["profiles"],
     summary="Can this machine ref (and bed) be sliced for?",
     description=(
@@ -799,44 +756,11 @@ async def machine_presets(machine_ref: str, kind: Optional[str] = None):
 async def machine_supports(machine_ref: str, bed_x: Optional[float] = None, bed_y: Optional[float] = None):
     cat, stale = _neutral_catalog()
     if cat is None:
-        return _catalog_unavailable()
+        raise _catalog_unavailable()
     supported, reason = cat.neutral.supports(machine_ref, bed_x, bed_y)
     return _neutral_json(cat, stale, {"machine_ref": machine_ref, "supported": supported, "reason": reason})
 
 
-@app.get(
-    "/api/profiles/{profile_uuid}",
-    tags=["profiles"],
-    summary="Get full detail for one profile",
-    description=(
-        "Returns all public fields for a single profile entry identified by its stable UUID. "
-        "The `_resolved` (inheritance-flattened) dict is not included — use "
-        "`POST /api/profiles/merged-config` for the fully merged config.\n\n"
-        "**Fields by type:**\n\n"
-        "*Machine:* `uuid`, `name`, `manufacturer`, `model`, `nozzle`, `nozzle_diameter`, "
-        "`bed_size_x`, `bed_size_y`, `extruder_count`, `source`, `rel_path`\n\n"
-        "*Process:* `uuid`, `name`, `layer_height`, `compatible_printers`, `source`, `rel_path`\n\n"
-        "*Filament:* `uuid`, `name`, `display_name`, `filament_type`, `filament_colour`, "
-        "`filament_vendor`, `filament_diameter`, `filament_density`, `nozzle_temperature`, "
-        "`nozzle_temperature_range_low`, `nozzle_temperature_range_high`, `bed_temperature`, "
-        "`bed_temperature_initial_layer`, `compatible_printers`, `source`, `rel_path`\n\n"
-        "Returns **503** while the catalog is initialising."
-    ),
-    responses={
-        404: {"description": "Profile UUID not found in catalog"},
-        503: {"description": "Catalog not yet ready — retry after /api/health reports catalog_loaded: true"},
-    },
-)
-async def get_profile_detail(profile_uuid: str):
-    if catalog is None:
-        return JSONResponse(
-            status_code=503,
-            content={"status": "building_catalog", "detail": "Catalog not ready. Retry shortly."},
-        )
-    entry = catalog.get_by_uuid(profile_uuid)
-    if entry is None:
-        raise HTTPException(status_code=404, detail=f"Profile UUID '{profile_uuid}' not found.")
-    return catalog._public(entry)
 
 
 async def _kill_process_group(process: asyncio.subprocess.Process) -> None:
@@ -973,61 +897,6 @@ async def run_orcaslicer_task(
         job_logger.log("__FAILED__: OrcaSlicer returned non-zero")
 
 
-@app.post(
-    "/api/slice/start",
-    tags=["slice"],
-    summary="Start a slice job (UUID-based profile resolution)",
-    description=(
-        "Upload a `.3mf` or `.stl` and specify print settings by profile UUID. "
-        "The API resolves each profile's full inheritance chain, merges machine + process + "
-        "filament into a `project_settings.config`, embeds it into the 3MF, then launches "
-        "OrcaSlicer in the background and returns a `job_id` immediately.\n\n"
-        "**Machine identification (mutually exclusive):**\n"
-        "- `machine_uuid` — preferred; stable across catalog rebuilds.\n"
-        "- `manufacturer` + `model` + `nozzle` — tuple lookup; useful when the UUID is unknown.\n\n"
-        "**Key parameters:**\n"
-        "- `filament_uuids` — JSON array string, e.g. `'[\"uuid1\"]'`; one entry per extruder "
-        "slot in slot order. Single-extruder printers need exactly one entry.\n"
-        "- `plate` — 1-based plate number to slice. Use `1` for single-plate models.\n"
-        "- `export_3mf` — optional output filename. When set, OrcaSlicer embeds the GCode "
-        "inside a `.3mf` instead of writing a standalone `.gcode` file. The download endpoint "
-        "returns the `.3mf` in this case.\n"
-        "- `geometry_only_retry` — when `true` (default), if the first slice attempt fails "
-        "OrcaSlicer retries with `Metadata/model_settings.config` stripped from the 3MF. "
-        "This resolves failures caused by stale extruder-slot assignments baked into models "
-        "exported from OrcaSlicer.\n"
-        "- `extra_config` — optional JSON object merged into the resolved "
-        "`project_settings.config` after profile resolution. Use to override individual "
-        "settings, e.g. `{\"curr_bed_type\": \"Cool Plate\"}` or "
-        "`{\"layer_height\": \"0.12\"}`.\n\n"
-        "**STL files** are automatically converted to a minimal 3MF before slicing.\n\n"
-        "**Concurrency:** at most `MAX_CONCURRENT_JOBS` (default 4) jobs may be slicing "
-        "simultaneously. When the limit is reached the request returns **503** — retry later.\n\n"
-        "**Job lifecycle after creation:**\n"
-        "```\n"
-        "pending → slicing → completed  (download available)\n"
-        "                  ↘ failed     (check error field in status response)\n"
-        "```\n"
-        "Poll `GET /api/slice/status/{job_id}` every 2–5 s, then download via "
-        "`GET /api/slice/download/{job_id}` when complete."
-    ),
-    responses={
-        400: {"description": "Bad filename (null bytes, semicolons, or missing Content-Disposition filename)"},
-        422: {
-            "description": (
-                "Validation failure: plate < 1, filament_uuids is not a valid JSON array, "
-                "machine/process/filament UUID not found in catalog, profile not compatible "
-                "with the selected machine, or extra_config is not a JSON object"
-            ),
-        },
-        503: {
-            "description": (
-                "Profile catalog not yet ready (retry after catalog_loaded: true), "
-                "or too many concurrent slice jobs (retry when a slot opens)"
-            ),
-        },
-    },
-)
 async def start_slice(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -1176,23 +1045,23 @@ async def start_slice(
 
 
 @app.post(
-    "/api/slice/prepared",
+    "/api/v1/slice/prepared",
     tags=["slice"],
     summary="Slice a pre-configured 3MF (no profile resolution)",
     description=(
         "Accepts a `.3mf` that already contains `Metadata/project_settings.config` "
-        "(e.g., exported from OrcaSlicer desktop or produced by `POST /api/slice/start` "
+        "(e.g., exported from OrcaSlicer desktop or produced by `POST /api/v1/jobs` "
         "with `export_3mf` set). No catalog lookup or profile merging is performed — "
         "OrcaSlicer uses the embedded settings verbatim.\n\n"
         "Use this endpoint when you already have a fully-configured 3MF and want to avoid "
         "the overhead of profile resolution. Typical callers: Themis queue engine dispatching "
         "pre-packed project 3MFs, or debugging with a known-good 3MF from the desktop app.\n\n"
-        "**Geometry-only retry** works the same as in `POST /api/slice/start`: when "
+        "**Geometry-only retry** works the same as in `POST /api/v1/jobs`: when "
         "`geometry_only_retry=true` (default) and the first slice fails, the API retries "
         "with `Metadata/model_settings.config` stripped from the 3MF.\n\n"
         "**`export_3mf`:** when set, OrcaSlicer embeds the sliced GCode into a `.3mf` and "
         "the download endpoint returns that file instead of a standalone `.gcode`.\n\n"
-        "The response and job lifecycle are identical to `POST /api/slice/start`."
+        "The response and job lifecycle are identical to `POST /api/v1/jobs`."
     ),
     responses={
         400: {"description": "Bad filename (null bytes, semicolons, or missing Content-Disposition filename)"},
@@ -1200,7 +1069,7 @@ async def start_slice(
         503: {
             "description": (
                 "Too many concurrent slice jobs — retry when a slot opens "
-                "(check active_jobs in GET /api/health)"
+                "(check active_jobs in GET /api/v1/health)"
             ),
         },
     },
@@ -1271,7 +1140,7 @@ async def slice_prepared(
 
 
 @app.post(
-    "/api/slice/thumbnail",
+    "/api/v1/slice/thumbnail",
     tags=["slice"],
     summary="Render a plate thumbnail PNG (synchronous)",
     description=(
@@ -1303,13 +1172,13 @@ async def slice_thumbnail(
     plate: int = Form(...),
 ):
     if plate < 1:
-        raise HTTPException(status_code=422, detail={"error": "plate must be >= 1."})
+        raise HTTPException(status_code=422, detail="plate must be >= 1.")
     try:
         safe_name = _safe_filename(file.filename)
     except ValueError as e:
-        raise HTTPException(status_code=422, detail={"error": str(e)})
+        raise HTTPException(status_code=422, detail=str(e))
     if not safe_name.lower().endswith(".3mf"):
-        raise HTTPException(status_code=422, detail={"error": "Only .3mf files accepted."})
+        raise HTTPException(status_code=422, detail="Only .3mf files accepted.")
 
     job_id = str(uuid.uuid4())
     with _track_inflight_arrange(job_id):
@@ -1343,13 +1212,13 @@ async def slice_thumbnail(
             except asyncio.TimeoutError:
                 await _kill_process_group(process)
                 background_tasks.add_task(cleanup_directory, job_dir)
-                raise HTTPException(status_code=422, detail={"error": f"Timed out after {THUMBNAIL_TIMEOUT}s"})
+                raise HTTPException(status_code=422, detail=f"Timed out after {THUMBNAIL_TIMEOUT}s")
 
             if process.returncode != 0 or not os.path.exists(out_3mf):
                 log_text = stdout.decode("utf-8", errors="replace") if stdout else ""
                 logger.error("Thumbnail failed. Exit %s. Log: %s", process.returncode, log_text)
                 background_tasks.add_task(cleanup_directory, job_dir)
-                raise HTTPException(status_code=422, detail={"error": f"OrcaSlicer exited {process.returncode}"})
+                raise HTTPException(status_code=422, detail=f"OrcaSlicer exited {process.returncode}")
 
             def _extract_png(archive: str, plate_idx: int) -> Optional[bytes]:
                 import zipfile as _zf
@@ -1364,7 +1233,7 @@ async def slice_thumbnail(
             background_tasks.add_task(cleanup_directory, job_dir)
 
             if png_bytes is None:
-                raise HTTPException(status_code=422, detail={"error": "No plate PNG found in OrcaSlicer output"})
+                raise HTTPException(status_code=422, detail="No plate PNG found in OrcaSlicer output")
 
             return Response(content=png_bytes, media_type="image/png")
 
@@ -1373,103 +1242,13 @@ async def slice_thumbnail(
         except Exception as exc:
             background_tasks.add_task(cleanup_directory, job_dir)
             logger.exception("Thumbnail error")
-            raise HTTPException(status_code=422, detail={"error": str(exc)})
+            raise HTTPException(status_code=422, detail=str(exc))
 
 
-@app.get(
-    "/api/slice/status/{job_id}",
-    tags=["slice"],
-    summary="Poll slice job status",
-    description=(
-        "Returns the current status of a slice job. Poll every 2–5 seconds until `status` "
-        "is `completed` or `failed`.\n\n"
-        "**Response fields:**\n"
-        "- `job_id` — echoed back for correlation\n"
-        "- `status` — one of `pending`, `slicing`, `completed`, `failed`\n"
-        "- `output_format` — `gcode` (default) or `gcode_3mf` (when `export_3mf` was set)\n"
-        "- `sliced_file` — basename of the output file when `completed`, otherwise `null`\n"
-        "- `error` — human-readable error message when `failed`, otherwise `null`\n\n"
-        "**Job lifecycle:** `pending` → `slicing` → `completed` or `failed`\n\n"
-        "Jobs are kept for `JOB_TTL_SECONDS` (default 3600) or until downloaded. "
-        "A **404** on a previously-valid `job_id` means the job has already been evicted "
-        "— either downloaded or timed out."
-    ),
-    responses={
-        404: {"description": "Job not found — never existed, already downloaded, or evicted after TTL"},
-    },
-)
-async def get_job_status(job_id: str):
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found.")
-    job = jobs[job_id]
-    return {
-        "job_id": job["id"],
-        "status": job["status"],
-        "output_format": job.get("output_format", "gcode"),
-        "sliced_file": os.path.basename(job["sliced_file"]) if job["sliced_file"] else None,
-        "error": job["error"],
-    }
 
 
-@app.get(
-    "/api/slice/logs/{job_id}",
-    tags=["slice"],
-    summary="Stream slice job logs (Server-Sent Events)",
-    description=(
-        "Returns a Server-Sent Events stream of OrcaSlicer stdout/stderr lines, "
-        "emitted in real time as the slicer runs.\n\n"
-        "**Event format:** `data: <log line>\\r\\n\\r\\n`\n\n"
-        "**Terminal events (stream ends after these):**\n"
-        "- `data: __COMPLETED__` — job finished successfully\n"
-        "- `data: __FAILED__: <reason>` — job failed; `<reason>` is a short label\n\n"
-        "**Usage notes:**\n"
-        "- The stream replays all buffered log lines immediately on connect, so connecting "
-        "after the job has already completed still delivers the full log history.\n"
-        "- Most callers can skip this and poll `GET /api/slice/status` instead — logs are "
-        "primarily useful for debugging slice failures.\n"
-        "- If the job is evicted before you connect, the endpoint returns **404**."
-    ),
-    response_class=StreamingResponse,
-    responses={
-        404: {"description": "Job not found — never existed, already downloaded, or evicted after TTL"},
-    },
-)
-async def get_job_logs(job_id: str):
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found.")
-    job = jobs[job_id]
-    if job.get("logger") is None:
-        # Restored from disk after a restart (_load_jobs_on_startup): the in-memory
-        # JobLogger is gone, so there's no log history left to stream.
-        raise HTTPException(status_code=404, detail="Job data was lost when Laminus restarted.")
-    return StreamingResponse(job["logger"].get_stream(), media_type="text/event-stream")
 
 
-@app.get(
-    "/api/slice/download/{job_id}",
-    tags=["slice"],
-    summary="Download sliced output file",
-    description=(
-        "Returns the sliced output as `application/octet-stream`. The file extension "
-        "indicates the format:\n"
-        "- `.gcode` — standalone GCode file (default)\n"
-        "- `.3mf` — GCode embedded inside a 3MF (when `export_3mf` was set during job creation)\n\n"
-        "**⚠️ One-time download:** downloading evicts the job immediately — the in-memory "
-        "record and all temporary files on disk are deleted. There is no second download. "
-        "Only call this once you have confirmed `status == 'completed'`.\n\n"
-        "Returns **400** if the job exists but is not yet complete (wrong status). "
-        "Returns **404** if the job does not exist (never created, already downloaded, or evicted)."
-    ),
-    responses={
-        400: {"description": "Job exists but is not yet complete — check status first"},
-        404: {
-            "description": (
-                "Job not found (never existed, already downloaded, or evicted after TTL), "
-                "or job is complete but the output file is missing from disk"
-            ),
-        },
-    },
-)
 async def download_sliced_file(job_id: str, background_tasks: BackgroundTasks):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -1546,7 +1325,7 @@ def _build_bed_template_bytes(printable_area: list, printable_height: float) -> 
 
 
 @app.post(
-    "/api/pack",
+    "/api/v1/pack",
     tags=["arrange"],
     summary="Pack N STLs onto as many plates as needed (synchronous)",
     description=(
@@ -1812,7 +1591,7 @@ async def pack_stls(
 
 
 @app.post(
-    "/api/arrange",
+    "/api/v1/arrange",
     tags=["arrange"],
     summary="Auto-arrange and orient objects in a 3MF (synchronous)",
     description=(
@@ -1821,10 +1600,10 @@ async def pack_stls(
         "as `application/octet-stream`.\n\n"
         "**Blocking:** waits up to `ARRANGE_TIMEOUT_SECONDS` (default 120 s) for OrcaSlicer "
         "to finish. No job tracking — call completes synchronously.\n\n"
-        "**When to use this vs `POST /api/pack`:**\n"
-        "- Use `POST /api/arrange` when you already have a `.3mf` with the correct geometry "
+        "**When to use this vs `POST /api/v1/pack`:**\n"
+        "- Use `POST /api/v1/arrange` when you already have a `.3mf` with the correct geometry "
         "and want to repack it (e.g., after hand-editing or re-importing).\n"
-        "- Use `POST /api/pack` when starting from STL files that need to be combined into "
+        "- Use `POST /api/v1/pack` when starting from STL files that need to be combined into "
         "a 3MF first.\n\n"
         "**Settings preservation:** the input 3MF's `Metadata/project_settings.config` is "
         "passed to OrcaSlicer via `--datadir`, which means OrcaSlicer may load its own "
@@ -1941,13 +1720,13 @@ async def auto_arrange_3mf(
 
 
 @app.post(
-    "/api/3mf/objects",
+    "/api/v1/projects/inspect",
     tags=["arrange"],
     summary="List the objects in an OrcaSlicer/Bambu .3mf",
     description=(
         "Returns each object's `id`, `name`, extruder, per-object override keys, part "
         "subtypes (e.g. `modifier_part`) and current instance count. Use the names/ids in "
-        "`POST /api/arrange/subset`. Names are not unique in a project; ids are."
+        "`POST /api/v1/projects/subset`. Names are not unique in a project; ids are."
     ),
     responses={400: {"description": "Not a readable .3mf"}},
 )
@@ -2006,7 +1785,7 @@ async def _oracle_arrange_and_transplant(sub_file: str, oracle_in: str, out_file
 
 
 @app.post(
-    "/api/3mf/previews",
+    "/api/v1/projects/previews",
     tags=["arrange"],
     summary="List a .3mf's objects with plate names and a preview image of each object",
     description=(
@@ -2015,7 +1794,7 @@ async def _oracle_arrange_and_transplant(sub_file: str, oracle_in: str, out_file
         "`preview` is a rendering of **the object itself** (not the plate): a 3/4-view PNG, "
         "transparent background, tinted with the object's filament colour, modifier/negative "
         "parts omitted; `{mime, width, height, data_base64}`, or `null` when the object has "
-        "nothing printable. Use the `id`s with `/api/arrange/subset` or `/api/arrange/merge`.\n\n"
+        "nothing printable. Use the `id`s with `/api/v1/projects/subset` or `/api/v1/projects/merge`.\n\n"
         "`size` is the square image edge in px (32-1024, default 256). Set `images=false` for "
         "names/plates only (fast). Rendering is CPU-bound: roughly 0.5 s per object for typical "
         "models, so a 20-object project takes ~10 s."
@@ -2048,7 +1827,7 @@ async def preview_3mf_objects(
 
 
 @app.post(
-    "/api/arrange/subset",
+    "/api/v1/projects/subset",
     tags=["arrange"],
     summary="Keep only chosen objects (x quantity) from a .3mf and arrange them on the fewest plates",
     description=(
@@ -2209,7 +1988,7 @@ async def _resolve_retarget(machine_uuid, process_uuid, filament_uuids) -> _Reta
 
 
 @app.post(
-    "/api/arrange/merge",
+    "/api/v1/projects/merge",
     tags=["arrange"],
     summary="Combine selections from several .3mf files into one .3mf, arranged on the fewest plates",
     description=(
@@ -2222,7 +2001,7 @@ async def _resolve_retarget(machine_uuid, process_uuid, filament_uuids) -> _Reta
         "each object. **Project-wide settings (process, filament, printer, thumbnails) come from "
         "the first uploaded file** (the base); differences in the other sources are listed in "
         "the `X-Merge-Warnings` header, which also reports any object that ends up not resting on the bed (floating/sunk). A non-base object using a filament slot the base does not "
-        "have is rejected (422). `machine_uuid` retargets the bed/printer as in `/api/arrange/subset`.\n\n"
+        "have is rejected (422). `machine_uuid` retargets the bed/printer as in `/api/v1/projects/subset`.\n\n"
         "Headers: `X-Plate-Count`, `X-Instance-Count`, `X-Merge-Warnings`. Blocking; limited by "
         "`ARRANGE_TIMEOUT_SECONDS`."
     ),
@@ -2334,13 +2113,13 @@ async def arrange_merge(
 
 
 @app.post(
-    "/api/profiles/upload",
+    "/api/v1/profiles/upload",
     tags=["profiles"],
     summary="Upload a user profile JSON",
     description=(
         "Upload a flat OrcaSlicer preset JSON into the user config volume at "
         "`/config/user/default/{type}/`. A catalog rebuild is triggered in the background "
-        "automatically — wait ~5 s and call `GET /api/profiles` to confirm the profile "
+        "automatically — wait ~5 s and call `GET /api/v1/profiles` to confirm the profile "
         "appears before using it in a slice job.\n\n"
         "**Requirements for the JSON file:**\n"
         "- Must have a `.json` extension\n"
@@ -2352,7 +2131,7 @@ async def arrange_merge(
         "(no `inherits`) is frozen at the version it was flattened from and silently misses "
         "every later vendor fix — use it only when you want a permanent fork.\n\n"
         "If the base is renamed or removed by a later OrcaSlicer release the profile is "
-        "dropped from the catalog rather than served half-resolved; `GET /api/profiles/broken` "
+        "dropped from the catalog rather than served half-resolved; `GET /api/v1/profiles/broken` "
         "reports it.\n\n"
         "**Profile persistence:** the uploaded file is written to a Docker volume "
         "(`/config/user/`). It survives container restarts but is not baked into the image. "
@@ -2401,7 +2180,7 @@ async def upload_profile(
 
 
 @app.post(
-    "/api/profiles/rescan",
+    "/api/v1/profiles/rescan",
     tags=["profiles"],
     summary="Rescan profiles and rebuild the catalog",
     description=(
@@ -2412,8 +2191,8 @@ async def upload_profile(
         "preset change voids it. Use this endpoint to force the work anyway: after editing "
         "profiles in place on a bind mount, or to re-check which profiles are broken after "
         "an OrcaSlicer upgrade.\n\n"
-        "Returns immediately; the rebuild runs in the background. Poll `GET /api/health` "
-        "until `catalog_building` is `false`, then call `GET /api/profiles/broken` for "
+        "Returns immediately; the rebuild runs in the background. Poll `GET /api/v1/health` "
+        "until `catalog_building` is `false`, then call `GET /api/v1/profiles/broken` for "
         "profiles whose inheritance no longer resolves."
     ),
 )
@@ -2425,7 +2204,7 @@ async def rescan_profiles():
         "message": (
             "A catalog rebuild was already in progress; not queuing another."
             if already else
-            "Catalog rescan started. Poll /api/health until catalog_building is false."
+            "Catalog rescan started. Poll /api/v1/health until catalog_building is false."
         ),
     }
 
@@ -2444,7 +2223,7 @@ def _orca_version() -> Optional[str]:
 
 
 @app.get(
-    "/api/health",
+    "/api/v1/health",
     tags=["health"],
     summary="Service health check",
     description=(
@@ -2469,7 +2248,7 @@ def _orca_version() -> Optional[str]:
         "otherwise `null`\n"
         "- `catalog_skipped_count` — number of profiles excluded from the catalog on the "
         "last build (unresolvable `inherits` parent, unparseable JSON, etc.) — call "
-        "`GET /api/profiles/broken` for which profiles and why; `null` if not yet built\n"
+        "`GET /api/v1/profiles/broken` for which profiles and why; `null` if not yet built\n"
         "- `active_jobs` — number of jobs currently in `slicing` status"
     ),
 )
@@ -2490,29 +2269,6 @@ async def health_check():
     }
 
 
-@app.get(
-    "/api/jobs",
-    tags=["jobs"],
-    summary="List job history",
-    description=(
-        "Returns every slice job created during this container's lifetime, newest first — "
-        "including jobs already evicted from the active job table (downloaded, or expired "
-        "after `JOB_TTL_SECONDS`). Backs the Web UI's job status/history view.\n\n"
-        "**Response fields per job:** `id`, `filename` (original upload name), `status` "
-        "(`pending`/`slicing`/`completed`/`failed`), `output_format`, `sliced_file`, `error`, "
-        "`created_at` / `updated_at` (Unix timestamps), and `evicted` (`true` once the sliced "
-        "file has been deleted from disk — `GET /api/slice/download/{id}` will 404).\n\n"
-        "History is capped at `JOB_HISTORY_LIMIT` (default 200) entries; oldest entries are "
-        "dropped first. Persisted to `/data/job_history.json`, so it survives restarts."
-    ),
-)
-async def list_jobs(limit: int = 100, status: Optional[str] = None):
-    records = list(job_history.values())
-    if status:
-        records = [r for r in records if r.get("status") == status]
-    records.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
-    limit = max(1, min(limit, JOB_HISTORY_LIMIT))
-    return {"jobs": records[:limit]}
 
 
 def _dir_size(path: str) -> int:
@@ -2567,14 +2323,14 @@ def _scan_stale_temp(min_age_seconds: int) -> List[str]:
 
 
 @app.post(
-    "/api/cleanup",
+    "/api/v1/cleanup",
     tags=["maintenance"],
     summary="Remove stale temp files from failed/interrupted jobs",
     description=(
         "Scans `/tmp/jobs` and `/tmp/arrange` for leftover directories/files not accounted "
         "for by any currently active job, and removes the ones older than `min_age_seconds`. "
         "This catches clutter that the normal job-eviction sweep can't see — e.g. scratch "
-        "dirs from an `/api/arrange`, `/api/pack`, or `/api/slice/thumbnail` request that "
+        "dirs from an `/api/v1/arrange`, `/api/v1/pack`, or `/api/v1/slice/thumbnail` request that "
         "never finished because the container was killed mid-request, or `/tmp/jobs` entries "
         "left behind by a slice job that existed before a restart.\n\n"
         "**`dry_run=true`** reports what would be removed (path count + total bytes) without "
@@ -2620,7 +2376,7 @@ async def cleanup_temp(min_age_seconds: int = 300, dry_run: bool = False):
     }
 
 
-@app.get("/api/test/known-profile", include_in_schema=False)
+@app.get("/api/v1/test/known-profile", include_in_schema=False)
 async def test_known_profile(machine_name: str | None = None):
     """Return a machine/process/filament UUID triple from the loaded catalog.
 
@@ -2664,5 +2420,5 @@ async def test_known_profile(machine_name: str | None = None):
     }
 
 
-from app import api_v1 as _api_v1  # noqa: E402  (installs /api/v1 once every legacy route exists)
+from app import api_v1 as _api_v1  # noqa: E402  (installs the v1 routes and error envelope)
 _api_v1.install(app, sys.modules[__name__])

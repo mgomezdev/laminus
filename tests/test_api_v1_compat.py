@@ -60,9 +60,7 @@ def test_v1_surface_is_backward_compatible():
     assert not problems, "breaking v1 change(s) - needs a new major version:\n" + "\n".join(problems)
 
 
-def test_legacy_surface_not_removed_by_v1_work():
+def test_no_versionless_routes():
     spec = app.openapi()
-    for path in ("/api/slice/start", "/api/slice/status/{job_id}", "/api/slice/logs/{job_id}",
-                 "/api/slice/download/{job_id}", "/api/jobs", "/api/profiles", "/api/health",
-                 "/api/arrange/subset", "/api/arrange/merge", "/api/3mf/objects"):
-        assert path in spec["paths"], f"legacy route {path} disappeared (see deprecation policy)"
+    bad = [p for p in spec["paths"] if p.startswith("/api") and p != "/api/v1" and not p.startswith("/api/v1/")]
+    assert not bad, f"routes outside /api/v1: {bad}"

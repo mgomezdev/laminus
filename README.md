@@ -38,11 +38,11 @@ See [`openapi.json`](openapi.json) for the full OpenAPI 3.0 spec (CI-regenerated
 
 ### Slice a model
 
-Profiles are referenced by UUID, resolved via `GET /api/profiles` (or `machine_uuid` directly if you already have it — see the agent doc above):
+Profiles are referenced by UUID, resolved via `GET /api/v1/profiles` (or `machine_uuid` directly if you already have it — see the agent doc above):
 
 ```bash
 # Start job
-curl -X POST http://localhost:5000/api/slice/start \
+curl -X POST http://localhost:5000/api/v1/jobs \
   -F "file=@model.stl" \
   -F "machine_uuid=<uuid-from-catalog>" \
   -F "process_uuid=<uuid-from-catalog>" \
@@ -50,13 +50,13 @@ curl -X POST http://localhost:5000/api/slice/start \
   -F "plate=1"
 
 # Poll status
-curl http://localhost:5000/api/slice/status/<job_id>
+curl http://localhost:5000/api/v1/jobs/<job_id>
 
 # Stream logs (SSE)
-curl http://localhost:5000/api/slice/logs/<job_id>
+curl http://localhost:5000/api/v1/jobs/<job_id>/events
 
 # Download result
-curl -O http://localhost:5000/api/slice/download/<job_id>
+curl -O http://localhost:5000/api/v1/jobs/<job_id>/artifact
 ```
 
 ### Arrange a 3MF

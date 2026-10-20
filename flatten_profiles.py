@@ -8,7 +8,7 @@ catalog build, so an OrcaSlicer update to that vendor base rolls straight throug
 
 A profile written by this script is frozen at the OrcaSlicer version it was flattened
 from. It will not receive any later vendor fix, silently, forever. Prefer a thin
-`inherits`-based profile via `POST /api/profiles/upload` and reach for this script only
+`inherits`-based profile via `POST /api/v1/profiles/upload` and reach for this script only
 when the vendor profile is going away (dropped, or you need to diverge permanently).
 """
 import json

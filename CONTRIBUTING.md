@@ -105,7 +105,7 @@ In CI, the mock binary (`mock/orca_cli.py`) is symlinked to `/usr/local/bin/orca
 
 Laminus has no persistent database. State lives in:
 - **In-memory:** active slice jobs dict `jobs: dict[str, dict]` in `main.py`, evicted by TTL sweep or on download
-- **In-memory + `/data/job_history.json`:** `job_history` — a longer-lived, size-capped (`JOB_HISTORY_LIMIT`, default 200) record of every job ever created, independent of `jobs` eviction. Backs `GET /api/jobs` and the Web UI's job status/history table. Persisted so it survives restarts.
+- **In-memory + `/data/job_history.json`:** `job_history` — a longer-lived, size-capped (`JOB_HISTORY_LIMIT`, default 200) record of every job ever created, independent of `jobs` eviction. Backs `GET /api/v1/jobs` and the Web UI's job status/history table. Persisted so it survives restarts.
 - **`/data/jobs.json`:** snapshot of the active `jobs` dict, restored on startup as failed stub entries for anything that was `pending`/`slicing` when Laminus last stopped
 - **`/data/catalog_cache.json`:** profile catalog cache, keyed by MD5 of ORCA_VERSION + user config dir mtimes
 
@@ -118,7 +118,7 @@ Laminus has no persistent database. State lives in:
 
 ### Profile catalog
 
-The catalog is built once at startup and cached. Rebuilds are triggered by `POST /api/profiles/upload` or `GET /api/profiles?refresh=true`.
+The catalog is built once at startup and cached. Rebuilds are triggered by `POST /api/v1/profiles/upload` or `POST /api/v1/profiles/rescan`.
 
 ```
 ProfileCatalog.build()
@@ -167,43 +167,43 @@ All routes are in `app/main.py`. Full reference with curl examples: `docs/laminu
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/health` | Service readiness, catalog status, active job count |
+| `GET` | `/api/v1/health` | Service readiness, catalog status, active job count |
 
 ### Profiles
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/profiles` | Full catalog; `?refresh=true` triggers background rebuild |
-| `GET` | `/api/profiles/{uuid}` | Single profile detail |
-| `POST` | `/api/profiles/merged-config` | Deep-merged project_settings.config for a set of UUIDs |
-| `POST` | `/api/profiles/upload` | Upload user preset JSON, triggers catalog rebuild |
+| `GET` | `/api/v1/profiles` | Flat catalog, cursor-paginated (`type=`, `q=`, `limit`, `cursor`) |
+| `GET` | `/api/v1/profiles/{uuid}` | Single profile detail |
+| `POST` | `/api/v1/profiles/merged-config` | Deep-merged project_settings.config for a set of UUIDs |
+| `POST` | `/api/v1/profiles/upload` | Upload user preset JSON, triggers catalog rebuild |
 
 ### Slicing
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/slice/start` | Upload STL/3MF + profile UUIDs → returns `job_id` |
-| `POST` | `/api/slice/prepared` | Slice a pre-configured 3MF (skip profile resolution) |
-| `POST` | `/api/slice/thumbnail` | Synchronous thumbnail render (PNG), no job lifecycle |
-| `GET` | `/api/slice/status/{job_id}` | Poll: `pending→slicing→completed\|failed` |
-| `GET` | `/api/slice/logs/{job_id}` | SSE stream of OrcaSlicer stdout |
-| `GET` | `/api/slice/download/{job_id}` | Download `.gcode` or `.3mf`; evicts job on response |
+| `POST` | `/api/v1/jobs` | Upload STL/3MF + profile UUIDs → 202 job object (`id`, `status`, `links`) |
+| `POST` | `/api/v1/slice/prepared` | Slice a pre-configured 3MF (skip profile resolution) |
+| `POST` | `/api/v1/slice/thumbnail` | Synchronous thumbnail render (PNG), no job lifecycle |
+| `GET` | `/api/v1/jobs/{job_id}` | Poll: `pending→slicing→completed\|failed` |
+| `GET` | `/api/v1/jobs/{job_id}/events` | SSE stream of OrcaSlicer stdout |
+| `GET` | `/api/v1/jobs/{job_id}/artifact` | Download `.gcode` or `.3mf`; deletes job files on response (record stays listed) |
 
 ### Arrange & Pack
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/arrange` | Arrange + orient a 3MF via OrcaSlicer; returns rearranged 3MF |
-| `POST` | `/api/pack` | Inject N STLs into a bed template, pack across plates |
+| `POST` | `/api/v1/arrange` | Arrange + orient a 3MF via OrcaSlicer; returns rearranged 3MF |
+| `POST` | `/api/v1/pack` | Inject N STLs into a bed template, pack across plates |
 
-`/api/pack` supports three template modes: uploaded `.3mf`, UUID-based (Laminus resolves machine settings), or explicit bed dimensions.
+`/api/v1/pack` supports three template modes: uploaded `.3mf`, UUID-based (Laminus resolves machine settings), or explicit bed dimensions.
 
 ### Jobs & Maintenance
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/jobs` | Job history (newest first), including jobs already evicted from the active table |
-| `POST` | `/api/cleanup` | Remove stale temp dirs/files left by failed or interrupted jobs; `dry_run=true` to preview |
+| `GET` | `/api/v1/jobs` | Job history (newest first), including jobs already evicted from the active table |
+| `POST` | `/api/v1/cleanup` | Remove stale temp dirs/files left by failed or interrupted jobs; `dry_run=true` to preview |
 
 ---
 
@@ -212,7 +212,7 @@ All routes are in `app/main.py`. Full reference with curl examples: `docs/laminu
 ### 1. Slice job lifecycle
 
 ```
-POST /api/slice/start
+POST /api/v1/jobs
   → validate profile UUIDs exist in catalog
   → project_config_builder.py :: build_project_settings(machine, process, filaments)
        → deep-merge flattened preset dicts (machine → process → per-filament)
@@ -223,13 +223,13 @@ POST /api/slice/start
   → asyncio.create_task(_run_slice_job())
        → subprocess: xvfb-run orcaslicer --slice ...
        → on complete: save .gcode to /tmp/jobs/{job_id}/
-  → return { job_id }
+  → return 202 { id, status, links }
 ```
 
 ### 2. Profile merged-config (no slice)
 
 ```
-POST /api/profiles/merged-config
+POST /api/v1/profiles/merged-config
   body: { machine_uuid, process_uuid, filament_uuids[] }
   → catalog.get_profile(uuid) for each
   → project_config_builder.build_project_settings(machine, process, filaments)
@@ -241,7 +241,7 @@ Themis calls this to inspect what settings a profile combination would produce.
 ### 3. Pack STLs into 3MF
 
 ```
-POST /api/pack
+POST /api/v1/pack
   body: { stl_files, template (uuid or bed dimensions), project_settings? }
   → stl_to_3mf.py :: inject_stls_into_3mf() → combined.3mf
   → subprocess: xvfb-run orcaslicer --arrange 1 --orient 1 --export-3mf out.3mf combined.3mf
@@ -270,12 +270,12 @@ POST /api/pack
 All routes live in `app/main.py`. Add a new route function there:
 
 ```python
-@app.post("/api/my-endpoint")
+@app.post("/api/v1/my-endpoint")
 async def my_endpoint(body: MyRequestModel):
     ...
 ```
 
-Use Pydantic models for request/response bodies. Keep route handlers thin — move logic into `profile_catalog.py`, `project_config_builder.py`, or `stl_to_3mf.py` as appropriate.
+Every API route must be under `/api/v1` (`test_every_api_route_is_under_v1` fails otherwise); errors raised as `HTTPException` are wrapped in the v1 envelope automatically. Use Pydantic models for request/response bodies. Keep route handlers thin — move logic into `profile_catalog.py`, `project_config_builder.py`, or `stl_to_3mf.py` as appropriate.
 
 ---
 
@@ -293,6 +293,6 @@ Laminus has no database. If you need to persist new data:
 - **xvfb-run is required.** OrcaSlicer segfaults without X11. Never call `orcaslicer` directly.
 - **OrcaSlicer not in image.** It's in the `laminus-slicer` named volume. If the volume is missing, `entrypoint.sh` re-downloads and extracts. Don't delete the volume in production.
 - **`strip_application_version()` is not optional.** OrcaSlicer 2.3.x/2.4.x on Linux segfaults when it sees `<metadata name="Application">` in 3MF files. This is called automatically in the slice pipeline.
-- **Catalog build is async and slow.** First slice request after a fresh start may fail with 503 ("catalog building") while the background build runs. This is expected — callers should poll `/api/health` until `catalog_loaded: true`.
+- **Catalog build is async and slow.** First slice request after a fresh start may fail with 503 ("catalog building") while the background build runs. This is expected — callers should poll `/api/v1/health` until `catalog_loaded: true`.
 - **Job state is in-memory.** A Laminus restart loses all in-flight job state. Themis handles this by re-queuing jobs that were in `slicing` state at startup.
 - **Profile UUIDs are stable but path-sensitive.** If you rename a profile file, its UUID changes. Don't rename profile files without also updating any stored UUID references in Themis.

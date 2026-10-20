@@ -9,7 +9,6 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import app.main as main_mod
-from app import api_v1
 from app.profile_catalog import ProfileCatalog
 
 client = TestClient(main_mod.app)
@@ -57,13 +56,16 @@ def test_request_id_echoed():
     assert r.headers["X-Request-ID"] == "abc-123"
 
 
-def test_error_envelope_on_v1_but_legacy_shape_unchanged():
-    v1 = client.get("/api/v1/jobs/nope")
-    assert v1.status_code == 404
-    assert v1.json()["error"] == {"code": "job_not_found", "message": "Job not found.", "status": 404}
-    assert v1.json()["request_id"] == v1.headers["X-Request-ID"]
-    legacy = client.get("/api/slice/status/nope")
-    assert legacy.status_code == 404 and legacy.json() == {"detail": "Job not found."}
+def test_error_envelope():
+    r = client.get("/api/v1/jobs/nope")
+    assert r.status_code == 404
+    assert r.json()["error"] == {"code": "job_not_found", "message": "Job not found.", "status": 404}
+    assert r.json()["request_id"] == r.headers["X-Request-ID"]
+    # unknown paths under /api (including the old versionless ones) get the envelope too
+    for path in ("/api/slice/status/nope", "/api/jobs", "/api/v2/jobs"):
+        gone = client.get(path)
+        assert gone.status_code == 404 and gone.json()["error"]["code"] == "not_found", path
+        assert gone.headers["API-Version"] == "v1"
 
 
 def test_validation_errors_are_enveloped():
@@ -156,13 +158,9 @@ def test_profiles_catalog_not_ready_has_retry_after():
     assert r.json()["error"]["code"] == "catalog_not_ready"
 
 
-def test_legacy_routes_carry_deprecation_headers():
-    r = client.get("/api/jobs")
-    assert r.status_code == 200 and r.json() == {"jobs": []}  # body unchanged
-    assert r.headers["Deprecation"] == "true"
-    assert r.headers["Link"] == '</api/v1/jobs>; rel="successor-version"'
-    assert "Deprecation" not in client.get("/api/health").headers
-    assert "Deprecation" not in client.get("/api/v1/jobs").headers
+def test_every_api_route_is_under_v1():
+    api = [r.path for r in main_mod.app.routes if getattr(r, "path", "").startswith("/api")]
+    assert api and all(p == "/api/v1" or p.startswith("/api/v1/") for p in api),         [p for p in api if not p.startswith("/api/v1")]
 
 
 # ------------------------------------------------------------ idempotency
@@ -238,7 +236,3 @@ def test_project_routes_exist_under_v1_with_enveloped_errors():
     assert "error" in r.json()
 
 
-def test_every_legacy_mapping_points_at_a_real_v1_route():
-    paths = {r.path for r in main_mod.app.routes}
-    for old, new in api_v1.LEGACY_TO_V1.items():
-        assert old in paths and new in paths, (old, new)

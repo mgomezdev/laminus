@@ -18,7 +18,9 @@ import zipfile
 from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # Stable UUIDs — guaranteed constant across releases so tests can hardcode them
 MACHINE_UUID = "00000000-mock-mach-0004-elegoocc04noz"
@@ -96,6 +98,23 @@ app = FastAPI(
 )
 
 
+@app.exception_handler(StarletteHTTPException)
+async def _http_exc(request: Request, exc: StarletteHTTPException):
+    return JSONResponse(
+        {"error": {"code": "error", "message": str(exc.detail), "status": exc.status_code}, "request_id": "mock"},
+        status_code=exc.status_code,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exc(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        {"error": {"code": "validation_error", "message": "Request validation failed.", "status": 422,
+                   "details": json.loads(json.dumps(exc.errors(), default=str))}, "request_id": "mock"},
+        status_code=422,
+    )
+
+
 def _minimal_3mf() -> bytes:
     ct = (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -153,7 +172,7 @@ def _check_export_3mf(export_3mf: Optional[str]) -> None:
         raise HTTPException(422, "export_3mf must end with .3mf")
 
 
-@app.get("/api/health")
+@app.get("/api/v1/health")
 async def health():
     return {
         "status": "healthy",
@@ -170,27 +189,33 @@ async def health():
     }
 
 
-@app.get("/api/profiles")
+@app.get("/api/v1/profiles")
 async def get_profiles(
+    type: Optional[str] = None,
     manufacturer: Optional[str] = None,
     model: Optional[str] = None,
     nozzle: Optional[str] = None,
-    refresh: bool = False,
+    q: Optional[str] = None,
+    limit: int = 50,
+    cursor: Optional[str] = None,
 ):
-    return {"machine": [_MACHINE], "process": [_PROCESS], "filament": [_FILAMENT]}
+    records = [e for e in (_MACHINE, _PROCESS, _FILAMENT) if not type or e["type"] == type]
+    if q:
+        records = [e for e in records if q.lower() in e["name"].lower()]
+    return {"data": records, "page": {"limit": limit, "next_cursor": None}}
 
 
-@app.post("/api/profiles/merged-config")
+@app.post("/api/v1/profiles/merged-config")
 async def merged_config(body: dict):
     return JSONResponse(_MERGED_CONFIG)
 
 
-@app.post("/api/profiles/rescan")
+@app.post("/api/v1/profiles/rescan")
 async def rescan_profiles():
-    return {"status": "started", "message": "Catalog rescan started. Poll /api/health until catalog_building is false."}
+    return {"status": "started", "message": "Catalog rescan started. Poll /api/v1/health until catalog_building is false."}
 
 
-@app.get("/api/profiles/broken")
+@app.get("/api/v1/profiles/broken")
 async def get_broken_profiles():
     return {"count": 0, "broken": []}
 
@@ -243,7 +268,7 @@ def _match(body: dict) -> Optional[str]:
     return "exact_model" if _norm(_MACHINE["model"]) in keys else "vendor_only"
 
 
-@app.post("/api/profiles/machines/suggest")
+@app.post("/api/v1/profiles/machines/suggest")
 async def suggest_machines(body: dict):
     reason = _match(body)
     cands = [] if reason is None else [
@@ -252,13 +277,13 @@ async def suggest_machines(body: dict):
     return _neutral({"candidates": cands})
 
 
-@app.post("/api/profiles/models/variants")
+@app.post("/api/v1/profiles/models/variants")
 async def model_variants(body: dict):
     variants = [{**_machine_json(), "is_default_guess": True}] if _match(body) == "exact_model" else []
     return _neutral({"variants": variants})
 
 
-@app.get("/api/profiles/machines/{machine_ref}/presets")
+@app.get("/api/v1/profiles/machines/{machine_ref}/presets")
 async def machine_presets(machine_ref: str, kind: Optional[str] = None):
     if kind not in (None, "process", "filament"):
         return _neutral({"error": "invalid_kind"}, 422)
@@ -273,7 +298,7 @@ async def machine_presets(machine_ref: str, kind: Optional[str] = None):
     return _neutral({"machine_ref": machine_ref, "presets": presets})
 
 
-@app.get("/api/profiles/machines/{machine_ref}/supports")
+@app.get("/api/v1/profiles/machines/{machine_ref}/supports")
 async def machine_supports(machine_ref: str, bed_x: Optional[float] = None, bed_y: Optional[float] = None):
     reason = None
     if machine_ref != MACHINE_REF:
@@ -283,7 +308,7 @@ async def machine_supports(machine_ref: str, bed_x: Optional[float] = None, bed_
     return _neutral({"machine_ref": machine_ref, "supported": reason is None, "reason": reason})
 
 
-@app.get("/api/profiles/{profile_uuid}")
+@app.get("/api/v1/profiles/{profile_uuid}")
 async def get_profile(profile_uuid: str):
     entry = _CATALOG.get(profile_uuid)
     if entry is None:
@@ -291,8 +316,27 @@ async def get_profile(profile_uuid: str):
     return entry
 
 
-@app.post("/api/slice/start")
-async def slice_start(
+def _job_view(job_id: str) -> dict:
+    done = _jobs[job_id] == "completed"
+    return {
+        "id": job_id,
+        "status": _jobs[job_id],
+        "filename": "model.stl",
+        "output_format": "gcode",
+        "error": None,
+        "artifact": {"name": f"{job_id}.gcode", "available": done},
+        "created_at": 0,
+        "updated_at": 0,
+        "links": {
+            "self": f"/api/v1/jobs/{job_id}",
+            "events": f"/api/v1/jobs/{job_id}/events",
+            "artifact": f"/api/v1/jobs/{job_id}/artifact",
+        },
+    }
+
+
+@app.post("/api/v1/jobs", status_code=202)
+async def create_job(
     file: UploadFile = File(...),
     plate: int = Form(...),
     machine_uuid: Optional[str] = Form(None),
@@ -308,10 +352,11 @@ async def slice_start(
     if plate < 1:
         raise HTTPException(422, "plate must be >= 1.")
     _check_export_3mf(export_3mf)
-    return {"job_id": _new_job(), "status": "pending", "message": "Mock slice started."}
+    jid = _new_job()
+    return JSONResponse(_job_view(jid), status_code=202, headers={"Location": f"/api/v1/jobs/{jid}"})
 
 
-@app.post("/api/slice/prepared")
+@app.post("/api/v1/slice/prepared")
 async def slice_prepared(
     file: UploadFile = File(...),
     plate: int = Form(...),
@@ -324,40 +369,34 @@ async def slice_prepared(
     return {"job_id": _new_job(), "status": "pending", "message": "Mock slice started."}
 
 
-@app.get("/api/slice/status/{job_id}")
-async def slice_status(job_id: str):
+@app.get("/api/v1/jobs/{job_id}")
+async def get_job(job_id: str):
     if job_id not in _jobs:
         raise HTTPException(404, "Job not found")
-    return {
-        "job_id": job_id,
-        "status": _jobs[job_id],
-        "output_format": "gcode",
-        "sliced_file": f"{job_id}.gcode",
-        "error": None,
-    }
+    return _job_view(job_id)
 
 
-@app.get("/api/slice/download/{job_id}")
-async def slice_download(job_id: str):
+@app.get("/api/v1/jobs/{job_id}/artifact")
+async def job_artifact(job_id: str):
     if job_id not in _jobs:
         raise HTTPException(404, "Job not found")
     if _jobs[job_id] != "completed":
-        raise HTTPException(400, f"Job not complete (status={_jobs[job_id]})")
+        raise HTTPException(409, f"Job not complete (status={_jobs[job_id]})")
     del _jobs[job_id]
     return Response(content=_MOCK_GCODE, media_type="application/octet-stream")
 
 
-@app.post("/api/pack")
+@app.post("/api/v1/pack")
 async def pack_stls(request: Request):
     return Response(content=_MOCK_3MF, media_type="application/octet-stream")
 
 
-@app.post("/api/arrange")
+@app.post("/api/v1/arrange")
 async def arrange(request: Request):
     return Response(content=_MOCK_3MF, media_type="application/octet-stream")
 
 
-@app.get("/api/test/known-profile", include_in_schema=False)
+@app.get("/api/v1/test/known-profile", include_in_schema=False)
 async def test_known_profile(machine_name: str | None = None):
     """Stable profile UUIDs — use in tests to seed printer/job fixtures without
     hardcoding UUIDs that may drift. Hidden from the public OpenAPI schema.

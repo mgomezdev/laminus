@@ -927,10 +927,16 @@
         // Fetch configurations from backend
         async function fetchProfiles() {
             try {
-                const response = await fetch('/api/profiles');
-                if (!response.ok) throw new Error("Failed to fetch configurations.");
-                
-                const profiles = await response.json();
+                // v1 lists are flat and cursor-paginated: walk every page, then group by type.
+                const profiles = { machine: [], process: [], filament: [] };
+                let cursor = null;
+                do {
+                    const response = await fetch('/api/v1/profiles?limit=200' + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''));
+                    if (!response.ok) throw new Error("Failed to fetch configurations.");
+                    const body = await response.json();
+                    body.data.forEach(p => { if (profiles[p.type]) profiles[p.type].push(p); });
+                    cursor = body.page.next_cursor;
+                } while (cursor);
                 
                 // Clear dropdowns except first default option
                 machineSelect.innerHTML = '<option value="">-- Use Default / Saved Settings --</option>';
@@ -985,7 +991,7 @@
         // Check health of container
         async function checkHealth() {
             try {
-                const res = await fetch('/api/health');
+                const res = await fetch('/api/v1/health');
                 const data = await res.json();
                 if (data.status === 'healthy') {
                     document.getElementById('api-status').innerHTML = '<div class="status-dot"></div><span>Connected</span>';
@@ -1148,48 +1154,50 @@
 
             try {
                 // Step 1: Start slicing job (uploads file and gets job_id)
-                const startRes = await fetch('/api/slice/start', {
+                const startRes = await fetch('/api/v1/jobs', {
                     method: 'POST',
                     body: formData
                 });
 
                 if (!startRes.ok) {
                     const errData = await startRes.json();
-                    throw new Error(errData.detail || "Failed to start slicing job.");
+                    throw new Error((errData.error && errData.error.message) || "Failed to start slicing job.");
                 }
 
                 const jobData = await startRes.json();
-                const jobId = jobData.job_id;
+                const jobId = jobData.id;
                 logToConsole(`[SYSTEM] Slicing job initialized with ID: ${jobId}`, 'system');
 
                 // Step 2: Stream logs via EventSource
-                activeEventSource = new EventSource(`/api/slice/logs/${jobId}`);
-                
-                activeEventSource.onmessage = (event) => {
-                    const logMsg = event.data;
-                    
-                    if (logMsg === '__COMPLETED__') {
-                        activeEventSource.close();
-                        handleJobComplete(jobId);
-                    } else if (logMsg.startsWith('__FAILED__')) {
-                        activeEventSource.close();
-                        const reason = logMsg.replace('__FAILED__:', '').trim();
-                        handleJobFailed(reason || "OrcaSlicer process exited with errors.");
+                activeEventSource = new EventSource(`/api/v1/jobs/${jobId}/events`);
+
+                const classify = (logMsg) => {
+                    // Classify log outputs to style differently
+                    if (logMsg.includes('WARNING') || logMsg.includes('warning:')) {
+                        logToConsole(logMsg, 'warning');
+                    } else if (logMsg.includes('ERROR') || logMsg.includes('error:')) {
+                        logToConsole(logMsg, 'error');
+                    } else if (logMsg.includes('Executing command:') || logMsg.startsWith('[SYSTEM]')) {
+                        logToConsole(logMsg, 'system');
+                    } else if (logMsg.includes('completed successfully') || logMsg.includes('Sliced file generated:')) {
+                        logToConsole(logMsg, 'success');
                     } else {
-                        // Classify log outputs to style differently
-                        if (logMsg.includes('WARNING') || logMsg.includes('warning:')) {
-                            logToConsole(logMsg, 'warning');
-                        } else if (logMsg.includes('ERROR') || logMsg.includes('error:')) {
-                            logToConsole(logMsg, 'error');
-                        } else if (logMsg.includes('Executing command:') || logMsg.startsWith('[SYSTEM]')) {
-                            logToConsole(logMsg, 'system');
-                        } else if (logMsg.includes('completed successfully') || logMsg.includes('Sliced file generated:')) {
-                            logToConsole(logMsg, 'success');
-                        } else {
-                            logToConsole(logMsg);
-                        }
+                        logToConsole(logMsg);
                     }
                 };
+
+                // v1 SSE is typed: log / dropped carry {message}; completed / failed are terminal.
+                activeEventSource.addEventListener('log', (event) => classify(JSON.parse(event.data).message));
+                activeEventSource.addEventListener('dropped', (event) => logToConsole(JSON.parse(event.data).message, 'warning'));
+                activeEventSource.addEventListener('completed', () => {
+                    activeEventSource.close();
+                    handleJobComplete(jobId);
+                });
+                activeEventSource.addEventListener('failed', (event) => {
+                    activeEventSource.close();
+                    const reason = (JSON.parse(event.data).reason || '').trim();
+                    handleJobFailed(reason || "OrcaSlicer process exited with errors.");
+                });
 
                 activeEventSource.onerror = (err) => {
                     console.error("SSE Connection error:", err);
@@ -1209,7 +1217,7 @@
         async function checkJobStatusFallback(jobId) {
             logToConsole("[SYSTEM] Connection to live log stream closed. Querying job status...", "warning");
             try {
-                const res = await fetch(`/api/slice/status/${jobId}`);
+                const res = await fetch(`/api/v1/jobs/${jobId}`);
                 const data = await res.json();
                 if (data.status === 'completed') {
                     handleJobComplete(jobId);
@@ -1241,7 +1249,7 @@
 
             // Bind download action
             downloadBtn.onclick = () => {
-                window.location.href = `/api/slice/download/${jobId}`;
+                window.location.href = `/api/v1/jobs/${jobId}/artifact`;
             };
         }
 
@@ -1291,10 +1299,10 @@
 
         async function fetchJobs() {
             try {
-                const res = await fetch('/api/jobs?limit=50');
+                const res = await fetch('/api/v1/jobs?limit=50');
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
-                renderJobs(data.jobs || []);
+                renderJobs(data.data || []);
             } catch (err) {
                 jobsTbody.innerHTML = `<tr><td colspan="6" class="jobs-empty">Failed to load job history: ${escapeHtml(err.message)}</td></tr>`;
             }
@@ -1307,16 +1315,17 @@
             }
             jobsTbody.innerHTML = list.map(j => {
                 const shortId = (j.id || '').slice(0, 8);
-                const canDownload = j.status === 'completed' && !j.evicted;
-                const detail = j.status === 'failed' ? (j.error || '') : (j.sliced_file || '');
-                const evictedTag = j.evicted && j.status === 'completed' ? '<span class="evicted-tag">(downloaded)</span>' : '';
+                const available = !!(j.artifact && j.artifact.available);
+                const canDownload = j.status === 'completed' && available;
+                const detail = j.status === 'failed' ? (j.error || '') : ((j.artifact && j.artifact.name) || '');
+                const evictedTag = j.status === 'completed' && !available ? '<span class="evicted-tag">(downloaded)</span>' : '';
                 return `<tr>
                     <td class="mono" title="${escapeHtml(j.id)}">${escapeHtml(shortId)}</td>
                     <td class="ellipsis" title="${escapeHtml(j.filename)}">${escapeHtml(j.filename) || '—'}</td>
                     <td>${statusPill(j.status)}</td>
                     <td title="${j.created_at ? new Date(j.created_at * 1000).toLocaleString() : ''}">${fmtRelTime(j.created_at)}</td>
                     <td class="ellipsis" title="${escapeHtml(detail)}">${escapeHtml(detail) || '—'}${evictedTag}</td>
-                    <td>${canDownload ? `<a class="jobs-download" href="/api/slice/download/${encodeURIComponent(j.id)}">Download</a>` : ''}</td>
+                    <td>${canDownload ? `<a class="jobs-download" href="/api/v1/jobs/${encodeURIComponent(j.id)}/artifact">Download</a>` : ''}</td>
                 </tr>`;
             }).join('');
         }
@@ -1351,7 +1360,7 @@
             cleanupRunBtn.disabled = true;
             try {
                 const age = cleanupAgeSelect.value;
-                const res = await fetch(`/api/cleanup?dry_run=true&min_age_seconds=${encodeURIComponent(age)}`, { method: 'POST' });
+                const res = await fetch(`/api/v1/cleanup?dry_run=true&min_age_seconds=${encodeURIComponent(age)}`, { method: 'POST' });
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
                 if (data.count === 0) {
@@ -1373,7 +1382,7 @@
             cleanupScanBtn.disabled = true;
             try {
                 const age = cleanupAgeSelect.value;
-                const res = await fetch(`/api/cleanup?dry_run=false&min_age_seconds=${encodeURIComponent(age)}`, { method: 'POST' });
+                const res = await fetch(`/api/v1/cleanup?dry_run=false&min_age_seconds=${encodeURIComponent(age)}`, { method: 'POST' });
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
                 cleanupPreview.textContent = `Removed ${data.count} item(s), freed ${formatBytes(data.freed_bytes)}.`;
