@@ -219,12 +219,12 @@ def strip_application_version(src_path: str, dst_path: str) -> None:
     1. Remove version-bearing metadata tags from .model files to avoid segfaults
        (triggered by Application/OrcaSlicer metadata in both v2.3.x and v2.4.x).
 
-    2. If project_settings.config has ``use_relative_e_distances = "1"`` but an
-       empty ``layer_gcode``, override to ``"0"`` so OrcaSlicer generates M82 +
-       absolute E values — correct for machines whose start-gcode uses M83 only
-       for purge lines before handing off to the slicer's generated print body.
+    2. Elegoo Centauri Carbon only: if project_settings.config has ``use_relative_e_distances = "1"`` but no
+       ``G92 E0`` in ``layer_change_gcode``, append it (Orca aborts with -51 otherwise;
+       flipping to absolute E would break the wipe tower).
     """
     import json as _json
+    from app.project_config_builder import is_elegoo_centauri_carbon
 
     with zipfile.ZipFile(src_path, "r") as src:
         with zipfile.ZipFile(dst_path, "w", compression=zipfile.ZIP_DEFLATED) as dst:
@@ -237,10 +237,11 @@ def strip_application_version(src_path: str, dst_path: str) -> None:
                 elif item.filename == "Metadata/project_settings.config":
                     try:
                         cfg = _json.loads(data.decode("utf-8"))
-                        if cfg.get("use_relative_e_distances") == "1":
-                            lg = cfg.get("layer_gcode", "")
-                            if not lg or "G92" not in str(lg):
-                                cfg["use_relative_e_distances"] = "0"
+                        if is_elegoo_centauri_carbon(cfg) and cfg.get("use_relative_e_distances") == "1":
+                            lg = cfg.get("layer_change_gcode", "")
+                            if "G92 E0" not in str(lg):
+                                # keep relative E (wipe tower requires it); Orca wants the reset per layer
+                                cfg["layer_change_gcode"] = f"{lg}\nG92 E0" if lg else "G92 E0"
                                 data = _json.dumps(cfg, ensure_ascii=False, indent=2).encode("utf-8")
                     except Exception:
                         pass

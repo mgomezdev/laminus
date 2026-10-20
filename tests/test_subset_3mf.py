@@ -300,7 +300,7 @@ def _upload(src_path):
 
 
 def test_endpoint_list_objects(src):
-    r = TestClient(app).post("/api/3mf/objects", files=[_upload(src)])
+    r = TestClient(app).post("/api/v1/projects/inspect", files=[_upload(src)])
     assert r.status_code == 200
     assert {o["name"] for o in r.json()["objects"]} == {"Lid", "Base"}
 
@@ -323,7 +323,7 @@ def test_endpoint_subset_runs_orca_on_expanded_oracle(src):
 
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
         r = TestClient(app).post(
-            "/api/arrange/subset", files=[_upload(src)],
+            "/api/v1/projects/subset", files=[_upload(src)],
             data={"selection": json.dumps([{"name": "Lid", "qty": 5}]), "allow_rotations": "true"})
     assert r.status_code == 200, r.text
     assert r.headers["X-Instance-Count"] == "5"
@@ -341,13 +341,13 @@ def test_endpoint_subset_runs_orca_on_expanded_oracle(src):
     ('[{"name": "Nope", "qty": 1}]', 422),
 ])
 def test_endpoint_rejects_bad_selection(src, selection, code):
-    r = TestClient(app).post("/api/arrange/subset", files=[_upload(src)], data={"selection": selection})
+    r = TestClient(app).post("/api/v1/projects/subset", files=[_upload(src)], data={"selection": selection})
     assert r.status_code == code
 
 
 def test_endpoint_rejects_non_3mf():
     r = TestClient(app).post(
-        "/api/arrange/subset", files=[("file", ("m.stl", b"x", "application/octet-stream"))],
+        "/api/v1/projects/subset", files=[("file", ("m.stl", b"x", "application/octet-stream"))],
         data={"selection": "[]"})
     assert r.status_code == 400
 
@@ -432,7 +432,7 @@ def test_endpoint_merge_two_files(src, tmp_path):
              ("files", ("second.3mf", open(other, "rb"), "application/octet-stream"))]
     sel = [{"file": "first.3mf", "plate": 1, "qty": 2}, {"file": 1, "name": "Lid", "qty": 1}]
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
-        r = TestClient(app).post("/api/arrange/merge", files=files, data={"selection": json.dumps(sel)})
+        r = TestClient(app).post("/api/v1/projects/merge", files=files, data={"selection": json.dumps(sel)})
     assert r.status_code == 200, r.text
     assert r.headers["X-Instance-Count"] == "5" and r.headers["X-Plate-Count"] == "2"
     fp = s.fingerprint(io.BytesIO(r.content))
@@ -458,7 +458,7 @@ def test_endpoint_merge_selection_validation(src, selection, code):
     files = [("files", ("first.3mf", open(src, "rb"), "application/octet-stream")),
              ("files", ("second.3mf", open(src, "rb"), "application/octet-stream"))]
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
-        r = TestClient(app).post("/api/arrange/merge", files=files, data={"selection": selection})
+        r = TestClient(app).post("/api/v1/projects/merge", files=files, data={"selection": selection})
     assert r.status_code == code, r.text
 
 
@@ -492,13 +492,13 @@ def test_object_previews_names_plates_and_png(src, tmp_path):
 
 def test_endpoint_previews(src):
     c = TestClient(app)
-    r = c.post("/api/3mf/previews", files=[_upload(src)], data={"size": "48"})
+    r = c.post("/api/v1/projects/previews", files=[_upload(src)], data={"size": "48"})
     assert r.status_code == 200, r.text
     objs = r.json()["objects"]
     assert {o["name"] for o in objs} == {"Lid", "Base"} and all(o["preview"]["height"] == 48 for o in objs)
-    r = c.post("/api/3mf/previews", files=[_upload(src)], data={"images": "false"})
+    r = c.post("/api/v1/projects/previews", files=[_upload(src)], data={"images": "false"})
     assert all(o["preview"] is None and o["plates"] for o in r.json()["objects"])
-    assert c.post("/api/3mf/previews", files=[_upload(src)], data={"size": "5"}).status_code == 422
+    assert c.post("/api/v1/projects/previews", files=[_upload(src)], data={"size": "5"}).status_code == 422
 
 
 def test_merge_makes_inner_object_ids_unique_across_sources(src, tmp_path):
@@ -548,7 +548,7 @@ def test_endpoints_report_empty_warnings_for_flat_layout(src):
         return proc
 
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
-        r = TestClient(app).post("/api/arrange/subset", files=[_upload(src)],
+        r = TestClient(app).post("/api/v1/projects/subset", files=[_upload(src)],
                                  data={"selection": json.dumps([{"name": "Lid", "qty": 3}])})
     assert r.status_code == 200 and r.headers["X-Warnings"] == ""
 
@@ -659,7 +659,7 @@ class _FakeCatalog:
         return self.cfgs[u]
 
 
-def _post_subset(src_path, _url="/api/arrange/subset", **data):
+def _post_subset(src_path, _url="/api/v1/projects/subset", **data):
     async def _fake_orca(*args, **kwargs):
         a = list(args)
         _fake_two_plates(a[-1], a[a.index("--export-3mf") + 1])
@@ -710,16 +710,68 @@ def _cfg_bytes(b):
     return json.loads(zipfile.ZipFile(io.BytesIO(b)).read("Metadata/project_settings.config"))
 
 
-def test_v1_projects_subset_supports_remap_and_enveloped_errors(tmp_path):
+def test_projects_subset_supports_remap_and_enveloped_errors(tmp_path):
     srcp = str(tmp_path / "m.3mf")
     _multi(srcp)
     url = "/api/v1/projects/subset"
     r = _post_subset(srcp, _url=url, machine_uuid="m1", process_uuid="p1", filament_uuids='["f1"]')
     assert r.status_code == 200, r.text
     assert "extruder 2 -> 1" in r.headers["X-Remap-Warnings"]
-    assert r.headers["API-Version"] == "v1" and "Deprecation" not in r.headers
+    assert r.headers["API-Version"] == "v1"
     bad = _post_subset(srcp, _url=url, machine_uuid="m1", filament_uuids='["f1","f1"]')
     assert bad.status_code == 422
     assert bad.json()["error"]["code"] == "unprocessable" and "slot" in bad.json()["error"]["message"]
-    legacy = _post_subset(srcp, machine_uuid="m1")
-    assert legacy.headers["Deprecation"] == "true"
+    gone = _post_subset(srcp, _url="/api/arrange/subset", machine_uuid="m1")
+    assert gone.status_code == 404 and gone.json()["error"]["code"] == "not_found"
+
+
+def test_remap_resizes_grouped_and_per_extruder_blocks():
+    """Multi-extruder (tool changer) projects: inherits_group / different_settings_to_system are
+    [process, filament 1..n, printer] and flush_volumes_matrix has one n x n block per extruder.
+    Orca segfaults (or bad_allocs) when these keep the old filament count."""
+    n = 4
+    cfg = {
+        "filament_colour": ["#1", "#2", "#3", "#4"],
+        "filament_settings_id": ["a", "b", "c", "d"],
+        "nozzle_diameter": ["0.4"] * 4,
+        "inherits_group": ["proc", "f1", "f2", "f3", "f4", "mach"],
+        "different_settings_to_system": ["p;x", "f1", "f2", "f3", "f4", "m"],
+        "flush_volumes_matrix": [str(i) for i in range(n * n * 4)],
+        "flush_volumes_vector": ["140"] * 8,
+    }
+    printer = {"nozzle_diameter": ["0.4"], "single_extruder_multi_material": "0"}
+    ext_map, _ = s.remap_for_target(cfg, printer)
+    assert ext_map == {2: 1, 3: 1, 4: 1}
+    assert cfg["inherits_group"] == ["proc", "f1", "mach"]
+    assert cfg["different_settings_to_system"] == ["p;x", "f1", "m"]
+    assert cfg["flush_volumes_matrix"] == ["0"]  # one extruder block, 1 x 1
+    assert cfg["flush_volumes_vector"] == ["140", "140"]
+    assert cfg["filament_colour"] == ["#1"] and cfg["nozzle_diameter"] == ["0.4"]
+
+
+def _four_ext_cfg():
+    return {
+        "filament_colour": ["#1", "#2", "#3", "#4"], "filament_map": ["1", "2", "3", "4"],
+        "nozzle_diameter": ["0.4"] * 4, "extruder_type": ["Direct Drive"] * 4,
+        "nozzle_volume_type": ["Standard"] * 4, "flush_volumes_matrix": ["0"] * 64,
+        "wipe_tower_x": ["199.9", "165"], "wipe_tower_y": ["244", "100"], "prime_tower_width": "35",
+        "ooze_prevention": "1",
+    }
+
+
+def test_remap_to_single_nozzle_mmu_target():
+    from app.subset_3mf import remap_for_target
+    cfg = _four_ext_cfg()
+    printer = {"single_extruder_multi_material": "1", "nozzle_diameter": ["0.4"],
+               "printable_area": ["0x0", "256x0", "256x256", "0x256"]}
+    ext_map, warns = remap_for_target(cfg, printer)
+    assert ext_map == {}  # all 4 slots kept
+    assert cfg["filament_colour"] == ["#1", "#2", "#3", "#4"]
+    assert cfg["extruder_type"] == ["Direct Drive"] and cfg["nozzle_volume_type"] == ["Standard"]
+    assert cfg["filament_map"] == ["1"] * 4
+    assert len(cfg["flush_volumes_matrix"]) == 16
+    assert cfg["ooze_prevention"] == "0"
+    # out-of-bed tower relocated, in-bed one untouched
+    assert (cfg["wipe_tower_x"][0], cfg["wipe_tower_y"][0]) == ("10", "211")
+    assert (cfg["wipe_tower_x"][1], cfg["wipe_tower_y"][1]) == ("165", "100")
+    assert any("prime tower" in w for w in warns)

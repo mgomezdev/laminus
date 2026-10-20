@@ -59,6 +59,19 @@ _PRESET_META = {"name", "inherits", "from", "instantiation", "type", "setting_id
                 "is_custom_defined", "description", "renamed_from"}
 
 
+# Printer-section lists with one entry per extruder (nozzle); filament lists are not here.
+_EXTRUDER_KEYS = (
+    "extruder_type", "nozzle_type", "nozzle_volume", "nozzle_volume_type", "default_nozzle_volume_type",
+    "printer_extruder_id", "printer_extruder_variant", "extruder_variant_list", "extruder_printable_height",
+    "extruder_colour", "extruder_offset", "flush_multiplier", "nozzle_flush_dataset",
+    "min_layer_height", "max_layer_height",
+)
+
+
+# Per-preset-group lists laid out as [process, filament 1..n, printer].
+_GROUPED_KEYS = {"inherits_group", "different_settings_to_system"}
+
+
 def _slot_cap(printer_cfg: dict) -> Optional[int]:
     """Max filament slots the target machine supports; None = unlimited (MMU-style)."""
     if str(printer_cfg.get("single_extruder_multi_material", "0")) == "1":
@@ -73,6 +86,37 @@ def _resize(vals: list, n: int) -> list:
 
 def _first(v):
     return v[0] if isinstance(v, list) and v else v
+
+
+def _clamp_wipe_tower(cfg: dict, printer_cfg: dict, warnings: list[str]) -> None:
+    """Move per-plate prime towers that fall outside a smaller target bed.
+
+    Orca slices headless without re-placing the tower, so one left outside the new bed fails
+    with "G-code in unprintable area". Relocated towers go to the left edge, near the back:
+    pushing one into the back-right corner collided with the arranged models.
+    """
+    area = printer_cfg.get("printable_area")
+    xs, ys = cfg.get("wipe_tower_x"), cfg.get("wipe_tower_y")
+    if not (isinstance(area, list) and area and isinstance(xs, list) and isinstance(ys, list)
+            and len(xs) == len(ys)):
+        return
+    try:
+        pts = [tuple(float(c) for c in str(p).split("x")) for p in area]
+        max_x, max_y = max(p[0] for p in pts), max(p[1] for p in pts)
+        width = float(cfg.get("prime_tower_width", 35))
+        pos = [(float(x), float(y)) for x, y in zip(xs, ys)]
+    except (ValueError, TypeError):
+        return
+    new_x, new_y = 10.0, max_y - width - 10
+    moved = False
+    for i, (x, y) in enumerate(pos):
+        if x + width > max_x or y + width > max_y:
+            pos[i] = (new_x, new_y)
+            moved = True
+    if moved:
+        cfg["wipe_tower_x"] = [f"{x:g}" for x, _ in pos]
+        cfg["wipe_tower_y"] = [f"{y:g}" for _, y in pos]
+        warnings.append("prime tower moved inside the target bed")
 
 
 def remap_for_target(cfg: dict, printer_cfg: dict, process_cfg: Optional[dict] = None,
@@ -97,17 +141,60 @@ def remap_for_target(cfg: dict, printer_cfg: dict, process_cfg: Optional[dict] =
     else:
         n_new = n_src if cap is None else min(n_src, cap)
 
+    # Extruder topology (nozzle count) is not in PRINTER_KEYS, so a source with more nozzles
+    # than the target (e.g. U1 -> single-nozzle MMU like P1S) would keep its per-nozzle lists
+    # and Orca fails grouping filaments onto nozzles the machine doesn't have.
+    nd_src = cfg.get("nozzle_diameter")
+    nd_tgt = printer_cfg.get("nozzle_diameter")
+    n_ext_src = len(nd_src) if isinstance(nd_src, list) and nd_src else 1
+    n_ext_tgt = len(nd_tgt) if isinstance(nd_tgt, list) and nd_tgt else 1
+    if n_ext_tgt < n_ext_src:
+        for k, v in printer_cfg.items():
+            cur = cfg.get(k)
+            if (k not in PRINTER_KEYS and isinstance(v, list) and len(v) == n_ext_tgt
+                    and isinstance(cur, list) and len(cur) == n_ext_src):
+                cfg[k] = v
+        for k in _EXTRUDER_KEYS:
+            cur = cfg.get(k)
+            if isinstance(cur, list) and len(cur) == n_ext_src:
+                cfg[k] = cur[:n_ext_tgt]
+        if "single_extruder_multi_material" in printer_cfg:
+            cfg["single_extruder_multi_material"] = printer_cfg["single_extruder_multi_material"]
+        fm = cfg.get("filament_map")
+        if isinstance(fm, list):
+            cfg["filament_map"] = ["1"] * len(fm)
+        fvm = cfg.get("flush_volumes_matrix")
+        if isinstance(fvm, list) and n_src and len(fvm) % (n_src * n_src) == 0:
+            cfg["flush_volumes_matrix"] = fvm[:n_ext_tgt * n_src * n_src]
+
+    _clamp_wipe_tower(cfg, printer_cfg, warnings)
+
+    if str(printer_cfg.get("single_extruder_multi_material", "0")) == "1" \
+            and str(cfg.get("ooze_prevention", "0")) == "1":
+        # Orca rejects ooze prevention (a multi-tool feature) on single-extruder MMU machines
+        cfg["ooze_prevention"] = "0"
+        warnings.append("ooze_prevention disabled (unsupported on single-extruder multi-material targets)")
+
     if n_new != n_src:
+        nd = printer_cfg.get("nozzle_diameter")
+        n_ext_new = len(nd) if isinstance(nd, list) and nd else 1
         skip = set(PRINTER_KEYS)
         for k, v in list(cfg.items()):
             if k in skip or not isinstance(v, list):
                 continue
-            if k == "flush_volumes_matrix" and len(v) == n_src * n_src:
-                rows = [v[r * n_src:(r + 1) * n_src] for r in range(n_src)]
-                keep = [row[:n_new] for row in _resize(rows, n_new)]
-                cfg[k] = [x for row in keep for x in row]
+            if k == "flush_volumes_matrix" and n_src and len(v) % (n_src * n_src) == 0:
+                # one n x n block per extruder (multi-extruder projects carry several)
+                blocks = [v[i:i + n_src * n_src] for i in range(0, len(v), n_src * n_src)]
+                out = []
+                for blk in blocks[:n_ext_new]:
+                    rows = [blk[r * n_src:(r + 1) * n_src] for r in range(n_src)]
+                    out += [x for row in _resize(rows, n_new) for x in row[:n_new]]
+                cfg[k] = out
             elif k == "flush_volumes_vector" and len(v) == 2 * n_src:
                 cfg[k] = _resize(v, 2 * n_new)
+            elif k in _GROUPED_KEYS and len(v) == n_src + 2:
+                # [process, filament 1..n, printer]; Orca sizes these by the filament count
+                cfg[k] = [v[0]] + _resize(v[1:-1], n_new) + [v[-1]]
             elif len(v) == n_src and n_src > 1:
                 cfg[k] = _resize(v, n_new)
 

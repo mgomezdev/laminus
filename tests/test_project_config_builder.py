@@ -84,3 +84,28 @@ def test_filament_key_present_when_at_least_one_filament_defines_it():
     fil_with_density = {**_filament(), "filament_density": 1.24}
     cfg = build_project_settings(_machine(), _process(), [_filament(), fil_with_density])
     assert cfg["filament_density"] == ["", 1.24]
+
+
+def test_layer_gcode_injected_only_for_elegoo_centauri_carbon():
+    assert "layer_gcode" not in build_project_settings(_machine(), _process(), [_filament()])
+    cc = {**_machine(), "printer_model": "Elegoo Centauri Carbon"}
+    assert build_project_settings(cc, _process(), [_filament()])["layer_gcode"] == "G92 E0\n"
+
+
+def test_strip_application_version_g92_added_only_for_cc(tmp_path):
+    from app.stl_to_3mf import strip_application_version
+
+    def run(model):
+        src, dst = tmp_path / f"{model}.in.3mf", tmp_path / f"{model}.out.3mf"
+        cfg = {"use_relative_e_distances": "1", "printer_model": model,
+               "layer_change_gcode": ";AFTER_LAYER_CHANGE"}
+        with zipfile.ZipFile(src, "w") as z:
+            z.writestr("Metadata/project_settings.config", json.dumps(cfg))
+        strip_application_version(str(src), str(dst))
+        with zipfile.ZipFile(dst) as z:
+            return json.loads(z.read("Metadata/project_settings.config"))
+
+    other = run("Snapmaker U1")
+    assert other["layer_change_gcode"] == ";AFTER_LAYER_CHANGE"
+    cc = run("Elegoo Centauri Carbon")
+    assert cc["use_relative_e_distances"] == "1" and "G92 E0" in cc["layer_change_gcode"]

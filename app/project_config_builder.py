@@ -38,11 +38,21 @@ def build_project_settings(machine: dict, process: dict, filaments: list[dict]) 
 
     config["from"] = "user"
     config.setdefault("version", process.get("version", machine.get("version", "1.0.0")))
-    # OrcaSlicer CLI -51: if machine_start_gcode uses M83 (relative extrusion),
-    # layer_gcode must contain G92 E0 or the slicer aborts. Docker AppImage profiles
-    # omit the key entirely; inject the minimal safe default when absent.
-    config.setdefault("layer_gcode", "G92 E0\n")
+    # OrcaSlicer CLI -51: Elegoo Centauri Carbon only. Its machine_start_gcode uses M83
+    # (relative extrusion), so layer_gcode must contain G92 E0 or the slicer aborts.
+    # Other printers must not get this injected.
+    if is_elegoo_centauri_carbon(config):
+        config.setdefault("layer_gcode", "G92 E0\n")
     return config
+
+
+def is_elegoo_centauri_carbon(cfg: dict) -> bool:
+    """True when a machine/project config targets the Elegoo Centauri Carbon."""
+    for key in ("printer_model", "printer_settings_id", "name"):
+        val = cfg.get(key)
+        if isinstance(val, str) and val.startswith("Elegoo Centauri Carbon"):
+            return True
+    return False
 
 
 def embed_project_settings(src_3mf: str, project_settings: dict, dst_3mf: str) -> None:
