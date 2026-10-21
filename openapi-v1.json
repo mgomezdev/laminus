@@ -1325,14 +1325,28 @@
             "title": "File"
           },
           "arrange": {
-            "type": "boolean",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Arrange",
-            "default": true
+            "description": "Boolean (true/false); default true."
           },
           "orient": {
-            "type": "boolean",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Orient",
-            "default": true
+            "description": "Boolean (true/false); default true."
           }
         },
         "type": "object",
@@ -1417,9 +1431,16 @@
             "title": "Export 3Mf"
           },
           "geometry_only_retry": {
-            "type": "boolean",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Geometry Only Retry",
-            "default": true
+            "description": "Boolean (true/false); default true."
           },
           "extra_config": {
             "anyOf": [
@@ -1570,9 +1591,16 @@
             "default": 256
           },
           "images": {
-            "type": "boolean",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Images",
-            "default": true
+            "description": "Boolean (true/false); default true."
           }
         },
         "type": "object",
@@ -1604,9 +1632,16 @@
             "title": "Export 3Mf"
           },
           "geometry_only_retry": {
-            "type": "boolean",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Geometry Only Retry",
-            "default": true
+            "description": "Boolean (true/false); default true."
           }
         },
         "type": "object",
