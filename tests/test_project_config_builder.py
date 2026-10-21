@@ -17,6 +17,29 @@ def _filament():
             "filament_colour": "#FFFFFF", "nozzle_temperature": 220, "bed_temperature": 35}
 
 
+def test_klipper_machine_gets_extruder_reset_before_layer_change():
+    # BIZ-336: Centauri Carbon is klipper with no before_layer_change_gcode; OrcaSlicer 2.4 -51s.
+    machine = {**_machine(), "gcode_flavor": "klipper", "layer_change_gcode": "SET_PRINT_STATS_INFO"}
+    cfg = build_project_settings(machine, _process(), [_filament()])
+    assert "G92 E0" in cfg["before_layer_change_gcode"]
+
+
+def test_explicit_relative_extrusion_gets_extruder_reset_and_keeps_existing_gcode():
+    machine = {**_machine(), "use_relative_e_distances": "1", "before_layer_change_gcode": "; mine\n"}
+    gcode = build_project_settings(machine, _process(), [_filament()])["before_layer_change_gcode"]
+    assert gcode.startswith("; mine\n") and gcode.count("G92 E0") == 1
+
+
+def test_extruder_reset_not_duplicated_when_already_present():
+    machine = {**_machine(), "gcode_flavor": "klipper", "before_layer_change_gcode": "G92 E0\n; x"}
+    assert build_project_settings(machine, _process(), [_filament()])["before_layer_change_gcode"] == "G92 E0\n; x"
+
+
+def test_absolute_machine_is_left_alone():
+    cfg = build_project_settings({**_machine(), "gcode_flavor": "marlin2"}, _process(), [_filament()])
+    assert "before_layer_change_gcode" not in cfg
+
+
 def test_build_sets_from_user():
     assert build_project_settings(_machine(), _process(), [_filament()])["from"] == "user"
 
