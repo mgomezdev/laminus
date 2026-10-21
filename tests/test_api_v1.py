@@ -159,7 +159,9 @@ def test_profiles_catalog_not_ready_has_retry_after():
 
 
 def test_every_api_route_is_under_v1():
-    api = [r.path for r in main_mod.app.routes if getattr(r, "path", "").startswith("/api")]
+    # /api/health is the one unversioned alias (redirects to /api/v1/health, hidden from the spec)
+    api = [r.path for r in main_mod.app.routes
+           if getattr(r, "path", "").startswith("/api") and r.path != "/api/health"]
     assert api and all(p == "/api/v1" or p.startswith("/api/v1/") for p in api),         [p for p in api if not p.startswith("/api/v1")]
 
 
@@ -236,3 +238,11 @@ def test_project_routes_exist_under_v1_with_enveloped_errors():
     assert "error" in r.json()
 
 
+
+
+def test_unversioned_health_alias_redirects_to_v1():
+    r = client.get("/api/health", follow_redirects=False)
+    assert r.status_code == 307 and r.headers["location"] == "/api/v1/health"
+    followed = client.get("/api/health")
+    assert followed.status_code == 200 and followed.json() == client.get("/api/v1/health").json()
+    assert "/api/health" not in main_mod.app.openapi()["paths"]

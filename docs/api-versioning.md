@@ -6,7 +6,7 @@
 |---|---|---|
 | v1 | `/api/v1` | Stable. The contract is `openapi-v1.json` (CI-regenerated) |
 
-**Every API route is under `/api/v1`. There are no versionless `/api/*` routes**; the web UI (`/`) is the only non-versioned path. Anything else under `/api` (including the old `/api/slice/*`, `/api/jobs`, `/api/profiles`, `/api/arrange/*`, `/api/3mf/*`) is a 404 in the standard error envelope.
+**Every API route is under `/api/v1`. The only versionless route is `GET /api/health`**, a hidden alias that 307-redirects to `/api/v1/health` (for infra healthchecks); the web UI (`/`) is the only other non-versioned path. Anything else under `/api` (including the old `/api/slice/*`, `/api/jobs`, `/api/profiles`, `/api/arrange/*`, `/api/3mf/*`) is a 404 in the standard error envelope.
 
 `GET /api/v1` is the discovery document: supported versions, engine, readiness, `features` flags and limits. Feature-detect from `features`; don't parse version strings.
 

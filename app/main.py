@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse, RedirectResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from app.profile_catalog import ProfileCatalog
 from app.project_config_builder import build_project_settings, embed_project_settings
@@ -2250,6 +2250,12 @@ def _orca_version() -> Optional[str]:
     except OSError:
         pass
     return os.environ.get("ORCA_VERSION") or None
+
+
+@app.get("/api/health", include_in_schema=False)
+async def health_alias():
+    """Unversioned liveness alias for infra healthchecks; always points at the latest version."""
+    return RedirectResponse("/api/v1/health", status_code=307)
 
 
 @app.get(

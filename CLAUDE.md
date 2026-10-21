@@ -36,7 +36,7 @@ docker exec laminus python3 /workspace/flatten_profiles.py \
 
 **Check API health:**
 ```bash
-curl http://localhost:5000/api/health
+curl http://localhost:5000/api/v1/health
 ```
 
 ## Architecture

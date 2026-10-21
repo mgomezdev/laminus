@@ -19,7 +19,7 @@ from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # Stable UUIDs — guaranteed constant across releases so tests can hardcode them
@@ -170,6 +170,11 @@ def _check_export_3mf(export_3mf: Optional[str]) -> None:
         raise HTTPException(422, "export_3mf must not contain path separators")
     if not export_3mf.lower().endswith(".3mf"):
         raise HTTPException(422, "export_3mf must end with .3mf")
+
+
+@app.get("/api/health", include_in_schema=False)
+async def health_alias():
+    return RedirectResponse("/api/v1/health", status_code=307)
 
 
 @app.get("/api/v1/health")
