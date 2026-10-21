@@ -1,29 +1,20 @@
 """Omitted bool form fields must take their intended default on every FastAPI version.
 
 Newer FastAPI reports an omitted bool form field as False whatever its default, so default-true
-flags are declared ``Optional[str] = Form(None)`` and parsed with ``main._form_bool``.
+flags are declared ``Optional[str] = Form(None)`` and parsed with ``main._form_default_true``.
 """
 from app import main as m
 from app.main import app
 
 
-def test_form_bool_resolution():
-    assert m._form_bool(None, True) is True
-    assert m._form_bool(None, False) is False
-    assert m._form_bool("", True) is True
-    assert m._form_bool(True, False) is True and m._form_bool(False, True) is False
-    for v in ("true", "True", "1", "yes", "on", " TRUE "):
-        assert m._form_bool(v, False) is True
+def test_form_default_true_resolution():
+    assert m._form_default_true(None) is True
+    assert m._form_default_true("") is False
+    assert m._form_default_true(True) is True and m._form_default_true(False) is False
+    for v in ("true", "True", "1", "yes", "on"):
+        assert m._form_default_true(v) is True
     for v in ("false", "False", "0", "no", "off"):
-        assert m._form_bool(v, True) is False
-
-
-def test_form_bool_rejects_garbage():
-    import pytest
-    from fastapi import HTTPException
-    with pytest.raises(HTTPException) as e:
-        m._form_bool("maybe", True)
-    assert e.value.status_code == 422
+        assert m._form_default_true(v) is False
 
 
 def test_no_bool_form_field_defaults_to_true_in_schema():

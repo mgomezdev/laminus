@@ -26,6 +26,18 @@ from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf, inject_stls_into_3mf as _i
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("laminus")
 
+
+def _form_default_true(value) -> bool:
+    # Recent FastAPI coerces an omitted bool Form field -- even `Optional[str] = Form(None)`
+    # and `bool = Form(True)` -- to False (HTML-checkbox semantics). True-default flags
+    # therefore take `Optional[str] = Form(None)` and are parsed here; omitted means True.
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ("false", "0", "no", "off", "")
+
+
 CONFIG_DIR = "/config"
 USER_CONFIG_DIR = os.environ.get("USER_CONFIG_DIR", os.path.join(CONFIG_DIR, "user"))
 # The datadir passed to the OrcaSlicer CLI itself (--datadir). Set by entrypoint.sh to
@@ -56,31 +68,6 @@ _orcaslicer_version: Optional[str] = None
 _catalog_task: Optional[asyncio.Task] = None
 # Template cache: maps (machine_uuid, process_uuid, filament_uuids_key) → 3MF bytes
 _template_cache: Dict[str, bytes] = {}
-
-
-_TRUE_STRINGS = {"true", "1", "yes", "on"}
-_FALSE_STRINGS = {"false", "0", "no", "off"}
-
-
-def _form_bool(value: "Optional[bool | str]", default: bool) -> bool:
-    """Resolve a bool form field that may have been omitted.
-
-    Newer FastAPI (seen on 0.156) reports an omitted ``bool`` form field as False -- even
-    ``bool = Form(True)`` or ``Optional[bool] = Form(None)`` -- so default-True flags are
-    declared ``Optional[str] = Form(None)`` and parsed here.
-    """
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    v = value.strip().lower()
-    if v == "":
-        return default
-    if v in _TRUE_STRINGS:
-        return True
-    if v in _FALSE_STRINGS:
-        return False
-    raise HTTPException(status_code=422, detail=f"Invalid boolean value: {value!r}.")
 
 
 # Fix R6: lifespan context runs startup/shutdown logic and background eviction task
@@ -961,10 +948,10 @@ async def start_slice(
     filament_uuids: str = Form(..., description='JSON array, e.g. ["uuid1"]'),
     plate: int = Form(...),
     export_3mf: Optional[str] = Form(None),
-    geometry_only_retry: Optional[str] = Form(None, description="Boolean (true/false); default true."),
+    geometry_only_retry: Optional[str] = Form(None),
     extra_config: Optional[str] = Form(None, description='JSON object merged into project settings after resolution'),
 ):
-    geometry_only_retry = _form_bool(geometry_only_retry, True)
+    geometry_only_retry = _form_default_true(geometry_only_retry)
     if catalog is None:
         raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
 
@@ -1133,9 +1120,9 @@ async def slice_prepared(
     file: UploadFile = File(...),
     plate: int = Form(...),
     export_3mf: Optional[str] = Form(None),
-    geometry_only_retry: Optional[str] = Form(None, description="Boolean (true/false); default true."),
+    geometry_only_retry: Optional[str] = Form(None),
 ):
-    geometry_only_retry = _form_bool(geometry_only_retry, True)
+    geometry_only_retry = _form_default_true(geometry_only_retry)
     if plate < 1:
         raise HTTPException(status_code=422, detail="plate must be >= 1.")
 
@@ -1683,11 +1670,11 @@ async def pack_stls(
 async def auto_arrange_3mf(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    arrange: Optional[str] = Form(None, description="Boolean (true/false); default true."),
-    orient: Optional[str] = Form(None, description="Boolean (true/false); default true."),
+    arrange: Optional[str] = Form(None),
+    orient: Optional[str] = Form(None),
 ):
-    arrange = _form_bool(arrange, True)
-    orient = _form_bool(orient, True)
+    arrange = _form_default_true(arrange)
+    orient = _form_default_true(orient)
     # Fix R1: _safe_filename now guards against None before any attribute access
     try:
         safe_name = _safe_filename(file.filename)
@@ -1864,9 +1851,9 @@ async def _oracle_arrange_and_transplant(sub_file: str, oracle_in: str, out_file
 async def preview_3mf_objects(
     file: UploadFile = File(...),
     size: int = Form(256),
-    images: Optional[str] = Form(None, description="Boolean (true/false); default true."),
+    images: Optional[str] = Form(None),
 ):
-    images = _form_bool(images, True)
+    images = _form_default_true(images)
     if not 32 <= size <= 1024:
         raise HTTPException(status_code=422, detail="size must be between 32 and 1024.")
     job_dir = os.path.join(ARRANGE_DIR, f"prev_{uuid.uuid4()}")

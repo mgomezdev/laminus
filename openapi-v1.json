@@ -1333,8 +1333,7 @@
                 "type": "null"
               }
             ],
-            "title": "Arrange",
-            "description": "Boolean (true/false); default true."
+            "title": "Arrange"
           },
           "orient": {
             "anyOf": [
@@ -1345,8 +1344,7 @@
                 "type": "null"
               }
             ],
-            "title": "Orient",
-            "description": "Boolean (true/false); default true."
+            "title": "Orient"
           }
         },
         "type": "object",
@@ -1439,8 +1437,7 @@
                 "type": "null"
               }
             ],
-            "title": "Geometry Only Retry",
-            "description": "Boolean (true/false); default true."
+            "title": "Geometry Only Retry"
           },
           "extra_config": {
             "anyOf": [
@@ -1599,8 +1596,7 @@
                 "type": "null"
               }
             ],
-            "title": "Images",
-            "description": "Boolean (true/false); default true."
+            "title": "Images"
           }
         },
         "type": "object",
@@ -1640,8 +1636,7 @@
                 "type": "null"
               }
             ],
-            "title": "Geometry Only Retry",
-            "description": "Boolean (true/false); default true."
+            "title": "Geometry Only Retry"
           }
         },
         "type": "object",

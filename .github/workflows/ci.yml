@@ -8,7 +8,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, develop]
     tags: ["v*"]
 
 concurrency:
@@ -108,6 +108,9 @@ jobs:
       packages: read
     uses: mgomezdev/concordia/.github/workflows/e2e.yml@main
     with:
+      # PRs onto develop run Concordia's develop suite. Kept as one job (not a
+      # separate @develop one) so the required check stays "e2e-core / e2e".
+      concordia_ref: ${{ (github.base_ref == 'develop' || github.ref_name == 'develop') && 'develop' || 'main' }}
       profile: core
       image_artifact: laminus-mock-ci-image
       mock_laminus_image: laminus-mock:ci
@@ -117,7 +120,8 @@ jobs:
 
   publish:
     needs: [spec, test, mock-image, e2e-core]
-    if: github.event_name == 'push'
+    # develop pushes run the checks but don't publish images
+    if: github.event_name == 'push' && github.ref != 'refs/heads/develop'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
