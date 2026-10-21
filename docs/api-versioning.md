@@ -5,7 +5,7 @@
 | Version | Prefix | Status |
 |---|---|---|
 | v1 | `/api/v1` | Stable. The contract is `openapi-v1.json` (CI-regenerated) |
-| legacy | `/api/*` (no version) | Deprecated, fully functional. No sunset date set |
+| legacy | `/api/*` (no version) | Fully functional and unchanged; coexists with v1. Not yet deprecated (headers off by default), no sunset date set |
 
 `GET /api/v1` is the discovery document: supported versions, engine, readiness, `features` flags and limits. Feature-detect from `features`; don't parse version strings.
 
@@ -66,7 +66,7 @@ Not yet in v1 (use legacy routes; they carry no deprecation headers): `health`, 
 
 ## Deprecation policy
 
-* Legacy routes that have a v1 equivalent answer with `Deprecation: true` and `Link: </api/v1/…>; rel="successor-version"`. Bodies and status codes are unchanged.
+* Legacy routes that have a v1 equivalent answer with `Deprecation: true` and `Link: </api/v1/…>; rel="successor-version"` **when `LEGACY_DEPRECATION_HEADERS=true`**. This is off by default: v1 is purely additive until consumers have migrated, then the flag is turned on. Bodies and status codes are unchanged either way.
 * A `Sunset` header (RFC 8594) is added only once a removal date is decided, at least **6 months** ahead, and recorded in `GET /api/v1` under `legacy.sunset`.
 * A v1 endpoint is deprecated the same way, only after its replacement in a newer major version is released, and stays for at least one full major cycle.
 * Behaviour changes to legacy routes are limited to bug fixes and security fixes.

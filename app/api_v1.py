@@ -6,8 +6,9 @@ Contract (see docs/api-versioning.md):
   * list endpoints use opaque keyset cursors: ``{"data": [...], "page": {"limit", "next_cursor"}}``
   * ``POST /api/v1/jobs`` honours ``Idempotency-Key``
   * ``GET /api/v1`` is the capability-discovery document
-  * legacy ``/api/*`` routes keep working unchanged; those with a v1 equivalent carry
-    ``Deprecation`` / ``Link: <v1 route>; rel="successor-version"`` response headers
+  * legacy ``/api/*`` routes keep working unchanged; once ``LEGACY_DEPRECATION_HEADERS`` is
+    set, those with a v1 equivalent carry ``Deprecation`` / ``Link: <v1 route>;
+    rel="successor-version"`` response headers (off by default)
 
 The module is installed by ``main.py`` (``install(app, main_module)``) so handlers read the
 live job table / catalog through ``m`` at call time.
@@ -44,6 +45,12 @@ LEGACY_TO_V1 = {
     "/api/arrange/subset": f"{PREFIX}/projects/subset",
     "/api/arrange/merge": f"{PREFIX}/projects/merge",
 }
+
+def _legacy_deprecation_enabled() -> bool:
+    # Off by default: v1 ships additively, legacy responses stay byte-for-byte what
+    # consumers already get. Flipped on once consumers have moved (BIZ-334).
+    return os.environ.get("LEGACY_DEPRECATION_HEADERS", "").strip().lower() in ("1", "true", "yes", "on")
+
 
 _DEFAULT_CODES = {
     400: "bad_request", 401: "unauthorized", 403: "forbidden", 404: "not_found",
@@ -121,7 +128,7 @@ def install(app: FastAPI, m) -> None:
         response.headers["X-Request-ID"] = request.state.request_id
         if _is_v1(request):
             response.headers["API-Version"] = API_VERSION
-        else:
+        elif _legacy_deprecation_enabled():
             route = request.scope.get("route")
             successor = LEGACY_TO_V1.get(getattr(route, "path", None))
             if successor:

@@ -60,6 +60,25 @@ def test_v1_surface_is_backward_compatible():
     assert not problems, "breaking v1 change(s) - needs a new major version:\n" + "\n".join(problems)
 
 
+def test_legacy_surface_is_unchanged_since_before_v1():
+    """Versionless routes must stay a superset of the pre-v1 (main) contract: v1 is additive."""
+    baseline = json.loads((Path(__file__).parent / "fixtures" / "api_legacy_surface.json").read_text(encoding="utf-8"))
+    spec = app.openapi()
+    problems = []
+    for key, old in baseline.items():
+        method, path = key.split(" ", 1)
+        op = spec["paths"].get(path, {}).get(method.lower())
+        if op is None:
+            problems.append(f"removed: {key}")
+            continue
+        req = {f"{p['in']}:{p['name']}" for p in op.get("parameters", []) if p.get("required")}
+        if req - set(old["required_params"]):
+            problems.append(f"{key}: new required params {sorted(req - set(old['required_params']))}")
+        if set(old["responses"]) - set(op.get("responses", {})):
+            problems.append(f"{key}: lost responses {sorted(set(old['responses']) - set(op['responses']))}")
+    assert not problems, "legacy route contract changed:\n" + "\n".join(problems)
+
+
 def test_legacy_surface_not_removed_by_v1_work():
     spec = app.openapi()
     for path in ("/api/slice/start", "/api/slice/status/{job_id}", "/api/slice/logs/{job_id}",
