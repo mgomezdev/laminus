@@ -6,6 +6,9 @@ Full OpenAPI 3.0 spec: [`openapi.json`](../openapi.json) (CI-regenerated, always
 Live Swagger UI (container must be running): `http://localhost:5000/docs`
 Live OpenAPI JSON: `http://localhost:5000/openapi.json`
 
+> **API v1 (`/api/v1`) is the stable, versioned contract**: uniform error envelope, cursor pagination, `Idempotency-Key` on job creation, typed SSE events, `GET /api/v1` discovery. New integrations should use it; the routes below remain supported and unchanged (they will carry `Deprecation` headers where a v1 equivalent exists once `LEGACY_DEPRECATION_HEADERS` is enabled). See [`api-versioning.md`](api-versioning.md) and [`openapi-v1.json`](../openapi-v1.json).
+
+
 ---
 
 ## Canonical workflow
@@ -109,6 +112,58 @@ GET /api/profiles/{profile_uuid}
 ```
 
 Returns the full profile dict for inspection. Same 503 behaviour.
+
+---
+
+## 2b — Neutral lookups (model / nozzle variant → machine, presets)
+
+Resolve profiles from neutral inputs instead of Orca preset names. Pure catalog lookups: no
+engine needed, answered from the cached catalog.
+
+**Common to all four endpoints**
+- Header `X-Catalog-Version` = body `catalog_version` (opaque; changes only when preset identity or
+  compatibility data changes). Revalidate stored refs when it changes.
+- `"stale": true` in the body when served from an older on-disk cache (no live catalog yet) or
+  while a rebuild runs. No catalog at all: **503** `{"error": "catalog_unavailable"}`.
+- **Refs** are `<kind>:<slug(name)>` (lowercase, runs of non `[a-z0-9.]` → `-`), e.g.
+  `machine:bambu-lab-p1s-0.4-nozzle`, `process:0.20mm-p1s`. Stable across rebuilds while the
+  preset keeps its name. Every item also carries its `uuid`, which the slice endpoints take.
+- `flow` is `high_flow` when the preset name contains "High Flow", else `standard`.
+
+```
+POST /api/profiles/machines/suggest   {"manufacturer": "Bambu Lab", "model": "P1S", "model_key": "p1s"}
+→ {"catalog_version": "…", "candidates": [
+     {"ref": "machine:bambu-lab-p1s-0.4-nozzle", "uuid": "…", "name": "Bambu Lab P1S 0.4 nozzle",
+      "nozzle_diameter_mm": 0.4, "flow": "standard", "confidence": 1.0, "match_reason": "exact_model"}, … ]}
+```
+`match_reason`: `exact_model` | `fuzzy_name` | `vendor_only` (same vendor, other model, conf 0.1,
+max 5). Sorted by confidence, then 0.4 standard first, then nozzle. Max 20. No match → `[]`, 200.
+
+```
+POST /api/profiles/models/variants    {"manufacturer": "Bambu Lab", "model": "P1S"}
+→ {"catalog_version": "…", "variants": [
+     {"ref": …, "uuid": …, "name": …, "nozzle_diameter_mm": 0.4, "flow": "standard", "is_default_guess": true},
+     {… 0.4 high_flow, false}, {… 0.6 standard, false} ]}
+```
+Best-matching model only; ordered by nozzle then standard-before-high-flow. Exactly one
+`is_default_guess` (0.4 standard, else smallest standard). Unknown model → `[]`.
+
+```
+GET /api/profiles/machines/{machine_ref}/presets?kind=process|filament   (default: both)
+→ {"catalog_version": "…", "machine_ref": "…", "presets": [
+     {"ref": "process:0.20mm-p1s", "uuid": "…", "name": "0.20mm P1S", "kind": "process",
+      "compatible_models": ["Bambu Lab P1S"]}, … ]}
+```
+Applies inheritance, then `compatible_printers`. Empty = universal within the machine's own vendor bundle, plus user presets and the shared `OrcaFilamentLibrary` (`compatible_models` omitted
+then). Abstract bases (`instantiation: false`) are excluded. `compatible_printers_condition` is not evaluated. 404 `{"error": "unknown_machine_ref"}`;
+bad `kind` → 422 `{"error": "invalid_kind"}`.
+
+```
+GET /api/profiles/machines/{machine_ref}/supports?bed_x=256&bed_y=256
+→ {"catalog_version": "…", "machine_ref": "…", "supported": true, "reason": null}
+```
+Always 200. `reason`: `unknown_machine_ref` | `bed_mismatch` (>1 mm off; a machine with no
+declared bed size is never ruled out).
 
 ---
 
@@ -271,6 +326,88 @@ Returns the rearranged `.3mf` as `application/octet-stream`. Timeout: 35 seconds
 curl -X POST http://localhost:5000/api/arrange \
   -F "file=@multi_model.3mf" \
   -o arranged.3mf
+```
+
+---
+
+## List objects with plate names and previews
+
+```
+POST /api/3mf/previews         # multipart/form-data
+```
+
+| Field    | Type | Required | Description |
+|----------|------|----------|-------------|
+| `file`   | file | yes      | Orca/Bambu `.3mf` |
+| `size`   | int  | no       | Preview edge in px, 32-1024 (default 256) |
+| `images` | bool | no       | `false` = names/plates only, no rendering (fast) |
+
+```json
+{"objects": [{
+  "id": 8, "name": "insert", "extruder": "1",
+  "plates": [{"plate": 3, "name": "regular pot", "instances": 1}],
+  "preview": {"mime": "image/png", "width": 256, "height": 256, "data_base64": "iVBORw0..."}
+}]}
+```
+
+`plates[].name` is the plate's name in the project, or `Plate N` when unnamed; an object on several plates lists each. `preview` renders **the object itself** (3/4 view, transparent background, tinted with its filament colour, modifier parts omitted), or is `null` if nothing printable. Use `id` in `/api/arrange/subset` / `/api/arrange/merge` selections. Rendering is CPU-bound (~0.5 s/object; a 21-object project ~12 s) - use `images=false` when only names are needed. Requires `numpy` (in `requirements.txt`).
+
+---
+
+## Arrange a subset (pick objects × qty from a 3MF)
+
+```
+POST /api/v1/projects/inspect  # list objects: id, name, extruder, override keys, parts, instances (legacy alias: /api/3mf/objects)
+POST /api/v1/projects/subset   # multipart/form-data (legacy alias: /api/arrange/subset)
+```
+
+| Field             | Type   | Required | Description |
+|-------------------|--------|----------|-------------|
+| `file`            | file   | yes      | Orca/Bambu `.3mf` |
+| `selection`       | string | yes      | JSON `[{"name":"Lid","qty":4},{"id":12,"qty":1}]`. A name shared by several objects → 422, use `id` |
+| `machine_uuid`    | string | no       | Retarget bed/printer keys to this machine preset (catalog UUID) |
+| `process_uuid`    | string | no       | Replace the project's process preset with this one (needs `machine_uuid`) |
+| `filament_uuids`  | string | no       | JSON array of filament preset UUIDs, one per slot (needs `machine_uuid`; more than the machine's slots → 422) |
+| `allow_rotations` | bool   | no       | Pass `--allow-rotations` to the arranger |
+
+Returns a `.3mf` with only the selected objects (qty copies each, as instances) arranged over as many plates as OrcaSlicer needs. Headers: `X-Plate-Count`, `X-Instance-Count`, `X-Warnings` (objects not resting on the bed; empty when fine). Per-object/part overrides, modifier parts, height ranges and painted data are preserved; with `machine_uuid`, filament slots are cut to what the machine supports (`nozzle_diameter` count, unless `single_extruder_multi_material`): per-slot settings are truncated and objects/parts/height ranges on a dropped slot move to extruder 1. Painted colours are not remapped. `process_uuid` / `filament_uuids` replace the embedded presets; otherwise embedded presets whose `compatible_printers` exclude the target are reported. `X-Remap-Warnings` lists everything remapped/dropped/incompatible. See `docs/experiments/subset-arrange.md`.
+
+```bash
+curl -X POST http://localhost:5000/api/v1/projects/subset \
+  -F "file=@project.3mf" \
+  -F 'selection=[{"name":"Lid","qty":6},{"id":12,"qty":2}]' \
+  -F "machine_uuid=8aaac37c-14a7-5a53-b9f7-3dd1df210919" \
+  -o subset.3mf -D -
+```
+
+---
+
+## Merge selections from several 3MFs into one
+
+```
+POST /api/v1/projects/merge    # multipart/form-data, repeated `files` parts (legacy alias: /api/arrange/merge)
+```
+
+| Field             | Type   | Required | Description |
+|-------------------|--------|----------|-------------|
+| `files`           | file[] | yes      | Two or more `.3mf`. **The first upload is the base**: its process/filament/printer settings, thumbnails and metadata are used for the whole result |
+| `selection`       | string | yes      | JSON list. Each entry names its source with `file` (uploaded filename, or 0-based upload index) plus `id` / `name` / `plate` and `qty` |
+| `machine_uuid`    | string | no       | Retarget bed/printer keys (as in `/api/arrange/subset`) |
+| `process_uuid`    | string | no       | Replace the project's process preset with this one (needs `machine_uuid`) |
+| `filament_uuids`  | string | no       | JSON array of filament preset UUIDs, one per slot (needs `machine_uuid`; more than the machine's slots → 422) |
+| `allow_rotations` | bool   | no       | Pass `--allow-rotations` to the arranger |
+
+`{"plate": N, "qty": q}` = everything on source plate N (each object x its count there x q); it also works in `/api/arrange/subset`. Entries for the same object accumulate.
+
+Response: one `.3mf`. Headers `X-Plate-Count`, `X-Instance-Count`, `X-Remap-Warnings` (as in subset, prefixed by source file) and `X-Merge-Warnings` (non-empty when a non-base source used a different process/filament preset, has painted data with a different filament count, or an object ends up not resting on the bed - floating/sunk by more than 0.5 mm). Errors: 422 (bad selection / unknown file / base not selected / non-base object uses a filament slot the base lacks), 400, 408, 503.
+
+```bash
+curl -X POST http://localhost:5000/api/arrange/merge   -F "files=@Hex-Moss-Pole.3mf"   -F "files=@cloud pots.3mf"   -F 'selection=[
+        {"file":"Hex-Moss-Pole.3mf","plate":1,"qty":2},
+        {"file":"Hex-Moss-Pole.3mf","plate":6},
+        {"file":"Hex-Moss-Pole.3mf","plate":7},
+        {"file":"cloud pots.3mf","plate":3,"qty":2},
+        {"file":"cloud pots.3mf","id":8,"qty":1}]'   -F "machine_uuid=0f0a771f-0a29-5077-8571-e1fee605f432"   -o merged.3mf -D -
 ```
 
 ---

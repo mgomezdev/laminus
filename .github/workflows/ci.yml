@@ -8,7 +8,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, develop]
     tags: ["v*"]
 
 concurrency:
@@ -30,7 +30,7 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python scripts/export_openapi.py
       - name: Fail if spec is stale
-        run: git diff --exit-code openapi.json
+        run: git diff --exit-code openapi.json openapi-v1.json
 
   test:
     runs-on: ubuntu-latest
@@ -101,9 +101,6 @@ jobs:
   # Ordinus is not started: it never talks to Laminus.
   e2e-core:
     needs: [mock-image]
-    # PRs onto develop run against Concordia's develop instead (e2e-core-develop);
-    # a `uses:` ref can't be an expression, so the job is duplicated.
-    if: github.base_ref != 'develop'
     # A called workflow's token is capped by the caller's; Concordia's e2e logs
     # into GHCR with it.
     permissions:
@@ -111,23 +108,10 @@ jobs:
       packages: read
     uses: mgomezdev/concordia/.github/workflows/e2e.yml@main
     with:
+      # PRs onto develop run Concordia's develop suite. Kept as one job (not a
+      # separate @develop one) so the required check stays "e2e-core / e2e".
+      concordia_ref: ${{ (github.base_ref == 'develop' || github.ref_name == 'develop') && 'develop' || 'main' }}
       profile: core
-      image_artifact: laminus-mock-ci-image
-      mock_laminus_image: laminus-mock:ci
-    secrets:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-
-  e2e-core-develop:
-    needs: [mock-image]
-    if: github.base_ref == 'develop'
-    permissions:
-      contents: read
-      packages: read
-    uses: mgomezdev/concordia/.github/workflows/e2e.yml@develop
-    with:
-      profile: core
-      concordia_ref: develop
       image_artifact: laminus-mock-ci-image
       mock_laminus_image: laminus-mock:ci
     secrets:
@@ -136,7 +120,8 @@ jobs:
 
   publish:
     needs: [spec, test, mock-image, e2e-core]
-    if: github.event_name == 'push'
+    # develop pushes run the checks but don't publish images
+    if: github.event_name == 'push' && github.ref != 'refs/heads/develop'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -215,4 +200,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: openapi.json
+          files: |
+            openapi.json
+            openapi-v1.json
