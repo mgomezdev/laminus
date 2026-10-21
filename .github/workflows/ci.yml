@@ -127,6 +127,7 @@ jobs:
     uses: mgomezdev/concordia/.github/workflows/e2e.yml@develop
     with:
       profile: core
+      concordia_ref: develop
       image_artifact: laminus-mock-ci-image
       mock_laminus_image: laminus-mock:ci
     secrets:
