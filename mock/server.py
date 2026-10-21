@@ -19,8 +19,9 @@ from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.routing import Match
 
 # Stable UUIDs — guaranteed constant across releases so tests can hardcode them
 MACHINE_UUID = "00000000-mock-mach-0004-elegoocc04noz"
@@ -98,6 +99,34 @@ app = FastAPI(
 )
 
 
+class LegacyApiPathRewrite:
+    """INTERIM: serve unversioned ``/api/<x>`` from the ``/api/v1/<x>`` handler.
+
+    Same handlers, same (v1) data shape -- the path is rewritten in the ASGI scope, so every
+    method, body and streaming response works (a redirect would not for clients that don't
+    re-send POST bodies). Only paths with a v1 equivalent are rewritten; anything else under
+    ``/api`` still 404s in the error envelope. Remove once clients call ``/api/v1`` directly.
+    """
+
+    def __init__(self, asgi, fastapi_app):
+        self.asgi = asgi
+        self.fastapi_app = fastapi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = scope["path"]
+            if path.startswith("/api/") and not (path == "/api/v1" or path.startswith("/api/v1/")):
+                new = "/api/v1/" + path[len("/api/"):]
+                probe = {**scope, "path": new}
+                if any(r.matches(probe)[0] != Match.NONE
+                       for r in self.fastapi_app.router.routes if hasattr(r, "matches")):
+                    scope = {**scope, "path": new, "raw_path": new.encode()}
+        await self.asgi(scope, receive, send)
+
+
+app.add_middleware(LegacyApiPathRewrite, fastapi_app=app)
+
+
 @app.exception_handler(StarletteHTTPException)
 async def _http_exc(request: Request, exc: StarletteHTTPException):
     return JSONResponse(
@@ -170,11 +199,6 @@ def _check_export_3mf(export_3mf: Optional[str]) -> None:
         raise HTTPException(422, "export_3mf must not contain path separators")
     if not export_3mf.lower().endswith(".3mf"):
         raise HTTPException(422, "export_3mf must end with .3mf")
-
-
-@app.get("/api/health", include_in_schema=False)
-async def health_alias():
-    return RedirectResponse("/api/v1/health", status_code=307)
 
 
 @app.get("/api/v1/health")

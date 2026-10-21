@@ -14,8 +14,9 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.routing import Match
 from app.profile_catalog import ProfileCatalog
 from app.project_config_builder import build_project_settings, embed_project_settings
 from app import preview_3mf as _preview
@@ -252,6 +253,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class LegacyApiPathRewrite:
+    """INTERIM: serve unversioned ``/api/<x>`` from the ``/api/v1/<x>`` handler.
+
+    Same handlers, same (v1) data shape -- the path is rewritten in the ASGI scope, so every
+    method, body and streaming response works (a redirect would not for clients that don't
+    re-send POST bodies). Only paths with a v1 equivalent are rewritten; anything else under
+    ``/api`` still 404s in the error envelope. Remove once clients call ``/api/v1`` directly.
+    """
+
+    def __init__(self, asgi, fastapi_app):
+        self.asgi = asgi
+        self.fastapi_app = fastapi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = scope["path"]
+            if path.startswith("/api/") and not (path == "/api/v1" or path.startswith("/api/v1/")):
+                new = "/api/v1/" + path[len("/api/"):]
+                probe = {**scope, "path": new}
+                if any(r.matches(probe)[0] != Match.NONE
+                       for r in self.fastapi_app.router.routes if hasattr(r, "matches")):
+                    scope = {**scope, "path": new, "raw_path": new.encode()}
+        await self.asgi(scope, receive, send)
+
+app.add_middleware(LegacyApiPathRewrite, fastapi_app=app)
 
 
 def _safe_filename(filename: Optional[str]) -> str:
@@ -2250,12 +2278,6 @@ def _orca_version() -> Optional[str]:
     except OSError:
         pass
     return os.environ.get("ORCA_VERSION") or None
-
-
-@app.get("/api/health", include_in_schema=False)
-async def health_alias():
-    """Unversioned liveness alias for infra healthchecks; always points at the latest version."""
-    return RedirectResponse("/api/v1/health", status_code=307)
 
 
 @app.get(

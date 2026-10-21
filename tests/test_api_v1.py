@@ -62,7 +62,7 @@ def test_error_envelope():
     assert r.json()["error"] == {"code": "job_not_found", "message": "Job not found.", "status": 404}
     assert r.json()["request_id"] == r.headers["X-Request-ID"]
     # unknown paths under /api (including the old versionless ones) get the envelope too
-    for path in ("/api/slice/status/nope", "/api/jobs", "/api/v2/jobs"):
+    for path in ("/api/slice/status/nope", "/api/nope", "/api/v2/jobs"):
         gone = client.get(path)
         assert gone.status_code == 404 and gone.json()["error"]["code"] == "not_found", path
         assert gone.headers["API-Version"] == "v1"
@@ -159,9 +159,7 @@ def test_profiles_catalog_not_ready_has_retry_after():
 
 
 def test_every_api_route_is_under_v1():
-    # /api/health is the one unversioned alias (redirects to /api/v1/health, hidden from the spec)
-    api = [r.path for r in main_mod.app.routes
-           if getattr(r, "path", "").startswith("/api") and r.path != "/api/health"]
+    api = [r.path for r in main_mod.app.routes if getattr(r, "path", "").startswith("/api")]
     assert api and all(p == "/api/v1" or p.startswith("/api/v1/") for p in api),         [p for p in api if not p.startswith("/api/v1")]
 
 
@@ -240,9 +238,19 @@ def test_project_routes_exist_under_v1_with_enveloped_errors():
 
 
 
-def test_unversioned_health_alias_redirects_to_v1():
-    r = client.get("/api/health", follow_redirects=False)
-    assert r.status_code == 307 and r.headers["location"] == "/api/v1/health"
-    followed = client.get("/api/health")
-    assert followed.status_code == 200 and followed.json() == client.get("/api/v1/health").json()
+def test_unversioned_paths_serve_the_v1_handlers_and_shape():
+    # interim: /api/<x> is rewritten to /api/v1/<x> (same handler, same data shape)
+    def body(r):
+        return {k: v for k, v in r.json().items() if k != "request_id"}  # request_id is per-call
+    assert body(client.get("/api/health")) == body(client.get("/api/v1/health"))
+    legacy, v1 = client.get("/api/profiles"), client.get("/api/v1/profiles")
+    assert legacy.status_code == v1.status_code and body(legacy) == body(v1)
+    assert legacy.headers["API-Version"] == "v1"
+    # method is preserved (no redirect): POST to a POST-only v1 route is routed, GET is 405
+    assert client.get("/api/pack").status_code == 405
+    assert client.post("/api/pack").status_code == 422
+    # no v1 equivalent -> still the 404 envelope
+    gone = client.get("/api/slice/status/nope")
+    assert gone.status_code == 404 and gone.json()["error"]["code"] == "not_found"
+    # not part of the contract
     assert "/api/health" not in main_mod.app.openapi()["paths"]
