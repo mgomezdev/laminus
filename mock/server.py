@@ -374,3 +374,247 @@ async def test_known_profile(machine_name: str | None = None):
         "filament_uuid": FILAMENT_UUID,
         "filament_name": _FILAMENT["name"],
     }
+
+
+# ---- /api/v1 --------------------------------------------------------------------
+# Mirrors app/api_v1.py: same shapes and error envelope, canned data. Legacy routes
+# above are untouched; routes without a v1-specific shape are aliases of them.
+import base64  # noqa: E402
+import hashlib  # noqa: E402
+import time  # noqa: E402
+
+from fastapi import Query  # noqa: E402
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler  # noqa: E402
+from fastapi.exceptions import RequestValidationError  # noqa: E402
+from starlette.exceptions import HTTPException as StarletteHTTPException  # noqa: E402
+
+V1 = "/api/v1"
+_MAX_PAGE = 200
+_v1_jobs: dict[str, dict] = {}      # job_id -> {"filename", "created_at"}
+_v1_downloaded: set[str] = set()
+_idem: dict[str, dict] = {}         # Idempotency-Key -> {"fp", "job_id"}
+
+_DEFAULT_CODES = {
+    400: "bad_request", 404: "not_found", 405: "method_not_allowed", 409: "conflict",
+    422: "unprocessable", 500: "internal_error", 503: "unavailable",
+}
+
+
+def _is_v1(request: Request) -> bool:
+    return request.url.path == V1 or request.url.path.startswith(V1 + "/")
+
+
+def _rid(request: Request) -> str:
+    return getattr(request.state, "request_id", None) or str(uuid.uuid4())
+
+
+def _err(status: int, code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=status, detail={"code": code, "message": message})
+
+
+def _envelope(request: Request, status: int, detail) -> JSONResponse:
+    details = None
+    if isinstance(detail, dict) and "code" in detail:
+        code, message = detail["code"], detail.get("message", "")
+    elif isinstance(detail, str):
+        code, message = _DEFAULT_CODES.get(status, "error"), detail
+    else:
+        code = "validation_error" if status == 422 else _DEFAULT_CODES.get(status, "error")
+        message, details = ("Request validation failed." if status == 422 else "Request failed."), detail
+    body = {"error": {"code": code, "message": message, "status": status}, "request_id": _rid(request)}
+    if details is not None:
+        body["error"]["details"] = details
+    return JSONResponse(body, status_code=status)
+
+
+@app.middleware("http")
+async def _v1_headers(request: Request, call_next):
+    request.state.request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request.state.request_id
+    if _is_v1(request):
+        response.headers["API-Version"] = "v1"
+    return response
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _v1_http_exc(request: Request, exc: StarletteHTTPException):
+    if _is_v1(request):
+        return _envelope(request, exc.status_code, exc.detail)
+    return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def _v1_validation_exc(request: Request, exc: RequestValidationError):
+    if _is_v1(request):
+        return _envelope(request, 422, json.loads(json.dumps(exc.errors(), default=str)))
+    return await request_validation_exception_handler(request, exc)
+
+
+def _encode_cursor(key: list) -> str:
+    return base64.urlsafe_b64encode(json.dumps(key).encode()).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> list:
+    try:
+        key = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+        if not isinstance(key, list):
+            raise ValueError
+        return key
+    except (ValueError, TypeError):
+        raise _err(422, "invalid_cursor", "cursor is malformed or from a different listing.")
+
+
+def _paginate(records: list[dict], key_fn, limit: int, cursor: Optional[str], reverse: bool = False):
+    ordered = sorted(records, key=key_fn, reverse=reverse)
+    if cursor:
+        after = _decode_cursor(cursor)
+        ordered = [r for r in ordered if (key_fn(r) < after if reverse else key_fn(r) > after)]
+    page = ordered[:limit]
+    nxt = _encode_cursor(key_fn(page[-1])) if len(ordered) > limit else None
+    return page, {"limit": limit, "next_cursor": nxt}
+
+
+# aliases first, so literal paths (/profiles/broken) win over /profiles/{profile_uuid}
+_legacy = {(r.path, m): r for r in app.routes if hasattr(r, "endpoint") and hasattr(r, "methods") for m in r.methods}
+for _old, _method, _tag in (
+        ("/api/health", "GET", "v1 health"),
+        ("/api/pack", "POST", "v1 projects"),
+        ("/api/arrange", "POST", "v1 projects"),
+        ("/api/slice/prepared", "POST", "v1 jobs"),
+        ("/api/profiles/rescan", "POST", "v1 profiles"),
+        ("/api/profiles/broken", "GET", "v1 profiles"),
+        ("/api/profiles/merged-config", "POST", "v1 profiles"),
+        ("/api/profiles/machines/suggest", "POST", "v1 profiles"),
+        ("/api/profiles/models/variants", "POST", "v1 profiles"),
+        ("/api/profiles/machines/{machine_ref}/presets", "GET", "v1 profiles"),
+        ("/api/profiles/machines/{machine_ref}/supports", "GET", "v1 profiles")):
+    _r = _legacy[(_old, _method)]
+    app.add_api_route(V1 + _old[len("/api"):], _r.endpoint, methods=[_method], tags=[_tag],
+                      operation_id=f"v1_{_r.name}")
+
+
+@app.get(V1, tags=["v1"], summary="API capability discovery")
+async def v1_capabilities():
+    return {
+        "api_version": "v1",
+        "supported_versions": ["v1"],
+        "legacy": {"prefix": "/api", "deprecated": True, "sunset": None, "policy": "docs/api-versioning.md"},
+        "engine": {"name": "orcaslicer", "version": "2.4.2", "binary_version": "mock-2.4.2"},
+        "ready": {"catalog": True},
+        "features": ["jobs", "jobs.idempotency", "pagination.cursor", "profiles", "pack", "arrange", "health",
+                     "slice.prepared", "profiles.rescan", "profiles.broken", "profiles.merged_config",
+                     "profiles.neutral"],
+        "limits": {"max_concurrent_jobs": 1, "job_history_limit": 200, "max_page_size": _MAX_PAGE},
+    }
+
+
+def _job_links(job_id: str) -> dict:
+    return {"self": f"{V1}/jobs/{job_id}", "events": f"{V1}/jobs/{job_id}/events",
+            "artifact": f"{V1}/jobs/{job_id}/artifact"}
+
+
+def _job_view(job_id: str) -> Optional[dict]:
+    rec = _v1_jobs.get(job_id)
+    if rec is None:
+        return None
+    return {
+        "id": job_id, "status": "completed", "filename": rec["filename"], "output_format": "gcode",
+        "error": None,
+        "artifact": {"name": f"{job_id}.gcode", "available": job_id not in _v1_downloaded},
+        "created_at": rec["created_at"], "updated_at": rec["created_at"],
+        "links": _job_links(job_id),
+    }
+
+
+@app.post(f"{V1}/jobs", tags=["v1 jobs"], status_code=202, summary="Create a slice job")
+async def v1_create_job(
+    request: Request,
+    file: UploadFile = File(...),
+    plate: int = Form(...),
+    machine_uuid: Optional[str] = Form(None),
+    process_uuid: str = Form(...),
+    filament_uuids: str = Form(...),
+    export_3mf: Optional[str] = Form(None),
+    geometry_only_retry: Optional[str] = Form(None),
+    extra_config: Optional[str] = Form(None),
+    manufacturer: Optional[str] = Form(None),
+    model: Optional[str] = Form(None),
+    nozzle: Optional[str] = Form(None),
+):
+    key = request.headers.get("Idempotency-Key")
+    fp = None
+    if key is not None:
+        if not key.strip() or len(key) > 255:
+            raise _err(422, "invalid_idempotency_key", "Idempotency-Key must be 1-255 characters.")
+        fp = hashlib.sha256(json.dumps(
+            [hashlib.sha256(await file.read()).hexdigest(), plate, machine_uuid, process_uuid, filament_uuids,
+             export_3mf, geometry_only_retry, extra_config, manufacturer, model, nozzle],
+            sort_keys=True).encode()).hexdigest()
+        await file.seek(0)
+        prior = _idem.get(key)
+        if prior is not None:
+            if prior["fp"] != fp:
+                raise _err(422, "idempotency_key_reuse", "Idempotency-Key was already used with a different request.")
+            view = _job_view(prior["job_id"])
+            return JSONResponse(view, status_code=202,
+                                headers={"Idempotent-Replay": "true", "Location": view["links"]["self"]})
+    if plate < 1:
+        raise HTTPException(422, "plate must be >= 1.")
+    _check_export_3mf(export_3mf)
+    job_id = str(uuid.uuid4())
+    _v1_jobs[job_id] = {"filename": file.filename, "created_at": time.time()}
+    if key is not None:
+        _idem[key] = {"fp": fp, "job_id": job_id}
+    view = _job_view(job_id)
+    return JSONResponse(view, status_code=202, headers={"Location": view["links"]["self"]})
+
+
+@app.get(f"{V1}/jobs", tags=["v1 jobs"], summary="List jobs (newest first, cursor-paginated)")
+async def v1_list_jobs(limit: int = Query(50, ge=1, le=_MAX_PAGE), cursor: Optional[str] = None,
+                       status: Optional[str] = None):
+    records = [{"id": j, **r} for j, r in _v1_jobs.items() if not status or status == "completed"]
+    page, meta = _paginate(records, lambda r: [r["created_at"], r["id"]], limit, cursor, reverse=True)
+    return {"data": [_job_view(r["id"]) for r in page], "page": meta}
+
+
+@app.get(f"{V1}/jobs/{{job_id}}", tags=["v1 jobs"], summary="Get a job")
+async def v1_get_job(job_id: str):
+    view = _job_view(job_id)
+    if view is None:
+        raise _err(404, "job_not_found", "Job not found.")
+    return view
+
+
+@app.get(f"{V1}/jobs/{{job_id}}/artifact", tags=["v1 jobs"], summary="Download the sliced artifact")
+async def v1_job_artifact(job_id: str):
+    if job_id not in _v1_jobs:
+        raise _err(404, "job_not_found", "Job not found.")
+    if job_id in _v1_downloaded:
+        raise _err(404, "artifact_gone", "Artifact was already downloaded, expired or lost in a restart.")
+    _v1_downloaded.add(job_id)
+    return Response(content=_MOCK_GCODE, media_type="application/octet-stream")
+
+
+@app.get(f"{V1}/profiles", tags=["v1 profiles"], summary="List profiles (cursor-paginated)")
+async def v1_list_profiles(type: Optional[str] = Query(None, pattern="^(machine|process|filament)$"),
+                           manufacturer: Optional[str] = None, model: Optional[str] = None,
+                           nozzle: Optional[str] = None, q: Optional[str] = None,
+                           limit: int = Query(50, ge=1, le=_MAX_PAGE), cursor: Optional[str] = None):
+    given = [p for p in (manufacturer, model, nozzle) if p is not None]
+    if given and len(given) != 3:
+        raise _err(422, "partial_machine_filter",
+                   "Provide all three of manufacturer, model, and nozzle together, or none.")
+    records = [e for e in _CATALOG.values() if not type or e["type"] == type]
+    if q:
+        records = [r for r in records if q.lower() in r["name"].lower()]
+    page, meta = _paginate(records, lambda r: [r["name"], r["uuid"]], limit, cursor)
+    return {"data": page, "page": meta}
+
+
+@app.get(f"{V1}/profiles/{{profile_uuid}}", tags=["v1 profiles"], summary="Get one profile")
+async def v1_get_profile(profile_uuid: str):
+    entry = _CATALOG.get(profile_uuid)
+    if entry is None:
+        raise _err(404, "profile_not_found", f"Profile UUID '{profile_uuid}' not found.")
+    return entry
