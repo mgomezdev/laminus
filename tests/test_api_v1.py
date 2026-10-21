@@ -156,7 +156,15 @@ def test_profiles_catalog_not_ready_has_retry_after():
     assert r.json()["error"]["code"] == "catalog_not_ready"
 
 
-def test_legacy_routes_carry_deprecation_headers():
+def test_legacy_routes_have_no_deprecation_headers_by_default(monkeypatch):
+    monkeypatch.delenv("LEGACY_DEPRECATION_HEADERS", raising=False)
+    r = client.get("/api/jobs")
+    assert r.status_code == 200 and r.json() == {"jobs": []}
+    assert "Deprecation" not in r.headers and "Link" not in r.headers
+
+
+def test_legacy_routes_carry_deprecation_headers_when_enabled(monkeypatch):
+    monkeypatch.setenv("LEGACY_DEPRECATION_HEADERS", "true")
     r = client.get("/api/jobs")
     assert r.status_code == 200 and r.json() == {"jobs": []}  # body unchanged
     assert r.headers["Deprecation"] == "true"
