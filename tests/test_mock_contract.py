@@ -441,3 +441,161 @@ def test_neutral_supports(client):
     assert bad["reason"] == "bed_mismatch"
     unk = client.get("/api/profiles/machines/machine:nope/supports")
     assert unk.status_code == 200 and unk.json()["reason"] == "unknown_machine_ref"
+
+
+# ---------------------------------------------------------------------------
+# /api/v1
+# ---------------------------------------------------------------------------
+
+JOB_VIEW_FIELDS = {"id", "status", "filename", "output_format", "error", "artifact", "links"}
+
+
+def _v1_create_job(client: TestClient, headers: dict | None = None) -> "object":
+    kp = _known_profile(client)
+    return client.post(
+        "/api/v1/jobs",
+        files={"file": ("m.stl", _stl(), "application/octet-stream")},
+        data={
+            "machine_uuid": kp["machine_uuid"],
+            "process_uuid": kp["process_uuid"],
+            "filament_uuids": json.dumps([kp["filament_uuid"]]),
+            "plate": "1",
+        },
+        headers=headers or {},
+    )
+
+
+def test_v1_health(client):
+    r = client.get("/api/v1/health")
+    assert r.status_code == 200
+    assert not _missing(HEALTH_FIELDS, r.json())
+    assert r.headers["API-Version"] == "v1" and r.headers["X-Request-ID"]
+
+
+def test_v1_discovery(client):
+    body = client.get("/api/v1").json()
+    assert body["api_version"] == "v1" and "v1" in body["supported_versions"]
+    assert "features" in body and "limits" in body
+
+
+def test_v1_profiles_flat_typed_and_paginated(client):
+    body = client.get("/api/v1/profiles").json()
+    assert {"data", "page"} <= body.keys() and {"limit", "next_cursor"} <= body["page"].keys()
+    assert {p["type"] for p in body["data"]} >= {"machine", "process", "filament"}
+    assert all("uuid" in p for p in body["data"])
+    only = client.get("/api/v1/profiles", params={"type": "machine"}).json()["data"]
+    assert only and {p["type"] for p in only} == {"machine"}
+
+
+def test_v1_profiles_cursor_walk_has_no_gaps_or_repeats(client):
+    seen, cursor = [], None
+    for _ in range(500):
+        params = {"limit": 1, **({"cursor": cursor} if cursor else {})}
+        body = client.get("/api/v1/profiles", params=params).json()
+        seen += [p["uuid"] for p in body["data"]]
+        cursor = body["page"]["next_cursor"]
+        if cursor is None:
+            break
+    assert len(seen) == len(set(seen)) >= 3
+
+
+def test_v1_profiles_bad_cursor_is_enveloped_422(client):
+    r = client.get("/api/v1/profiles", params={"cursor": "not-a-cursor"})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "invalid_cursor"
+
+
+def test_v1_profile_detail_and_404_envelope(client):
+    kp = _known_profile(client)
+    assert client.get(f"/api/v1/profiles/{kp['machine_uuid']}").json()["uuid"] == kp["machine_uuid"]
+    r = client.get("/api/v1/profiles/no-such-uuid")
+    assert r.status_code == 404 and r.json()["error"]["code"] == "profile_not_found"
+    assert r.json()["request_id"] == r.headers["X-Request-ID"]
+
+
+def test_v1_profiles_broken_not_swallowed_by_uuid_route(client):
+    r = client.get("/api/v1/profiles/broken")
+    assert r.status_code == 200 and "broken" in r.json()
+
+
+def test_v1_profiles_rescan_and_merged_config(client):
+    assert client.post("/api/v1/profiles/rescan").status_code == 200
+    kp = _known_profile(client)
+    r = client.post("/api/v1/profiles/merged-config", json={
+        "machine_uuid": kp["machine_uuid"], "process_uuid": kp["process_uuid"],
+        "filament_uuids": [kp["filament_uuid"]]})
+    assert r.status_code == 200 and isinstance(r.json(), dict) and r.json()
+
+
+def test_v1_neutral_profile_routes(client):
+    q = _model_query(client)
+    cands = client.post("/api/v1/profiles/machines/suggest", json=q).json()["candidates"]
+    assert cands and not _missing(CANDIDATE_FIELDS, cands[0])
+    variants = client.post("/api/v1/profiles/models/variants", json=q).json()["variants"]
+    assert variants and not _missing(VARIANT_FIELDS, variants[0])
+    ref = cands[0]["ref"]
+    presets = client.get(f"/api/v1/profiles/machines/{ref}/presets").json()["presets"]
+    assert {p["kind"] for p in presets} == {"process", "filament"}
+    assert client.get(f"/api/v1/profiles/machines/{ref}/supports").json()["supported"] is True
+
+
+def test_v1_job_lifecycle(client):
+    r = _v1_create_job(client)
+    assert r.status_code == 202, r.text[:200]
+    job = r.json()
+    assert not _missing(JOB_VIEW_FIELDS, job)
+    assert r.headers["Location"] == job["links"]["self"]
+    for _ in range(30):
+        view = client.get(f"/api/v1/jobs/{job['id']}").json()
+        if view["status"] in ("completed", "failed"):
+            break
+    assert view["status"] == "completed" and view["artifact"]["name"]
+    a = client.get(f"/api/v1/jobs/{job['id']}/artifact")
+    assert a.status_code == 200 and len(a.content) > 0
+    again = client.get(f"/api/v1/jobs/{job['id']}/artifact")
+    assert again.status_code == 404 and again.json()["error"]["code"] == "artifact_gone"
+    assert client.get(f"/api/v1/jobs/{job['id']}").json()["artifact"]["available"] is False
+
+
+def test_v1_job_list_is_paginated(client):
+    _v1_create_job(client)
+    body = client.get("/api/v1/jobs", params={"limit": 1}).json()
+    assert {"data", "page"} <= body.keys() and len(body["data"]) == 1
+
+
+def test_v1_job_404_is_enveloped(client):
+    r = client.get("/api/v1/jobs/nonexistent-id-xyz")
+    assert r.status_code == 404 and r.json()["error"]["code"] == "job_not_found"
+
+
+def test_v1_unknown_path_is_enveloped(client):
+    r = client.get("/api/v1/definitely-not-a-route")
+    assert r.status_code == 404 and "error" in r.json()
+
+
+def test_v1_validation_error_is_enveloped(client):
+    r = client.post("/api/v1/jobs", files={"file": ("m.stl", _stl())}, data={"plate": "1"})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "validation_error"
+
+
+def test_v1_job_idempotency_replay(client):
+    key = {"Idempotency-Key": "contract-idem-1"}
+    first = _v1_create_job(client, key)
+    second = _v1_create_job(client, key)
+    assert first.status_code == second.status_code == 202
+    assert second.json()["id"] == first.json()["id"]
+    assert second.headers["Idempotent-Replay"] == "true"
+
+
+def test_v1_slice_prepared(client):
+    r = client.post("/api/v1/slice/prepared",
+                    files={"file": ("m.3mf", _minimal_3mf(), "application/octet-stream")}, data={"plate": "1"})
+    assert r.status_code == 200 and "job_id" in r.json()
+
+
+def test_v1_pack_and_arrange_return_zip(client):
+    r = client.post("/api/v1/pack", files=[("files", ("m.stl", _stl(), "application/octet-stream"))],
+                    data={"bed_x": "200", "bed_y": "200", "bed_z": "200"})
+    assert r.status_code == 200 and zipfile.is_zipfile(io.BytesIO(r.content))
+    r = client.post("/api/v1/arrange", files={"file": ("m.3mf", _minimal_3mf(), "application/octet-stream")},
+                    data={"arrange": "true", "orient": "true"})
+    assert r.status_code == 200 and zipfile.is_zipfile(io.BytesIO(r.content))
