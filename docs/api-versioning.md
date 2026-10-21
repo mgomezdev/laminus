@@ -62,7 +62,19 @@ These need a new major (`/api/v2`):
 
 Differences worth knowing: a job record outlives its artifact (`artifact.available: false` after the one-time download or TTL eviction, instead of a 404 on the job); artifact on a not-yet-complete job is 409 (legacy: 400); profile lists are flat with `type`, filtered by `type=`/`q=` and paginated (legacy: grouped, unpaginated).
 
-Not yet in v1 (use legacy routes; they carry no deprecation headers): `health`, `pack`, `arrange`, `slice/prepared`, `slice/thumbnail`, `profiles/*` lookups (`merged-config`, neutral model/nozzle API, `upload`, `rescan`, `broken`), `3mf/previews`, `cleanup`.
+Also served under `/api/v1` (same handlers and request/response bodies as the legacy route; only the error envelope and `API-Version` header differ):
+
+| v1 | Replaces (legacy) |
+|---|---|
+| `GET /api/v1/health` | `GET /api/health` |
+| `POST /api/v1/pack`, `POST /api/v1/arrange` | `POST /api/pack`, `POST /api/arrange` |
+| `POST /api/v1/projects/previews` | `POST /api/3mf/previews` |
+| `POST /api/v1/slice/prepared`, `POST /api/v1/slice/thumbnail` | `POST /api/slice/prepared`, `POST /api/slice/thumbnail` |
+| `POST /api/v1/profiles/rescan`, `GET /api/v1/profiles/broken`, `POST /api/v1/profiles/upload` | same paths under `/api` |
+| `POST /api/v1/profiles/merged-config`, `POST /api/v1/profiles/machines/suggest`, `POST /api/v1/profiles/models/variants`, `GET /api/v1/profiles/machines/{ref}/presets`, `GET /api/v1/profiles/machines/{ref}/supports` | same paths under `/api` |
+| `POST /api/v1/cleanup` | `POST /api/cleanup` |
+
+Every legacy `/api/*` route now has a v1 equivalent.
 
 ## Deprecation policy
 
