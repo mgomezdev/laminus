@@ -177,7 +177,7 @@ app = FastAPI(
         "Retry after `GET /api/health` reports `catalog_loaded: true`.\n"
         "- **400 / 408 / 500** — OrcaSlicer-side failures; check server logs for details."
     ),
-    version="1.0.0",
+    version="0.10.0",
     lifespan=lifespan,
     openapi_tags=[
         {
