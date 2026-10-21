@@ -718,14 +718,26 @@
             "title": "File"
           },
           "arrange": {
-            "type": "boolean",
-            "title": "Arrange",
-            "default": true
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arrange"
           },
           "orient": {
-            "type": "boolean",
-            "title": "Orient",
-            "default": true
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Orient"
           }
         },
         "type": "object",
@@ -810,9 +822,15 @@
             "title": "Export 3Mf"
           },
           "geometry_only_retry": {
-            "type": "boolean",
-            "title": "Geometry Only Retry",
-            "default": true
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Geometry Only Retry"
           },
           "extra_config": {
             "anyOf": [
@@ -963,9 +981,15 @@
             "default": 256
           },
           "images": {
-            "type": "boolean",
-            "title": "Images",
-            "default": true
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Images"
           }
         },
         "type": "object",
@@ -997,9 +1021,15 @@
             "title": "Export 3Mf"
           },
           "geometry_only_retry": {
-            "type": "boolean",
-            "title": "Geometry Only Retry",
-            "default": true
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Geometry Only Retry"
           }
         },
         "type": "object",
@@ -1104,9 +1134,15 @@
             "title": "Export 3Mf"
           },
           "geometry_only_retry": {
-            "type": "boolean",
-            "title": "Geometry Only Retry",
-            "default": true
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Geometry Only Retry"
           },
           "extra_config": {
             "anyOf": [
