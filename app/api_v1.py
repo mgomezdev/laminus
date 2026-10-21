@@ -46,6 +46,38 @@ LEGACY_TO_V1 = {
     "/api/arrange/merge": f"{PREFIX}/projects/merge",
 }
 
+# (legacy path, method, v1 path, tag, summary): v1 serves the legacy handler unchanged apart from
+# the error envelope and response headers.
+V1_ALIASES = [
+    ("/api/3mf/objects", "POST", f"{PREFIX}/projects/inspect", "v1 projects", "List objects in a 3MF project"),
+    ("/api/arrange/subset", "POST", f"{PREFIX}/projects/subset", "v1 projects",
+     "Subset a 3MF by object x quantity and arrange"),
+    ("/api/arrange/merge", "POST", f"{PREFIX}/projects/merge", "v1 projects",
+     "Merge selections from several 3MFs and arrange"),
+    ("/api/health", "GET", f"{PREFIX}/health", "v1 health", "Service health"),
+    ("/api/pack", "POST", f"{PREFIX}/pack", "v1 projects", "Pack STL/3MF files onto plates"),
+    ("/api/arrange", "POST", f"{PREFIX}/arrange", "v1 projects", "Arrange and orient a 3MF"),
+    ("/api/3mf/previews", "POST", f"{PREFIX}/projects/previews", "v1 projects", "Render 3MF plate previews"),
+    ("/api/slice/prepared", "POST", f"{PREFIX}/slice/prepared", "v1 jobs", "Slice a prepared 3MF"),
+    ("/api/slice/thumbnail", "POST", f"{PREFIX}/slice/thumbnail", "v1 jobs", "Render a slice thumbnail"),
+    ("/api/profiles/rescan", "POST", f"{PREFIX}/profiles/rescan", "v1 profiles", "Force a catalog rebuild"),
+    ("/api/profiles/broken", "GET", f"{PREFIX}/profiles/broken", "v1 profiles",
+     "Profiles dropped for unresolved inheritance"),
+    ("/api/profiles/upload", "POST", f"{PREFIX}/profiles/upload", "v1 profiles", "Upload a user profile"),
+    ("/api/profiles/merged-config", "POST", f"{PREFIX}/profiles/merged-config", "v1 profiles",
+     "Resolve a merged project config"),
+    ("/api/profiles/machines/suggest", "POST", f"{PREFIX}/profiles/machines/suggest", "v1 profiles",
+     "Suggest machine presets"),
+    ("/api/profiles/models/variants", "POST", f"{PREFIX}/profiles/models/variants", "v1 profiles",
+     "Nozzle variants for a model"),
+    ("/api/profiles/machines/{machine_ref}/presets", "GET", f"{PREFIX}/profiles/machines/{{machine_ref}}/presets",
+     "v1 profiles", "Presets compatible with a machine"),
+    ("/api/profiles/machines/{machine_ref}/supports", "GET", f"{PREFIX}/profiles/machines/{{machine_ref}}/supports",
+     "v1 profiles", "Capabilities of a machine"),
+    ("/api/cleanup", "POST", f"{PREFIX}/cleanup", "v1 maintenance", "Clean up stale job directories"),
+]
+LEGACY_TO_V1.update({old: new for old, _m, new, _t, _s in V1_ALIASES})
+
 def _legacy_deprecation_enabled() -> bool:
     # Off by default: v1 ships additively, legacy responses stay byte-for-byte what
     # consumers already get. Flipped on once consumers have moved (BIZ-334).
@@ -168,7 +200,10 @@ def install(app: FastAPI, m) -> None:
                        "binary_version": m._orcaslicer_version},
             "ready": {"catalog": m.catalog is not None and m.catalog.is_built},
             "features": ["jobs", "jobs.idempotency", "jobs.events", "pagination.cursor",
-                         "profiles", "projects.inspect", "projects.subset", "projects.merge"],
+                         "profiles", "projects.inspect", "projects.subset", "projects.merge",
+                         "projects.previews", "pack", "arrange", "health", "slice.prepared",
+                         "slice.thumbnail", "profiles.rescan", "profiles.broken", "profiles.upload",
+                         "profiles.merged_config", "profiles.neutral", "cleanup"],
             "limits": {"max_concurrent_jobs": m.MAX_CONCURRENT_JOBS,
                        "job_history_limit": m.JOB_HISTORY_LIMIT,
                        "max_page_size": _MAX_PAGE},
@@ -339,6 +374,17 @@ def install(app: FastAPI, m) -> None:
             raise _err(404, "artifact_gone", "Artifact was already downloaded, expired or lost in a restart.")
         return await m.download_sliced_file(job_id, background_tasks)
 
+    # ---- aliases: same handlers as the legacy routes, served under v1 (errors enveloped).
+    # Registered before the profile routes so literal paths (e.g. /profiles/broken) win over
+    # /profiles/{profile_uuid}.
+    legacy = {(r.path, meth): r for r in app.routes if hasattr(r, "endpoint") and hasattr(r, "methods")
+              for meth in r.methods}
+    for old, method, new, tag, summary in V1_ALIASES:
+        r = legacy[(old, method)]
+        app.add_api_route(new, r.endpoint, methods=[method], tags=[tag], summary=summary,
+                          description=r.description, responses=r.responses,
+                          operation_id=f"v1_{r.name}")
+
     # ---- profiles
     @app.get(f"{PREFIX}/profiles", tags=["v1 profiles"], summary="List profiles (cursor-paginated)",
              description="Flat list across machine/process/filament presets. `manufacturer`, `model` "
@@ -370,13 +416,3 @@ def install(app: FastAPI, m) -> None:
             raise _err(404, "profile_not_found", f"Profile UUID '{profile_uuid}' not found.")
         return cat._public(entry)
 
-    # ---- projects: same handlers as the legacy 3MF routes, served under v1 (errors enveloped)
-    legacy = {r.path: r for r in app.routes if hasattr(r, "endpoint") and hasattr(r, "methods")}
-    for old, new, summary in (
-            ("/api/3mf/objects", f"{PREFIX}/projects/inspect", "List objects in a 3MF project"),
-            ("/api/arrange/subset", f"{PREFIX}/projects/subset", "Subset a 3MF by object x quantity and arrange"),
-            ("/api/arrange/merge", f"{PREFIX}/projects/merge", "Merge selections from several 3MFs and arrange")):
-        r = legacy[old]
-        app.add_api_route(new, r.endpoint, methods=["POST"], tags=["v1 projects"], summary=summary,
-                          description=r.description, responses=r.responses,
-                          operation_id=f"v1_{r.name}")
