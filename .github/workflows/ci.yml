@@ -101,12 +101,30 @@ jobs:
   # Ordinus is not started: it never talks to Laminus.
   e2e-core:
     needs: [mock-image]
+    # PRs onto develop run against Concordia's develop instead (e2e-core-develop);
+    # a `uses:` ref can't be an expression, so the job is duplicated.
+    if: github.base_ref != 'develop'
     # A called workflow's token is capped by the caller's; Concordia's e2e logs
     # into GHCR with it.
     permissions:
       contents: read
       packages: read
     uses: mgomezdev/concordia/.github/workflows/e2e.yml@main
+    with:
+      profile: core
+      image_artifact: laminus-mock-ci-image
+      mock_laminus_image: laminus-mock:ci
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  e2e-core-develop:
+    needs: [mock-image]
+    if: github.base_ref == 'develop'
+    permissions:
+      contents: read
+      packages: read
+    uses: mgomezdev/concordia/.github/workflows/e2e.yml@develop
     with:
       profile: core
       image_artifact: laminus-mock-ci-image
