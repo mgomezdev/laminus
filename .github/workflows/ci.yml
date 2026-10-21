@@ -108,6 +108,9 @@ jobs:
       packages: read
     uses: mgomezdev/concordia/.github/workflows/e2e.yml@main
     with:
+      # PRs onto develop run Concordia's develop suite. Kept as one job (not a
+      # separate @develop one) so the required check stays "e2e-core / e2e".
+      concordia_ref: ${{ github.base_ref == 'develop' && 'develop' || 'main' }}
       profile: core
       image_artifact: laminus-mock-ci-image
       mock_laminus_image: laminus-mock:ci
