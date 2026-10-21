@@ -25,6 +25,18 @@ from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf, inject_stls_into_3mf as _i
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("laminus")
 
+
+def _form_default_true(value) -> bool:
+    # Recent FastAPI coerces an omitted bool Form field -- even `Optional[str] = Form(None)`
+    # and `bool = Form(True)` -- to False (HTML-checkbox semantics). True-default flags
+    # therefore take `Optional[str] = Form(None)` and are parsed here; omitted means True.
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ("false", "0", "no", "off", "")
+
+
 CONFIG_DIR = "/config"
 USER_CONFIG_DIR = os.environ.get("USER_CONFIG_DIR", os.path.join(CONFIG_DIR, "user"))
 # The datadir passed to the OrcaSlicer CLI itself (--datadir). Set by entrypoint.sh to
@@ -1039,9 +1051,10 @@ async def start_slice(
     filament_uuids: str = Form(..., description='JSON array, e.g. ["uuid1"]'),
     plate: int = Form(...),
     export_3mf: Optional[str] = Form(None),
-    geometry_only_retry: bool = Form(True),
+    geometry_only_retry: Optional[str] = Form(None),
     extra_config: Optional[str] = Form(None, description='JSON object merged into project settings after resolution'),
 ):
+    geometry_only_retry = _form_default_true(geometry_only_retry)
     if catalog is None:
         raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
 
@@ -1210,8 +1223,9 @@ async def slice_prepared(
     file: UploadFile = File(...),
     plate: int = Form(...),
     export_3mf: Optional[str] = Form(None),
-    geometry_only_retry: bool = Form(True),
+    geometry_only_retry: Optional[str] = Form(None),
 ):
+    geometry_only_retry = _form_default_true(geometry_only_retry)
     if plate < 1:
         raise HTTPException(status_code=422, detail="plate must be >= 1.")
 
@@ -1849,9 +1863,11 @@ async def pack_stls(
 async def auto_arrange_3mf(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    arrange: bool = Form(True),
-    orient: bool = Form(True),
+    arrange: Optional[str] = Form(None),
+    orient: Optional[str] = Form(None),
 ):
+    arrange = _form_default_true(arrange)
+    orient = _form_default_true(orient)
     # Fix R1: _safe_filename now guards against None before any attribute access
     try:
         safe_name = _safe_filename(file.filename)
@@ -2028,8 +2044,9 @@ async def _oracle_arrange_and_transplant(sub_file: str, oracle_in: str, out_file
 async def preview_3mf_objects(
     file: UploadFile = File(...),
     size: int = Form(256),
-    images: bool = Form(True),
+    images: Optional[str] = Form(None),
 ):
+    images = _form_default_true(images)
     if not 32 <= size <= 1024:
         raise HTTPException(status_code=422, detail="size must be between 32 and 1024.")
     job_dir = os.path.join(ARRANGE_DIR, f"prev_{uuid.uuid4()}")

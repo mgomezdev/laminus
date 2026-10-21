@@ -214,10 +214,11 @@ def install(app: FastAPI, m) -> None:
         filament_uuids: str = Form(..., description='JSON array, e.g. ["uuid1"]'),
         plate: int = Form(...),
         export_3mf: Optional[str] = Form(None),
-        geometry_only_retry: bool = Form(True),
+        geometry_only_retry: Optional[str] = Form(None),
         extra_config: Optional[str] = Form(None, description="JSON object merged into project settings"),
     ):
-        key = request.headers.get("Idempotency-Key")
+        geometry_only_retry = m._form_default_true(geometry_only_retry)
+        key =request.headers.get("Idempotency-Key")
         fp = None
         if key is not None:
             if not key.strip() or len(key) > 255:
