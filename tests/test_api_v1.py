@@ -169,7 +169,8 @@ def test_legacy_routes_carry_deprecation_headers_when_enabled(monkeypatch):
     assert r.status_code == 200 and r.json() == {"jobs": []}  # body unchanged
     assert r.headers["Deprecation"] == "true"
     assert r.headers["Link"] == '</api/v1/jobs>; rel="successor-version"'
-    assert "Deprecation" not in client.get("/api/health").headers
+    health = client.get("/api/health")
+    assert health.headers["Link"] == '</api/v1/health>; rel="successor-version"'
     assert "Deprecation" not in client.get("/api/v1/jobs").headers
 
 
@@ -250,3 +251,16 @@ def test_every_legacy_mapping_points_at_a_real_v1_route():
     paths = {r.path for r in main_mod.app.routes}
     for old, new in api_v1.LEGACY_TO_V1.items():
         assert old in paths and new in paths, (old, new)
+
+
+def test_every_alias_is_served_under_v1():
+    have = {(m, r.path) for r in main_mod.app.routes if hasattr(r, "methods") for m in r.methods}
+    for _old, method, new, _tag, _summary in api_v1.V1_ALIASES:
+        assert (method, new) in have, (method, new)
+
+
+def test_v1_health_and_literal_profile_paths_beat_uuid_route():
+    r = client.get("/api/v1/health")
+    assert r.status_code == 200 and r.headers["API-Version"] == "v1"
+    r = client.get("/api/v1/profiles/broken")
+    assert r.status_code != 404 or r.json()["error"]["code"] != "profile_not_found"

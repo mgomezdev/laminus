@@ -6,6 +6,13 @@
       "200"
     ]
   },
+  "GET /api/v1/health": {
+    "required_body": [],
+    "required_params": [],
+    "responses": [
+      "200"
+    ]
+  },
   "GET /api/v1/jobs": {
     "required_body": [],
     "required_params": [],
@@ -57,6 +64,37 @@
       "503"
     ]
   },
+  "GET /api/v1/profiles/broken": {
+    "required_body": [],
+    "required_params": [],
+    "responses": [
+      "200",
+      "503"
+    ]
+  },
+  "GET /api/v1/profiles/machines/{machine_ref}/presets": {
+    "required_body": [],
+    "required_params": [
+      "path:machine_ref"
+    ],
+    "responses": [
+      "200",
+      "404",
+      "422",
+      "503"
+    ]
+  },
+  "GET /api/v1/profiles/machines/{machine_ref}/supports": {
+    "required_body": [],
+    "required_params": [
+      "path:machine_ref"
+    ],
+    "responses": [
+      "200",
+      "422",
+      "503"
+    ]
+  },
   "GET /api/v1/profiles/{profile_uuid}": {
     "required_body": [],
     "required_params": [
@@ -67,6 +105,27 @@
       "404",
       "422",
       "503"
+    ]
+  },
+  "POST /api/v1/arrange": {
+    "required_body": [
+      "file"
+    ],
+    "required_params": [],
+    "responses": [
+      "200",
+      "400",
+      "408",
+      "422",
+      "500"
+    ]
+  },
+  "POST /api/v1/cleanup": {
+    "required_body": [],
+    "required_params": [],
+    "responses": [
+      "200",
+      "422"
     ]
   },
   "POST /api/v1/jobs": {
@@ -82,6 +141,76 @@
       "409",
       "422",
       "503"
+    ]
+  },
+  "POST /api/v1/pack": {
+    "required_body": [
+      "files"
+    ],
+    "required_params": [],
+    "responses": [
+      "200",
+      "400",
+      "408",
+      "422",
+      "500",
+      "503"
+    ]
+  },
+  "POST /api/v1/profiles/machines/suggest": {
+    "required_body": [
+      "manufacturer",
+      "model"
+    ],
+    "required_params": [],
+    "responses": [
+      "200",
+      "422",
+      "503"
+    ]
+  },
+  "POST /api/v1/profiles/merged-config": {
+    "required_body": [
+      "filament_uuids",
+      "machine_uuid",
+      "process_uuid"
+    ],
+    "required_params": [],
+    "responses": [
+      "200",
+      "422",
+      "503"
+    ]
+  },
+  "POST /api/v1/profiles/models/variants": {
+    "required_body": [
+      "manufacturer",
+      "model"
+    ],
+    "required_params": [],
+    "responses": [
+      "200",
+      "422",
+      "503"
+    ]
+  },
+  "POST /api/v1/profiles/rescan": {
+    "required_body": [],
+    "required_params": [],
+    "responses": [
+      "200"
+    ]
+  },
+  "POST /api/v1/profiles/upload": {
+    "required_body": [
+      "file",
+      "type"
+    ],
+    "required_params": [],
+    "responses": [
+      "200",
+      "400",
+      "422"
     ]
   },
   "POST /api/v1/projects/inspect": {
@@ -109,6 +238,17 @@
       "503"
     ]
   },
+  "POST /api/v1/projects/previews": {
+    "required_body": [
+      "file"
+    ],
+    "required_params": [],
+    "responses": [
+      "200",
+      "400",
+      "422"
+    ]
+  },
   "POST /api/v1/projects/subset": {
     "required_body": [
       "file",
@@ -121,6 +261,30 @@
       "408",
       "422",
       "503"
+    ]
+  },
+  "POST /api/v1/slice/prepared": {
+    "required_body": [
+      "file",
+      "plate"
+    ],
+    "required_params": [],
+    "responses": [
+      "200",
+      "400",
+      "422",
+      "503"
+    ]
+  },
+  "POST /api/v1/slice/thumbnail": {
+    "required_body": [
+      "file",
+      "plate"
+    ],
+    "required_params": [],
+    "responses": [
+      "200",
+      "422"
     ]
   }
 }
