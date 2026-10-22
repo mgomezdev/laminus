@@ -12,7 +12,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 import pytest
-import requests
+import httpx
 
 BASE = os.environ.get("LAMINUS_URL", "").rstrip("/")
 pytestmark = pytest.mark.skipif(not BASE, reason="LAMINUS_URL not set (needs a live Laminus + OrcaSlicer)")
@@ -39,7 +39,7 @@ def cube_stl(size: float) -> bytes:
 def pack(stls, qty=None, bed=(100, 100, 100), timeout=150, path="/api/pack", items=None):
     """stls: list of (filename, bytes); qty: copy counts aligned with stls (sent as `items`).
 
-    Pass `items` (raw str) to send an arbitrary manifest. Returns the requests.Response.
+    Pass `items` (raw str) to send an arbitrary manifest. Returns the httpx.Response.
     """
     files = [("files", (n, b, "application/octet-stream")) for n, b in stls]
     data = {"bed_x": bed[0], "bed_y": bed[1], "bed_z": bed[2]}
@@ -47,7 +47,7 @@ def pack(stls, qty=None, bed=(100, 100, 100), timeout=150, path="/api/pack", ite
         items = json.dumps([{"file": n, "quantity": q} for (n, _), q in zip(stls, qty)])
     if items is not None:
         data["items"] = items
-    return requests.post(f"{BASE}{path}", files=files, data=data, timeout=timeout)
+    return httpx.post(f"{BASE}{path}", files=files, data=data, timeout=timeout)
 
 
 def analyse(content: bytes):
@@ -89,7 +89,7 @@ def analyse(content: bytes):
 @pytest.fixture(scope="module", autouse=True)
 def _live():
     try:
-        r = requests.get(f"{BASE}/api/health", timeout=5)
+        r = httpx.get(f"{BASE}/api/health", timeout=5)
         assert r.json().get("orcaslicer_installed")
     except Exception as e:  # pragma: no cover
         pytest.skip(f"Laminus not reachable at {BASE}: {e}")
@@ -222,6 +222,6 @@ def test_too_many_unique_files_still_422():
 
 
 def test_rejection_does_not_leak_work_dirs():
-    before = requests.get(f"{BASE}/api/health", timeout=5).json().get("active_jobs")
+    before = httpx.get(f"{BASE}/api/health", timeout=5).json().get("active_jobs")
     pack([A, B], [0,1])
-    assert requests.get(f"{BASE}/api/health", timeout=5).json().get("active_jobs") == before
+    assert httpx.get(f"{BASE}/api/health", timeout=5).json().get("active_jobs") == before
