@@ -109,13 +109,13 @@ def parse_stl_triangles(path: str) -> list[tuple]:
     return _parse_binary(path) if _is_binary(path) else _parse_ascii(path)
 
 
-def _object_model_xml(tris: list[tuple]) -> str:
-    """Build a 3D/Objects/*.model XML string for a single mesh (internal id always 1)."""
+def _object_model_xml(tris: list[tuple], object_id: int = 1) -> str:
+    """Build a 3D/Objects/*.model XML string for a single mesh."""
     verts, tris_xml = _mesh_body(tris, "     ")
     return (
         _OBJ_MODEL_HEADER
         + ' <resources>\n'
-          '  <object id="1" type="model">\n'
+        + f'  <object id="{object_id}" type="model">\n'
           '   <mesh>\n'
           '    <vertices>\n'
         + verts
@@ -172,14 +172,14 @@ def inject_stls_into_3mf(
         tris = parse_stl_triangles(stl_path)
         if not tris:
             raise ValueError(f"No triangles found in '{os.path.basename(stl_path)}' (empty or unparseable STL)")
-        object_files[obj_path] = _object_model_xml(tris).encode("utf-8")
+        object_files[obj_path] = _object_model_xml(tris, i).encode("utf-8")
 
         for _ in range(qty):
             wrapper_id += 2  # 2, 4, 6, … — matches OrcaSlicer component/wrapper pattern
             resources_parts.append(
                 f'  <object id="{wrapper_id}" type="model">\n'
                 f'   <components>\n'
-                f'    <component p:path="/{obj_path}" objectid="1"'
+                f'    <component p:path="/{obj_path}" objectid="{i}"'
                 f' transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n'
                 f'   </components>\n'
                 f'  </object>'

@@ -115,6 +115,21 @@ def test_inject_quantities_share_one_mesh(tmp_path):
     assert xml.count("ascii_2.model") == 1
 
 
+def test_inject_object_ids_unique_per_stl(tmp_path):
+    # OrcaSlicer collapses components that share objectid across different mesh files
+    # onto the first mesh (distinct STLs came out as copies of the first one).
+    template = _make_template_3mf(str(tmp_path / "tmpl.3mf"))
+    stls = [_binary_stl(tmp_path), _ascii_stl(tmp_path)]
+    out = str(tmp_path / "out.3mf")
+    inject_stls_into_3mf(template, stls, out, [2, 1])
+    with zipfile.ZipFile(out) as zf:
+        main = zf.read("3D/3dmodel.model").decode()
+        assert 'p:path="/3D/Objects/cube_1.model" objectid="1"' in main
+        assert 'p:path="/3D/Objects/ascii_2.model" objectid="2"' in main
+        assert '<object id="1"' in zf.read("3D/Objects/cube_1.model").decode()
+        assert '<object id="2"' in zf.read("3D/Objects/ascii_2.model").decode()
+
+
 def test_inject_quantities_length_mismatch_raises(tmp_path):
     template = _make_template_3mf(str(tmp_path / "tmpl.3mf"))
     with pytest.raises(ValueError, match="quantities"):
