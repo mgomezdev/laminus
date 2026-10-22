@@ -330,6 +330,31 @@ curl -X POST http://localhost:5000/api/arrange \
 
 ---
 
+## Pack STLs onto plates (synchronous)
+
+```
+POST /api/pack      (also /api/v1/pack)
+Content-Type: multipart/form-data
+```
+
+| Field        | Type      | Required | Description                                                        |
+|--------------|-----------|----------|--------------------------------------------------------------------|
+| `files`      | file[]    | yes      | 1–50 `.stl` files                                                  |
+| `quantities` | JSON text | no       | Positive ints aligned by index with `files`, e.g. `[3, 1, 12]`     |
+| bed source   |           | yes      | One of `template`, `machine_uuid`+`process_uuid`+`filament_uuids`, `bed_x`+`bed_y`+`bed_z` |
+
+`quantities` omitted = 1 copy each. Each STL yields N arranged copies sharing one mesh in the 3MF, spread over as many plates as needed. 422 on non-array, length mismatch with `files`, any value < 1, or total copies > 500. The 50 cap applies to unique files.
+
+```bash
+curl -X POST http://localhost:5000/api/pack \
+  -F "files=@a.stl" -F "files=@b.stl" -F 'quantities=[3,1]' \
+  -F bed_x=256 -F bed_y=256 -F bed_z=256 -o packed.3mf
+```
+
+Returns `.3mf` (`application/octet-stream`). Timeout: 120 seconds.
+
+---
+
 ## List objects with plate names and previews
 
 ```

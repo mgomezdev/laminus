@@ -130,15 +130,29 @@ def _object_model_xml(tris: list[tuple]) -> str:
     )
 
 
-def inject_stls_into_3mf(template_path: str, stl_paths: list[str], out_path: str) -> None:
+def inject_stls_into_3mf(
+    template_path: str,
+    stl_paths: list[str],
+    out_path: str,
+    quantities: list[int] | None = None,
+) -> None:
     """Build a 3MF that carries settings from *template_path* and geometry from *stl_paths*.
 
     The template's Metadata/project_settings.config (with all printer fields) is preserved
     verbatim. All geometry in the template is discarded and replaced with fresh objects
     built from the supplied STL files. The result is ready for OrcaSlicer --arrange.
 
-    Raises ValueError if the template lacks Metadata/project_settings.config.
+    *quantities* (aligned with *stl_paths*, default 1 each) yields that many build items per
+    STL; all copies of one STL reference a single shared mesh file.
+
+    Raises ValueError if the template lacks Metadata/project_settings.config, or if
+    *quantities* does not match *stl_paths* in length.
     """
+    if quantities is None:
+        quantities = [1] * len(stl_paths)
+    if len(quantities) != len(stl_paths):
+        raise ValueError("quantities must have the same length as stl_paths")
+
     with zipfile.ZipFile(template_path, "r") as src:
         names = src.namelist()
         if "Metadata/project_settings.config" not in names:
@@ -150,25 +164,27 @@ def inject_stls_into_3mf(template_path: str, stl_paths: list[str], out_path: str
     build_parts: list[str] = []
     rels_parts: list[str] = []
 
-    for i, stl_path in enumerate(stl_paths, start=1):
+    wrapper_id = 0
+    for i, (stl_path, qty) in enumerate(zip(stl_paths, quantities), start=1):
         stem = os.path.splitext(os.path.basename(stl_path))[0]
         obj_path = f"3D/Objects/{stem}_{i}.model"
-        wrapper_id = i * 2  # 2, 4, 6, … — matches OrcaSlicer component/wrapper pattern
 
         tris = parse_stl_triangles(stl_path)
         if not tris:
             raise ValueError(f"No triangles found in '{os.path.basename(stl_path)}' (empty or unparseable STL)")
         object_files[obj_path] = _object_model_xml(tris).encode("utf-8")
 
-        resources_parts.append(
-            f'  <object id="{wrapper_id}" type="model">\n'
-            f'   <components>\n'
-            f'    <component p:path="/{obj_path}" objectid="1"'
-            f' transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n'
-            f'   </components>\n'
-            f'  </object>'
-        )
-        build_parts.append(f'  <item objectid="{wrapper_id}" printable="1"/>')
+        for _ in range(qty):
+            wrapper_id += 2  # 2, 4, 6, … — matches OrcaSlicer component/wrapper pattern
+            resources_parts.append(
+                f'  <object id="{wrapper_id}" type="model">\n'
+                f'   <components>\n'
+                f'    <component p:path="/{obj_path}" objectid="1"'
+                f' transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n'
+                f'   </components>\n'
+                f'  </object>'
+            )
+            build_parts.append(f'  <item objectid="{wrapper_id}" printable="1"/>')
         rels_parts.append(
             f' <Relationship Target="/{obj_path}" Id="rel-{i}"'
             f' Type="{_REL_TYPE_3D}"/>'

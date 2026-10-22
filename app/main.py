@@ -67,6 +67,7 @@ _orcaslicer_version: Optional[str] = None
 _catalog_task: Optional[asyncio.Task] = None
 # Template cache: maps (machine_uuid, process_uuid, filament_uuids_key) → 3MF bytes
 _template_cache: Dict[str, bytes] = {}
+PACK_MAX_INSTANCES = 500  # total copies across all STLs in one /api/pack call
 
 
 # Fix R6: lifespan context runs startup/shutdown logic and background eviction task
@@ -177,7 +178,7 @@ app = FastAPI(
         "Retry after `GET /api/health` reports `catalog_loaded: true`.\n"
         "- **400 / 408 / 500** — OrcaSlicer-side failures; check server logs for details."
     ),
-    version="0.10.2",
+    version="0.11.0",
     lifespan=lifespan,
     openapi_tags=[
         {
@@ -1586,7 +1587,11 @@ def _build_bed_template_bytes(printable_area: list, printable_height: float) -> 
         "## STL inputs\n\n"
         "- `files` — one or more `.stl` files (max 50 per request)\n"
         "- Filenames must not contain null bytes, newlines, or semicolons\n"
-        "- Duplicate filenames in the same batch are deduplicated with a numeric suffix\n\n"
+        "- Duplicate filenames in the same batch are deduplicated with a numeric suffix\n"
+        "- `quantities` (optional) — JSON array of positive ints aligned by index with `files`, "
+        "e.g. `[3, 1, 12]`. Each STL yields that many arranged copies sharing one mesh in the "
+        "3MF. Omitted = 1 each. Length mismatch or any value < 1 → 422. The 50 cap applies to "
+        f"unique files; total copies are capped at {PACK_MAX_INSTANCES}.\n\n"
         "## Notes\n\n"
         "- OrcaSlicer auto-orients objects (`--orient 1`) to minimise support material. "
         "Pass orient=false to skip (not yet exposed as a parameter — file a request).\n"
@@ -1606,6 +1611,7 @@ def _build_bed_template_bytes(printable_area: list, printable_height: float) -> 
             "description": (
                 "No STL files provided, more than 50 STLs, non-.stl file in files list, "
                 "non-.3mf template, bed dimensions ≤ 0, invalid filament_uuids JSON, "
+                "invalid/mismatched/<1 `quantities` or total copies over the cap, "
                 "UUID not found in catalog, or no settings source provided"
             ),
         },
@@ -1623,11 +1629,43 @@ async def pack_stls(
     bed_x: Optional[float] = Form(None, description="Bed X dimension in mm (alternative to template / UUIDs)"),
     bed_y: Optional[float] = Form(None, description="Bed Y dimension in mm"),
     bed_z: Optional[float] = Form(None, description="Bed Z printable height in mm"),
+    quantities: Optional[str] = Form(
+        None,
+        description=(
+            "JSON array of positive ints aligned by index with `files`, e.g. `[3, 1, 12]`. "
+            f"Omitted = 1 copy each. Total copies capped at {PACK_MAX_INSTANCES}."
+        ),
+    ),
 ):
     if not files:
         raise HTTPException(status_code=422, detail="At least one STL file is required.")
     if len(files) > 50:
         raise HTTPException(status_code=422, detail="Maximum 50 STL files per request.")
+
+    qty_list: Optional[list[int]] = None
+    if quantities is not None:
+        try:
+            parsed = json.loads(quantities)
+        except ValueError:
+            parsed = None
+        if (
+            not isinstance(parsed, list)
+            or any(isinstance(q, bool) or not isinstance(q, int) for q in parsed)
+        ):
+            raise HTTPException(status_code=422, detail="quantities must be a JSON array of integers.")
+        if len(parsed) != len(files):
+            raise HTTPException(
+                status_code=422,
+                detail=f"quantities has {len(parsed)} entries but {len(files)} files were uploaded.",
+            )
+        if any(q < 1 for q in parsed):
+            raise HTTPException(status_code=422, detail="Every quantity must be >= 1.")
+        if sum(parsed) > PACK_MAX_INSTANCES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Total instances ({sum(parsed)}) exceeds the maximum of {PACK_MAX_INSTANCES}.",
+            )
+        qty_list = parsed
 
     # Validate STL filenames, deduplicating repeats within the batch with a numeric
     # suffix so two uploads named e.g. "bracket.stl" don't overwrite one another on disk.
@@ -1760,7 +1798,7 @@ async def pack_stls(
         # Inject STL geometry into the template (preserves project_settings.config)
         combined_3mf = os.path.join(input_dir, "combined.3mf")
         try:
-            await asyncio.to_thread(_inject_stls_into_3mf, template_path, stl_paths, combined_3mf)
+            await asyncio.to_thread(_inject_stls_into_3mf, template_path, stl_paths, combined_3mf, qty_list)
         except ValueError as e:
             background_tasks.add_task(cleanup_directory, job_dir)
             raise HTTPException(status_code=422, detail=str(e))
