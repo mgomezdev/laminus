@@ -95,6 +95,17 @@ def _err(status: int, code: str, message: str, headers: Optional[dict] = None):
     return HTTPException(status_code=status, detail={"code": code, "message": message}, headers=headers)
 
 
+class DetailedHTTPException(HTTPException):
+    """HTTPException with structured ``details`` shown only in the v1 envelope.
+
+    Legacy routes keep serialising ``detail`` (a plain message) so their contract is unchanged.
+    """
+
+    def __init__(self, status_code: int, detail: str, code: str, details: list):
+        super().__init__(status_code=status_code, detail=detail)
+        self.code, self.details = code, details
+
+
 def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", None) or str(uuid.uuid4())
 
@@ -102,7 +113,7 @@ def _request_id(request: Request) -> str:
 def _envelope(request: Request, status: int, detail, headers: Optional[dict] = None) -> JSONResponse:
     details = None
     if isinstance(detail, dict) and "code" in detail:
-        code, message = detail["code"], detail.get("message", "")
+        code, message, details = detail["code"], detail.get("message", ""), detail.get("details")
     elif isinstance(detail, str):
         code, message = _DEFAULT_CODES.get(status, "error"), detail
     else:  # validation error list or arbitrary structure
@@ -171,7 +182,10 @@ def install(app: FastAPI, m) -> None:
     @app.exception_handler(StarletteHTTPException)
     async def _http_exc(request: Request, exc: StarletteHTTPException):
         if _is_v1(request):
-            return _envelope(request, exc.status_code, exc.detail, getattr(exc, "headers", None))
+            detail = exc.detail
+            if isinstance(exc, DetailedHTTPException):
+                detail = {"code": exc.code, "message": exc.detail, "details": exc.details}
+            return _envelope(request, exc.status_code, detail, getattr(exc, "headers", None))
         return await http_exception_handler(request, exc)
 
     @app.exception_handler(RequestValidationError)

@@ -100,6 +100,42 @@ def test_inject_multiple_stls_creates_separate_objects(tmp_path):
         assert 'Id="rel-2"' in rels
 
 
+def test_inject_quantities_share_one_mesh(tmp_path):
+    template = _make_template_3mf(str(tmp_path / "tmpl.3mf"))
+    stls = [_binary_stl(tmp_path), _ascii_stl(tmp_path)]
+    out = str(tmp_path / "out.3mf")
+    inject_stls_into_3mf(template, stls, out, [3, 1])
+    with zipfile.ZipFile(out) as zf:
+        obj_files = [n for n in zf.namelist() if n.startswith("3D/Objects/")]
+        assert len(obj_files) == 2
+        xml = zf.read("3D/3dmodel.model").decode()
+    assert xml.count("<item ") == 4
+    assert xml.count("<component ") == 4
+    assert xml.count("cube_1.model") == 3
+    assert xml.count("ascii_2.model") == 1
+
+
+def test_inject_object_ids_unique_per_stl(tmp_path):
+    # OrcaSlicer collapses components that share objectid across different mesh files
+    # onto the first mesh (distinct STLs came out as copies of the first one).
+    template = _make_template_3mf(str(tmp_path / "tmpl.3mf"))
+    stls = [_binary_stl(tmp_path), _ascii_stl(tmp_path)]
+    out = str(tmp_path / "out.3mf")
+    inject_stls_into_3mf(template, stls, out, [2, 1])
+    with zipfile.ZipFile(out) as zf:
+        main = zf.read("3D/3dmodel.model").decode()
+        assert 'p:path="/3D/Objects/cube_1.model" objectid="1"' in main
+        assert 'p:path="/3D/Objects/ascii_2.model" objectid="2"' in main
+        assert '<object id="1"' in zf.read("3D/Objects/cube_1.model").decode()
+        assert '<object id="2"' in zf.read("3D/Objects/ascii_2.model").decode()
+
+
+def test_inject_quantities_length_mismatch_raises(tmp_path):
+    template = _make_template_3mf(str(tmp_path / "tmpl.3mf"))
+    with pytest.raises(ValueError, match="quantities"):
+        inject_stls_into_3mf(template, [_binary_stl(tmp_path)], str(tmp_path / "o.3mf"), [1, 2])
+
+
 def test_inject_missing_project_settings_raises(tmp_path):
     bad = str(tmp_path / "bad.3mf")
     with zipfile.ZipFile(bad, "w") as zf:

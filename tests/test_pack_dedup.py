@@ -23,7 +23,7 @@ def _stl() -> bytes:
 def test_pack_dedupes_duplicate_stl_filenames():
     captured = {}
 
-    def _fake_inject(template_path, stl_paths, out_path):
+    def _fake_inject(template_path, stl_paths, out_path, quantities=None):
         # Capture + verify existence here, while the job directory is still alive -
         # background_tasks cleanup deletes it once the response has been sent.
         captured["stl_paths"] = list(stl_paths)
