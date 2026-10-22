@@ -42,7 +42,24 @@ def build_project_settings(machine: dict, process: dict, filaments: list[dict]) 
     # layer_gcode must contain G92 E0 or the slicer aborts. Docker AppImage profiles
     # omit the key entirely; inject the minimal safe default when absent.
     config.setdefault("layer_gcode", "G92 E0\n")
+    _ensure_extruder_reset_per_layer(config)
     return config
+
+
+def _ensure_extruder_reset_per_layer(config: dict) -> None:
+    """OrcaSlicer 2.4 refuses to slice with relative extruder addressing (-51) unless
+    ``before_layer_change_gcode`` contains ``G92 E0`` - the error text names the legacy
+    ``layer_gcode`` key, which the slicer no longer reads. Klipper presets (e.g. Elegoo
+    Centauri Carbon) are treated as relative even with ``use_relative_e_distances`` off, and
+    their vendor presets leave this key unset. A per-layer extruder reset is a no-op for
+    relative addressing, so add it whenever relative addressing applies."""
+    relative = (str(config.get("use_relative_e_distances", "")).lower() in ("1", "true")
+                or config.get("gcode_flavor") == "klipper")
+    if not relative:
+        return
+    current = config.get("before_layer_change_gcode") or ""
+    if "G92 E0" not in current:
+        config["before_layer_change_gcode"] = (current.rstrip("\n") + "\n" if current else "") + "G92 E0\n"
 
 
 def embed_project_settings(src_3mf: str, project_settings: dict, dst_3mf: str) -> None:
