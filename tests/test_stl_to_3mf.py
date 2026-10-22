@@ -211,3 +211,38 @@ def test_binary_stl_with_solid_header(tmp_path):
     with zipfile.ZipFile(dst) as zf:
         xml = zf.read("3D/3dmodel.model").decode()
     assert xml.count("<vertex ") == 3
+
+
+def test_stl_min_z_and_restore_build_item_z(tmp_path):
+    import struct
+    import zipfile
+    from app.stl_to_3mf import restore_build_item_z, stl_min_z
+
+    stl = tmp_path / "p.stl"
+    tri = [(0, 0, 5.0), (1, 0, 7.0), (0, 1, 9.0)]
+    stl.write_bytes(b"\0" * 80 + struct.pack("<I", 1) + struct.pack("<3f", 0, 0, 1)
+                    + b"".join(struct.pack("<3f", *v) for v in tri) + b"\0\0")
+    assert stl_min_z(str(stl)) == 5.0
+
+    model = ('<model><build>'
+             '<item objectid="2" transform="1 0 0 0 1 0 0 0 1 10 20 0"/>'
+             '<item objectid="4" printable="1" transform="0 1 0 -1 0 0 0 0 1 30 40 0.5"/>'
+             '</build></model>')
+    # Orca reorders objects: item 4 came from input instance 0, item 2 from instance 1
+    cfg = ('<config>'
+           '<object id="4"><part id="1"><metadata key="source_object_id" value="0"/></part></object>'
+           '<object id="2"><part id="1"><metadata key="source_object_id" value="1"/></part></object>'
+           '</config>')
+    packed = tmp_path / "packed.3mf"
+    with zipfile.ZipFile(packed, "w") as z:
+        z.writestr("3D/3dmodel.model", model)
+        z.writestr("Metadata/model_settings.config", cfg)
+    restore_build_item_z(str(packed), [5.0, -10.0])
+    with zipfile.ZipFile(packed) as z:
+        out = z.read("3D/3dmodel.model").decode()
+        assert z.read("Metadata/model_settings.config").decode() == cfg
+    assert 'transform="1 0 0 0 1 0 0 0 1 10 20 -10.0"' in out   # objectid 2 = instance 1
+    assert 'transform="0 1 0 -1 0 0 0 0 1 30 40 5.5"' in out    # objectid 4 = instance 0
+
+    with pytest.raises(ValueError):
+        restore_build_item_z(str(packed), [1.0])

@@ -261,3 +261,53 @@ def strip_application_version(src_path: str, dst_path: str) -> None:
                     except Exception:
                         pass
                 dst.writestr(item, data)
+
+
+def stl_min_z(stl_path: str) -> float:
+    """Lowest Z coordinate of an STL's vertices (0.0 if it has no triangles)."""
+    tris = parse_stl_triangles(stl_path)
+    return min((v[2] for tri in tris for v in tri), default=0.0)
+
+
+_BUILD_ITEM_RE = re.compile(r'(<item\b[^>]*?\btransform=")([^"]*)(")')
+
+
+def restore_build_item_z(packed_path: str, z_offsets: list[float]) -> None:
+    """Add z_offsets[k] to the Z translation of the build item for input instance k.
+
+    OrcaSlicer re-seats every object at min Z = 0 on load; call this to put each
+    instance back at its input STL's min Z. Valid only when no X/Y rotation was applied.
+    Orca reorders and renumbers objects, so instance k is found via the
+    `source_object_id` it records in Metadata/model_settings.config (the input position).
+    Rewrites *packed_path* in place; raises ValueError if the 3MF doesn't match z_offsets.
+    """
+    with zipfile.ZipFile(packed_path, "r") as src:
+        entries = [(info, src.read(info.filename)) for info in src.infolist()]
+    files = {info.filename: data for info, data in entries}
+
+    cfg = files.get("Metadata/model_settings.config", b"").decode("utf-8")
+    source_of: dict[str, int] = {}
+    for obj in re.finditer(r'<object id="(\d+)">(.*?)</object>', cfg, re.S):
+        m = re.search(r'key="source_object_id" value="(\d+)"', obj.group(2))
+        if m:
+            source_of[obj.group(1)] = int(m.group(1))
+
+    text = files["3D/3dmodel.model"].decode("utf-8")
+    items = list(_BUILD_ITEM_RE.finditer(text))
+    if len(items) != len(z_offsets):
+        raise ValueError(f"packed 3MF has {len(items)} build items, expected {len(z_offsets)}")
+
+    def _shift(m: re.Match) -> str:
+        oid = re.search(r'objectid="(\d+)"', m.group(0)).group(1)
+        k = source_of.get(oid)
+        if k is None or not 0 <= k < len(z_offsets):
+            raise ValueError(f"build item {oid} has no valid source_object_id")
+        vals = m.group(2).split()
+        vals[11] = repr(float(vals[11]) + z_offsets[k])
+        return m.group(1) + " ".join(vals) + m.group(3)
+
+    files["3D/3dmodel.model"] = _BUILD_ITEM_RE.sub(_shift, text).encode("utf-8")
+
+    with zipfile.ZipFile(packed_path, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+        for info, _ in entries:
+            dst.writestr(info.filename, files[info.filename])

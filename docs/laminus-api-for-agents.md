@@ -343,6 +343,8 @@ Content-Type: multipart/form-data
 | `items`      | JSON text | no       | `[{"file": "a.stl", "quantity": 3}, ...]` — pairs each upload with a copy count |
 | bed source   |           | yes      | One of `template`, `machine_uuid`+`process_uuid`+`filament_uuids`, `bed_x`+`bed_y`+`bed_z` |
 
+Orientation: parts are never tilted about X/Y (no auto-orient; layer-line direction is preserved). The arranger may rotate about Z. Each instance keeps its input STL's min Z, so models intentionally above or below the plate stay there.
+
 `items` omitted = 1 copy each. `file` is the uploaded filename; every upload needs exactly one entry (manifest order is irrelevant) and filenames must be unique when `items` is used. Each STL yields `quantity` arranged copies sharing one mesh in the 3MF, spread over as many plates as needed. 422 on bad JSON/shape, unknown/duplicate/missing file, quantity not an integer >= 1, or total copies > 500. The 50 cap applies to unique files.
 
 On `/api/v1/pack` the 422 envelope lists every problem in `error.details` (`loc`, `msg`, `type`, plus `input`/`ctx` where useful), e.g. `loc: ["body","items",1,"quantity"]`. The frozen legacy route returns only a summary string in `detail`.

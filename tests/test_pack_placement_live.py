@@ -2,9 +2,9 @@
 
 Every packed instance must (a) sit inside its plate's bed footprint, (b) keep the input
 model's geometry (rigid transform only), and (c) keep the input model's Z: a model whose
-min Z is not 0 in the input (e.g. a mini with geometry below the plate by design) must
-come back with the same min Z, not be re-seated. (c) only applies when Orca did not rotate
-the part, since `--orient 1` legitimately re-orients.
+min Z is not 0 in the input (e.g. a mini floating above or below the plate by design) must
+come back with the same min Z, not be re-seated. Parts may rotate about Z only; tilting
+about X/Y would change layer-line direction.
 
 Skipped unless LAMINUS_URL is set (see test_pack_quantities_live.py).
 """
@@ -68,7 +68,9 @@ def _shape_signature(v: np.ndarray) -> np.ndarray:
 
 
 def placements(content: bytes):
-    """Per build item (in build order): (world_vertices, rotated: bool, plate_index)."""
+    """Per instance, in input order: (world_vertices, tilted: bool, plate_index).
+
+    Orca reorders build items; the input position comes from `source_object_id`."""
     z = zipfile.ZipFile(io.BytesIO(content))
     root = ET.fromstring(z.read("3D/3dmodel.model"))
 
@@ -88,8 +90,10 @@ def placements(content: bytes):
         comp_path[o.get("id")] = c.get(_PNS + "path")
 
     cfg = ET.fromstring(z.read("Metadata/model_settings.config"))
-    part_matrix = {}
+    part_matrix, source_of = {}, {}
     for o in cfg.findall("object"):
+        source_of[o.get("id")] = int([md.get("value") for md in o.findall("part/metadata")
+                                      if md.get("key") == "source_object_id"][0])
         m = [md.get("value") for md in o.findall("part/metadata") if md.get("key") == "matrix"]
         part_matrix[o.get("id")] = np.array(m[0].split(), float).reshape(4, 4) if m else np.eye(4)
     plate_of = {}
@@ -109,10 +113,13 @@ def placements(content: bytes):
         verts = mesh(comp_path[oid])
         local = (m[:3, :3] @ verts.T).T + m[:3, 3]
         world = local @ item_rot + tr
-        rotated = not np.allclose(m[:3, :3] @ item_rot, np.eye(3), atol=1e-6)
+        up = item_rot.T @ m[:3, :3] @ np.array([0.0, 0.0, 1.0])  # where the part's +Z ends up
+        tilted = not np.allclose(up, [0, 0, 1], atol=1e-6)
         assert oid in plate_of, f"object {oid} is not on any plate"
-        out.append((world, rotated, plate_of[oid]))
-    return out, len(plates)
+        out.append((source_of[oid], world, tilted, plate_of[oid]))
+    out.sort(key=lambda r: r[0])
+    assert [r[0] for r in out] == list(range(len(out))), "source_object_id is not a permutation of the input"
+    return [r[1:] for r in out], len(plates)
 
 
 def plate_window(k, n_plates, bed):
@@ -126,7 +133,7 @@ def check_on_bed(content, expected, bed):
     """expected: flat list of Part, one per instance in build order."""
     items, n_plates = placements(content)
     assert len(items) == len(expected)
-    for idx, ((world, rotated, plate), part) in enumerate(zip(items, expected)):
+    for idx, ((world, tilted, plate), part) in enumerate(zip(items, expected)):
         label = f"{part.name}#{idx} (plate {plate + 1}/{n_plates})"
         assert np.allclose(_shape_signature(world), _shape_signature(part.verts), atol=1e-3), \
             f"{label}: geometry changed"
@@ -135,9 +142,9 @@ def check_on_bed(content, expected, bed):
         assert lo[0] >= ox - TOL and hi[0] <= ox + bed[0] + TOL, f"{label}: off bed in X {lo[0]:.2f}..{hi[0]:.2f}"
         assert lo[1] >= oy - TOL and hi[1] <= oy + bed[1] + TOL, f"{label}: off bed in Y {lo[1]:.2f}..{hi[1]:.2f}"
         assert hi[2] <= bed[2] + TOL, f"{label}: taller than bed_z"
-        if not rotated:
-            assert lo[2] == pytest.approx(part.verts[:, 2].min(), abs=TOL), \
-                f"{label}: min Z moved from {part.verts[:, 2].min()} to {lo[2]:.3f}"
+        assert not tilted, f"{label}: tilted about X/Y"
+        assert lo[2] == pytest.approx(part.verts[:, 2].min(), abs=TOL), \
+            f"{label}: min Z moved from {part.verts[:, 2].min()} to {lo[2]:.3f}"
 
 
 def expand(parts, qtys):
@@ -168,16 +175,23 @@ def test_checker_detects_off_bed():
         check_on_bed(content, [A], (45, 45, 100))
 
 
-# Orca seats every object on the bed on load/save (auto_drop="1"), so parts whose input
-# min Z != 0 currently come back lifted/dropped. These document that and flip (strict
-# xfail) when Z is preserved.
-_Z_DRIFT = "pack re-seats parts on the bed (Orca auto_drop); input min Z not preserved"
+FLOAT = Part("floating.stl", 20, 20, 5, 25)
+BELOW = Part("below_plate.stl", 20, 20, -10, 10)
+HIGH = Part("high.stl", 15, 25, 12.5, 40)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_Z_DRIFT)
-@pytest.mark.parametrize("part", [
-    Part("floating.stl", 20, 20, 5, 25),
-    Part("below_plate.stl", 20, 20, -10, 10),
-], ids=["floating", "below_plate"])
-def test_min_z_preserved_for_offset_models(part):
-    check_on_bed(pack([part], [2], (100, 100, 100)), expand([part], [2]), (100, 100, 100))
+@pytest.mark.parametrize("parts,qtys,bed", [
+    ([FLOAT], [2], (100, 100, 100)),
+    ([BELOW], [2], (100, 100, 100)),
+    ([FLOAT, BELOW, HIGH, A], [2, 2, 1, 1], (100, 100, 100)),  # distinct non-zero min Z's, plus one on the plate
+    ([FLOAT, BELOW, HIGH], [3, 3, 3], (60, 60, 100)),          # ...spread over several plates
+], ids=["floating", "below_plate", "mixed_min_z", "mixed_min_z_multi_plate"])
+def test_min_z_preserved_for_offset_models(parts, qtys, bed):
+    check_on_bed(pack(parts, qtys, bed), expand(parts, qtys), bed)
+
+
+def test_tall_part_not_tilted():
+    content = pack([TALL], [3], (100, 100, 100))
+    for world, tilted, _ in placements(content)[0]:
+        assert not tilted
+        assert np.ptp(world[:, 2]) == pytest.approx(80, abs=TOL)
