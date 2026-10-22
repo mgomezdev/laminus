@@ -4,6 +4,7 @@ Skipped unless LAMINUS_URL is set, e.g.:
     docker compose up -d && LAMINUS_URL=http://localhost:5000 pytest tests/test_pack_quantities_live.py
 """
 import io
+import json
 import os
 import re
 import struct
@@ -35,13 +36,18 @@ def cube_stl(size: float) -> bytes:
     return buf.getvalue()
 
 
-def pack(stls, quantities=None, bed=(100, 100, 100), timeout=150):
-    """stls: list of (filename, bytes). Returns the requests.Response."""
+def pack(stls, qty=None, bed=(100, 100, 100), timeout=150, path="/api/pack", items=None):
+    """stls: list of (filename, bytes); qty: copy counts aligned with stls (sent as `items`).
+
+    Pass `items` (raw str) to send an arbitrary manifest. Returns the requests.Response.
+    """
     files = [("files", (n, b, "application/octet-stream")) for n, b in stls]
     data = {"bed_x": bed[0], "bed_y": bed[1], "bed_z": bed[2]}
-    if quantities is not None:
-        data["quantities"] = quantities
-    return requests.post(f"{BASE}/api/pack", files=files, data=data, timeout=timeout)
+    if items is None and qty is not None:
+        items = json.dumps([{"file": n, "quantity": q} for (n, _), q in zip(stls, qty)])
+    if items is not None:
+        data["items"] = items
+    return requests.post(f"{BASE}{path}", files=files, data=data, timeout=timeout)
 
 
 def analyse(content: bytes):
@@ -95,7 +101,7 @@ A, B = ("a.stl", cube_stl(40)), ("b.stl", cube_stl(20))
 # ---- positive ---------------------------------------------------------------
 
 def test_acceptance_3_of_a_and_1_of_b():
-    r = pack([A, B], "[3,1]")
+    r = pack([A, B], [3,1])
     assert r.status_code == 200, r.text
     counts, _ = analyse(r.content)
     assert counts == {40: 3, 20: 1}
@@ -103,7 +109,7 @@ def test_acceptance_3_of_a_and_1_of_b():
 
 def test_copies_spill_onto_multiple_plates():
     # 60x60 bed fits exactly one 40mm cube per plate.
-    r = pack([A], "[3]", bed=(60, 60, 100))
+    r = pack([A], [3], bed=(60, 60, 100))
     assert r.status_code == 200, r.text
     counts, plates = analyse(r.content)
     assert counts == {40: 3}
@@ -111,14 +117,14 @@ def test_copies_spill_onto_multiple_plates():
 
 
 def test_single_file_high_quantity():
-    r = pack([B], "[12]")
+    r = pack([B], [12])
     assert r.status_code == 200, r.text
     counts, _ = analyse(r.content)
     assert counts == {20: 12}
 
 
-def test_quantities_all_ones_matches_legacy():
-    r1 = pack([A, B], "[1,1]")
+def test_all_ones_matches_legacy():
+    r1 = pack([A, B], [1,1])
     r2 = pack([A, B])
     assert r1.status_code == r2.status_code == 200
     assert analyse(r1.content)[0] == analyse(r2.content)[0] == {40: 1, 20: 1}
@@ -136,38 +142,78 @@ def test_legacy_duplicate_filenames_still_two_instances():
     assert analyse(r.content)[0] == {40: 2}
 
 
-def test_quantities_with_duplicate_filenames():
-    r = pack([A, A], "[2,1]")
-    assert r.status_code == 200, r.text
-    assert analyse(r.content)[0] == {40: 3}
-
-
 def test_total_at_cap_is_accepted():
-    r = pack([B], "[500]", bed=(256, 256, 256), timeout=300)
+    r = pack([B], [500], bed=(256, 256, 256), timeout=300)
     assert r.status_code == 200, r.text
     assert analyse(r.content)[0] == {20: 500}
 
 
 # ---- negative ---------------------------------------------------------------
 
-@pytest.mark.parametrize("quantities", [
-    "[1]",            # too few
-    "[1,1,1]",        # too many
-    "[]",             # empty
-    "[0,1]",          # zero
-    "[-1,1]",         # negative
-    "[1.5,1]",        # non-integer
-    "[true,1]",       # bool
-    '["2",1]',        # string
-    "not json",
-    '{"a":1}',
-    "5",              # scalar
-    "[501,1]",        # over total cap
-    "[250,251]",      # sum over cap
-])
-def test_bad_quantities_rejected_422(quantities):
-    r = pack([A, B], quantities)
-    assert r.status_code == 422, (quantities, r.status_code, r.text)
+def _it(file, quantity):
+    return {"file": file, "quantity": quantity}
+
+
+BAD = {
+    "not_json": "not json",
+    "object_not_array": '{"a":1}',
+    "scalar": "5",
+    "empty_array": "[]",
+    "missing_entry": [_it("a.stl", 1)],
+    "unknown_file": [_it("a.stl", 1), _it("zzz.stl", 1)],
+    "duplicate_entry": [_it("a.stl", 1), _it("a.stl", 1)],
+    "entry_not_object": ["a.stl", "b.stl"],
+    "missing_quantity": [_it("a.stl", 1), {"file": "b.stl"}],
+    "zero": [_it("a.stl", 0), _it("b.stl", 1)],
+    "negative": [_it("a.stl", -1), _it("b.stl", 1)],
+    "float": [_it("a.stl", 1.5), _it("b.stl", 1)],
+    "bool": [_it("a.stl", True), _it("b.stl", 1)],
+    "string_qty": [_it("a.stl", "2"), _it("b.stl", 1)],
+    "over_cap": [_it("a.stl", 501), _it("b.stl", 1)],
+    "sum_over_cap": [_it("a.stl", 250), _it("b.stl", 251)],
+}
+
+
+@pytest.mark.parametrize("items", BAD.values(), ids=BAD.keys())
+@pytest.mark.parametrize("path", ["/api/pack", "/api/v1/pack"])
+def test_bad_items_rejected_422(items, path):
+    raw = items if isinstance(items, str) else json.dumps(items)
+    r = pack([A, B], items=raw, path=path)
+    assert r.status_code == 422, (items, r.status_code, r.text)
+
+
+def test_duplicate_upload_filenames_rejected_when_items_given():
+    r = pack([A, A], items=json.dumps([_it("a.stl", 1), _it("a.stl", 1)]))
+    assert r.status_code == 422
+
+
+def test_v1_error_details_point_at_each_problem():
+    r = pack([A, B], items=json.dumps([_it("a.stl", 0), _it("zzz.stl", 2), _it("b.stl", 1.5)]),
+             path="/api/v1/pack")
+    assert r.status_code == 422
+    err = r.json()["error"]
+    assert err["code"] == "validation_error"
+    locs = {tuple(d["loc"]): d["msg"] for d in err["details"]}
+    assert locs[("body", "items", 0, "quantity")] == "must be >= 1"
+    assert ("body", "items", 1, "file") in locs
+    assert locs[("body", "items", 2, "quantity")] == "must be an integer"
+
+
+def test_legacy_error_stays_plain_string():
+    r = pack([A, B], items=json.dumps([_it("a.stl", 0), _it("b.stl", 1)]))
+    assert r.status_code == 422 and isinstance(r.json()["detail"], str)
+
+
+def test_v1_pack_with_items_works():
+    r = pack([A, B], [2, 1], path="/api/v1/pack")
+    assert r.status_code == 200, r.text
+    assert analyse(r.content)[0] == {40: 2, 20: 1}
+
+
+def test_items_order_independent_of_upload_order():
+    r = pack([A, B], items=json.dumps([_it("b.stl", 1), _it("a.stl", 3)]))
+    assert r.status_code == 200, r.text
+    assert analyse(r.content)[0] == {40: 3, 20: 1}
 
 
 def test_too_many_unique_files_still_422():
@@ -177,5 +223,5 @@ def test_too_many_unique_files_still_422():
 
 def test_rejection_does_not_leak_work_dirs():
     before = requests.get(f"{BASE}/api/health", timeout=5).json().get("active_jobs")
-    pack([A, B], "[0,1]")
+    pack([A, B], [0,1])
     assert requests.get(f"{BASE}/api/health", timeout=5).json().get("active_jobs") == before

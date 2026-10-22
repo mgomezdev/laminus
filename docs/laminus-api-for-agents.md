@@ -340,14 +340,16 @@ Content-Type: multipart/form-data
 | Field        | Type      | Required | Description                                                        |
 |--------------|-----------|----------|--------------------------------------------------------------------|
 | `files`      | file[]    | yes      | 1–50 `.stl` files                                                  |
-| `quantities` | JSON text | no       | Positive ints aligned by index with `files`, e.g. `[3, 1, 12]`     |
+| `items`      | JSON text | no       | `[{"file": "a.stl", "quantity": 3}, ...]` — pairs each upload with a copy count |
 | bed source   |           | yes      | One of `template`, `machine_uuid`+`process_uuid`+`filament_uuids`, `bed_x`+`bed_y`+`bed_z` |
 
-`quantities` omitted = 1 copy each. Each STL yields N arranged copies sharing one mesh in the 3MF, spread over as many plates as needed. 422 on non-array, length mismatch with `files`, any value < 1, or total copies > 500. The 50 cap applies to unique files.
+`items` omitted = 1 copy each. `file` is the uploaded filename; every upload needs exactly one entry (manifest order is irrelevant) and filenames must be unique when `items` is used. Each STL yields `quantity` arranged copies sharing one mesh in the 3MF, spread over as many plates as needed. 422 on bad JSON/shape, unknown/duplicate/missing file, quantity not an integer >= 1, or total copies > 500. The 50 cap applies to unique files.
+
+On `/api/v1/pack` the 422 envelope lists every problem in `error.details` (`loc`, `msg`, `type`, plus `input`/`ctx` where useful), e.g. `loc: ["body","items",1,"quantity"]`. The frozen legacy route returns only a summary string in `detail`.
 
 ```bash
 curl -X POST http://localhost:5000/api/pack \
-  -F "files=@a.stl" -F "files=@b.stl" -F 'quantities=[3,1]' \
+  -F "files=@a.stl" -F "files=@b.stl" -F 'items=[{"file":"a.stl","quantity":3},{"file":"b.stl","quantity":1}]' \
   -F bed_x=256 -F bed_y=256 -F bed_z=256 -o packed.3mf
 ```
 

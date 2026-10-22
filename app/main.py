@@ -1560,6 +1560,74 @@ def _build_bed_template_bytes(printable_area: list, printable_height: float) -> 
     return buf.getvalue()
 
 
+def _items_error(errors: list[dict]):
+    summary = "Invalid items: " + "; ".join(e["msg"] for e in errors)
+    return _api_v1.DetailedHTTPException(422, summary, "validation_error", errors)
+
+
+def _parse_pack_items(raw: str, filenames: list[str]) -> list[int]:
+    """Validate the /api/pack ``items`` field; return copy counts in upload order.
+
+    422s carry per-problem ``details`` on v1 (legacy sees only the summary string).
+    """
+    base = ["body", "items"]
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        parsed = None
+    if not isinstance(parsed, list):
+        raise _items_error([{"loc": base, "msg": "must be a JSON array of {file, quantity} objects",
+                             "type": "type_error"}])
+
+    errors: list[dict] = []
+    dupes = sorted({n for n in filenames if filenames.count(n) > 1})
+    for n in dupes:
+        errors.append({"loc": ["body", "files"], "type": "value_error", "input": n,
+                       "msg": f"duplicate filename '{n}'; filenames must be unique when items is used"})
+
+    qty_by_name: dict[str, int] = {}
+    for i, entry in enumerate(parsed):
+        loc = base + [i]
+        if not isinstance(entry, dict):
+            errors.append({"loc": loc, "msg": "must be an object", "type": "type_error", "input": entry})
+            continue
+        name, qty = entry.get("file"), entry.get("quantity")
+        ok = True
+        if not isinstance(name, str) or name not in filenames:
+            errors.append({"loc": loc + ["file"], "type": "value_error", "input": name,
+                           "msg": "must be the filename of an uploaded file"})
+            ok = False
+        elif name in qty_by_name:
+            errors.append({"loc": loc + ["file"], "type": "value_error", "input": name,
+                           "msg": f"'{name}' listed more than once"})
+            ok = False
+        if isinstance(qty, bool) or not isinstance(qty, int):
+            errors.append({"loc": loc + ["quantity"], "type": "type_error", "input": qty,
+                           "msg": "must be an integer"})
+            ok = False
+        elif qty < 1:
+            errors.append({"loc": loc + ["quantity"], "type": "value_error", "input": qty,
+                           "msg": "must be >= 1"})
+            ok = False
+        if ok:
+            qty_by_name[name] = qty
+
+    if not dupes:
+        for n in filenames:
+            if n not in qty_by_name and not any(e.get("input") == n for e in errors):
+                errors.append({"loc": base, "type": "value_error", "input": n,
+                               "msg": f"no entry for uploaded file '{n}'"})
+    if not errors:
+        total = sum(qty_by_name.values())
+        if total > PACK_MAX_INSTANCES:
+            errors.append({"loc": base, "type": "value_error",
+                           "msg": f"total instances {total} exceeds max {PACK_MAX_INSTANCES}",
+                           "ctx": {"total": total, "max": PACK_MAX_INSTANCES}})
+    if errors:
+        raise _items_error(errors)
+    return [qty_by_name[n] for n in filenames]
+
+
 @app.post(
     "/api/pack",
     tags=["arrange"],
@@ -1588,10 +1656,13 @@ def _build_bed_template_bytes(printable_area: list, printable_height: float) -> 
         "- `files` — one or more `.stl` files (max 50 per request)\n"
         "- Filenames must not contain null bytes, newlines, or semicolons\n"
         "- Duplicate filenames in the same batch are deduplicated with a numeric suffix\n"
-        "- `quantities` (optional) — JSON array of positive ints aligned by index with `files`, "
-        "e.g. `[3, 1, 12]`. Each STL yields that many arranged copies sharing one mesh in the "
-        "3MF. Omitted = 1 each. Length mismatch or any value < 1 → 422. The 50 cap applies to "
-        f"unique files; total copies are capped at {PACK_MAX_INSTANCES}.\n\n"
+        "- `items` (optional) — JSON array of `{\"file\": <uploaded filename>, \"quantity\": <int >= 1>}`, "
+        "e.g. `[{\"file\":\"a.stl\",\"quantity\":3},{\"file\":\"b.stl\",\"quantity\":1}]`. Each STL "
+        "yields that many arranged copies sharing one mesh in the 3MF. Omitted = 1 each. When "
+        "`items` is given, uploaded filenames must be unique and every upload needs exactly one "
+        "entry; anything else → 422. The 50 cap applies to unique files; total copies are "
+        f"capped at {PACK_MAX_INSTANCES}. On `/api/v1/pack` a 422 lists each problem in "
+        "`error.details` with a `loc` such as `[\"body\",\"items\",1,\"quantity\"]`.\n\n"
         "## Notes\n\n"
         "- OrcaSlicer auto-orients objects (`--orient 1`) to minimise support material. "
         "Pass orient=false to skip (not yet exposed as a parameter — file a request).\n"
@@ -1611,7 +1682,8 @@ def _build_bed_template_bytes(printable_area: list, printable_height: float) -> 
             "description": (
                 "No STL files provided, more than 50 STLs, non-.stl file in files list, "
                 "non-.3mf template, bed dimensions ≤ 0, invalid filament_uuids JSON, "
-                "invalid/mismatched/<1 `quantities` or total copies over the cap, "
+                "invalid `items` (bad JSON/shape, unknown/duplicate/missing file, quantity < 1) "
+                "or total copies over the cap, "
                 "UUID not found in catalog, or no settings source provided"
             ),
         },
@@ -1629,10 +1701,11 @@ async def pack_stls(
     bed_x: Optional[float] = Form(None, description="Bed X dimension in mm (alternative to template / UUIDs)"),
     bed_y: Optional[float] = Form(None, description="Bed Y dimension in mm"),
     bed_z: Optional[float] = Form(None, description="Bed Z printable height in mm"),
-    quantities: Optional[str] = Form(
+    items: Optional[str] = Form(
         None,
         description=(
-            "JSON array of positive ints aligned by index with `files`, e.g. `[3, 1, 12]`. "
+            'JSON array pairing each uploaded file with a copy count, e.g. '
+            '`[{"file": "a.stl", "quantity": 3}, {"file": "b.stl", "quantity": 1}]`. '
             f"Omitted = 1 copy each. Total copies capped at {PACK_MAX_INSTANCES}."
         ),
     ),
@@ -1643,29 +1716,8 @@ async def pack_stls(
         raise HTTPException(status_code=422, detail="Maximum 50 STL files per request.")
 
     qty_list: Optional[list[int]] = None
-    if quantities is not None:
-        try:
-            parsed = json.loads(quantities)
-        except ValueError:
-            parsed = None
-        if (
-            not isinstance(parsed, list)
-            or any(isinstance(q, bool) or not isinstance(q, int) for q in parsed)
-        ):
-            raise HTTPException(status_code=422, detail="quantities must be a JSON array of integers.")
-        if len(parsed) != len(files):
-            raise HTTPException(
-                status_code=422,
-                detail=f"quantities has {len(parsed)} entries but {len(files)} files were uploaded.",
-            )
-        if any(q < 1 for q in parsed):
-            raise HTTPException(status_code=422, detail="Every quantity must be >= 1.")
-        if sum(parsed) > PACK_MAX_INSTANCES:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Total instances ({sum(parsed)}) exceeds the maximum of {PACK_MAX_INSTANCES}.",
-            )
-        qty_list = parsed
+    if items is not None:
+        qty_list = _parse_pack_items(items, [f.filename or "" for f in files])
 
     # Validate STL filenames, deduplicating repeats within the batch with a numeric
     # suffix so two uploads named e.g. "bracket.stl" don't overwrite one another on disk.

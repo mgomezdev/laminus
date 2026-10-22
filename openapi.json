@@ -663,7 +663,7 @@
           "arrange"
         ],
         "summary": "Pack N STLs onto as many plates as needed (synchronous)",
-        "description": "Distributes STL geometry across build plates via OrcaSlicer `--arrange 1 --orient 1`. Returns the resulting multi-plate `.3mf` directly as `application/octet-stream`. **Blocks for up to 120 seconds.**\n\n## Bed / settings source (mutually exclusive \u2014 supply exactly one)\n\n**1. Template file** (`template` field)\nUpload a `.3mf` whose `Metadata/project_settings.config` carries the printer and bed configuration. OrcaSlicer reads bed dimensions and settings from that config. Use this when you already have a known-good 3MF template from a previous session.\n\n**2. Profile UUIDs** (`machine_uuid` + `process_uuid` + `filament_uuids`)\nThe container resolves profiles from its catalog, builds the settings internally, and constructs a minimal bed-only template (only `printable_area` and `printable_height` are embedded \u2014 no full machine config that could override the bed size). Templates for a given UUID combination are cached in memory, so repeated calls with the same profiles are fast. This mode requires `catalog_loaded: true`.\n\n**3. Explicit bed dimensions** (`bed_x` + `bed_y` + `bed_z`, all in mm)\nLaminus constructs a minimal bed template from the supplied dimensions. `bed_z` is the printable height (not the physical Z travel). No profile catalog or template file needed \u2014 useful when you want geometry-only packing without print settings.\n\n## STL inputs\n\n- `files` \u2014 one or more `.stl` files (max 50 per request)\n- Filenames must not contain null bytes, newlines, or semicolons\n- Duplicate filenames in the same batch are deduplicated with a numeric suffix\n- `quantities` (optional) \u2014 JSON array of positive ints aligned by index with `files`, e.g. `[3, 1, 12]`. Each STL yields that many arranged copies sharing one mesh in the 3MF. Omitted = 1 each. Length mismatch or any value < 1 \u2192 422. The 50 cap applies to unique files; total copies are capped at 500.\n\n## Notes\n\n- OrcaSlicer auto-orients objects (`--orient 1`) to minimise support material. Pass orient=false to skip (not yet exposed as a parameter \u2014 file a request).\n- The packed `.3mf` preserves `Metadata/project_settings.config` from the template but discards any geometry or model_settings from it.\n- All temporary files are cleaned up after the response is sent.",
+        "description": "Distributes STL geometry across build plates via OrcaSlicer `--arrange 1 --orient 1`. Returns the resulting multi-plate `.3mf` directly as `application/octet-stream`. **Blocks for up to 120 seconds.**\n\n## Bed / settings source (mutually exclusive \u2014 supply exactly one)\n\n**1. Template file** (`template` field)\nUpload a `.3mf` whose `Metadata/project_settings.config` carries the printer and bed configuration. OrcaSlicer reads bed dimensions and settings from that config. Use this when you already have a known-good 3MF template from a previous session.\n\n**2. Profile UUIDs** (`machine_uuid` + `process_uuid` + `filament_uuids`)\nThe container resolves profiles from its catalog, builds the settings internally, and constructs a minimal bed-only template (only `printable_area` and `printable_height` are embedded \u2014 no full machine config that could override the bed size). Templates for a given UUID combination are cached in memory, so repeated calls with the same profiles are fast. This mode requires `catalog_loaded: true`.\n\n**3. Explicit bed dimensions** (`bed_x` + `bed_y` + `bed_z`, all in mm)\nLaminus constructs a minimal bed template from the supplied dimensions. `bed_z` is the printable height (not the physical Z travel). No profile catalog or template file needed \u2014 useful when you want geometry-only packing without print settings.\n\n## STL inputs\n\n- `files` \u2014 one or more `.stl` files (max 50 per request)\n- Filenames must not contain null bytes, newlines, or semicolons\n- Duplicate filenames in the same batch are deduplicated with a numeric suffix\n- `items` (optional) \u2014 JSON array of `{\"file\": <uploaded filename>, \"quantity\": <int >= 1>}`, e.g. `[{\"file\":\"a.stl\",\"quantity\":3},{\"file\":\"b.stl\",\"quantity\":1}]`. Each STL yields that many arranged copies sharing one mesh in the 3MF. Omitted = 1 each. When `items` is given, uploaded filenames must be unique and every upload needs exactly one entry; anything else \u2192 422. The 50 cap applies to unique files; total copies are capped at 500. On `/api/v1/pack` a 422 lists each problem in `error.details` with a `loc` such as `[\"body\",\"items\",1,\"quantity\"]`.\n\n## Notes\n\n- OrcaSlicer auto-orients objects (`--orient 1`) to minimise support material. Pass orient=false to skip (not yet exposed as a parameter \u2014 file a request).\n- The packed `.3mf` preserves `Metadata/project_settings.config` from the template but discards any geometry or model_settings from it.\n- All temporary files are cleaned up after the response is sent.",
         "operationId": "pack_stls_api_pack_post",
         "requestBody": {
           "content": {
@@ -691,7 +691,7 @@
             "description": "Pack operation timed out after 120 seconds"
           },
           "422": {
-            "description": "No STL files provided, more than 50 STLs, non-.stl file in files list, non-.3mf template, bed dimensions \u2264 0, invalid filament_uuids JSON, invalid/mismatched/<1 `quantities` or total copies over the cap, UUID not found in catalog, or no settings source provided"
+            "description": "No STL files provided, more than 50 STLs, non-.stl file in files list, non-.3mf template, bed dimensions \u2264 0, invalid filament_uuids JSON, invalid `items` (bad JSON/shape, unknown/duplicate/missing file, quantity < 1) or total copies over the cap, UUID not found in catalog, or no settings source provided"
           },
           "500": {
             "description": "Unexpected system error \u2014 check server logs"
@@ -1514,7 +1514,7 @@
           "v1 projects"
         ],
         "summary": "Pack STL/3MF files onto plates",
-        "description": "Distributes STL geometry across build plates via OrcaSlicer `--arrange 1 --orient 1`. Returns the resulting multi-plate `.3mf` directly as `application/octet-stream`. **Blocks for up to 120 seconds.**\n\n## Bed / settings source (mutually exclusive \u2014 supply exactly one)\n\n**1. Template file** (`template` field)\nUpload a `.3mf` whose `Metadata/project_settings.config` carries the printer and bed configuration. OrcaSlicer reads bed dimensions and settings from that config. Use this when you already have a known-good 3MF template from a previous session.\n\n**2. Profile UUIDs** (`machine_uuid` + `process_uuid` + `filament_uuids`)\nThe container resolves profiles from its catalog, builds the settings internally, and constructs a minimal bed-only template (only `printable_area` and `printable_height` are embedded \u2014 no full machine config that could override the bed size). Templates for a given UUID combination are cached in memory, so repeated calls with the same profiles are fast. This mode requires `catalog_loaded: true`.\n\n**3. Explicit bed dimensions** (`bed_x` + `bed_y` + `bed_z`, all in mm)\nLaminus constructs a minimal bed template from the supplied dimensions. `bed_z` is the printable height (not the physical Z travel). No profile catalog or template file needed \u2014 useful when you want geometry-only packing without print settings.\n\n## STL inputs\n\n- `files` \u2014 one or more `.stl` files (max 50 per request)\n- Filenames must not contain null bytes, newlines, or semicolons\n- Duplicate filenames in the same batch are deduplicated with a numeric suffix\n- `quantities` (optional) \u2014 JSON array of positive ints aligned by index with `files`, e.g. `[3, 1, 12]`. Each STL yields that many arranged copies sharing one mesh in the 3MF. Omitted = 1 each. Length mismatch or any value < 1 \u2192 422. The 50 cap applies to unique files; total copies are capped at 500.\n\n## Notes\n\n- OrcaSlicer auto-orients objects (`--orient 1`) to minimise support material. Pass orient=false to skip (not yet exposed as a parameter \u2014 file a request).\n- The packed `.3mf` preserves `Metadata/project_settings.config` from the template but discards any geometry or model_settings from it.\n- All temporary files are cleaned up after the response is sent.",
+        "description": "Distributes STL geometry across build plates via OrcaSlicer `--arrange 1 --orient 1`. Returns the resulting multi-plate `.3mf` directly as `application/octet-stream`. **Blocks for up to 120 seconds.**\n\n## Bed / settings source (mutually exclusive \u2014 supply exactly one)\n\n**1. Template file** (`template` field)\nUpload a `.3mf` whose `Metadata/project_settings.config` carries the printer and bed configuration. OrcaSlicer reads bed dimensions and settings from that config. Use this when you already have a known-good 3MF template from a previous session.\n\n**2. Profile UUIDs** (`machine_uuid` + `process_uuid` + `filament_uuids`)\nThe container resolves profiles from its catalog, builds the settings internally, and constructs a minimal bed-only template (only `printable_area` and `printable_height` are embedded \u2014 no full machine config that could override the bed size). Templates for a given UUID combination are cached in memory, so repeated calls with the same profiles are fast. This mode requires `catalog_loaded: true`.\n\n**3. Explicit bed dimensions** (`bed_x` + `bed_y` + `bed_z`, all in mm)\nLaminus constructs a minimal bed template from the supplied dimensions. `bed_z` is the printable height (not the physical Z travel). No profile catalog or template file needed \u2014 useful when you want geometry-only packing without print settings.\n\n## STL inputs\n\n- `files` \u2014 one or more `.stl` files (max 50 per request)\n- Filenames must not contain null bytes, newlines, or semicolons\n- Duplicate filenames in the same batch are deduplicated with a numeric suffix\n- `items` (optional) \u2014 JSON array of `{\"file\": <uploaded filename>, \"quantity\": <int >= 1>}`, e.g. `[{\"file\":\"a.stl\",\"quantity\":3},{\"file\":\"b.stl\",\"quantity\":1}]`. Each STL yields that many arranged copies sharing one mesh in the 3MF. Omitted = 1 each. When `items` is given, uploaded filenames must be unique and every upload needs exactly one entry; anything else \u2192 422. The 50 cap applies to unique files; total copies are capped at 500. On `/api/v1/pack` a 422 lists each problem in `error.details` with a `loc` such as `[\"body\",\"items\",1,\"quantity\"]`.\n\n## Notes\n\n- OrcaSlicer auto-orients objects (`--orient 1`) to minimise support material. Pass orient=false to skip (not yet exposed as a parameter \u2014 file a request).\n- The packed `.3mf` preserves `Metadata/project_settings.config` from the template but discards any geometry or model_settings from it.\n- All temporary files are cleaned up after the response is sent.",
         "operationId": "v1_pack_stls",
         "requestBody": {
           "content": {
@@ -1542,7 +1542,7 @@
             "description": "Pack operation timed out after 120 seconds"
           },
           "422": {
-            "description": "No STL files provided, more than 50 STLs, non-.stl file in files list, non-.3mf template, bed dimensions \u2264 0, invalid filament_uuids JSON, invalid/mismatched/<1 `quantities` or total copies over the cap, UUID not found in catalog, or no settings source provided"
+            "description": "No STL files provided, more than 50 STLs, non-.stl file in files list, non-.3mf template, bed dimensions \u2264 0, invalid filament_uuids JSON, invalid `items` (bad JSON/shape, unknown/duplicate/missing file, quantity < 1) or total copies over the cap, UUID not found in catalog, or no settings source provided"
           },
           "500": {
             "description": "Unexpected system error \u2014 check server logs"
@@ -2662,7 +2662,7 @@
             "title": "Bed Z",
             "description": "Bed Z printable height in mm"
           },
-          "quantities": {
+          "items": {
             "anyOf": [
               {
                 "type": "string"
@@ -2671,8 +2671,8 @@
                 "type": "null"
               }
             ],
-            "title": "Quantities",
-            "description": "JSON array of positive ints aligned by index with `files`, e.g. `[3, 1, 12]`. Omitted = 1 copy each. Total copies capped at 500."
+            "title": "Items",
+            "description": "JSON array pairing each uploaded file with a copy count, e.g. `[{\"file\": \"a.stl\", \"quantity\": 3}, {\"file\": \"b.stl\", \"quantity\": 1}]`. Omitted = 1 copy each. Total copies capped at 500."
           }
         },
         "type": "object",
@@ -3164,7 +3164,7 @@
             "title": "Bed Z",
             "description": "Bed Z printable height in mm"
           },
-          "quantities": {
+          "items": {
             "anyOf": [
               {
                 "type": "string"
@@ -3173,8 +3173,8 @@
                 "type": "null"
               }
             ],
-            "title": "Quantities",
-            "description": "JSON array of positive ints aligned by index with `files`, e.g. `[3, 1, 12]`. Omitted = 1 copy each. Total copies capped at 500."
+            "title": "Items",
+            "description": "JSON array pairing each uploaded file with a copy count, e.g. `[{\"file\": \"a.stl\", \"quantity\": 3}, {\"file\": \"b.stl\", \"quantity\": 1}]`. Omitted = 1 copy each. Total copies capped at 500."
           }
         },
         "type": "object",
