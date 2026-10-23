@@ -1927,8 +1927,8 @@ async def pack_stls(
     tags=["arrange"],
     summary="Auto-arrange and orient objects in a 3MF (synchronous)",
     description=(
-        "Runs OrcaSlicer's plate-packing (`--arrange 1`) and auto-orientation "
-        "(`--orient 1`) on an existing `.3mf` and returns the rearranged `.3mf` directly "
+        "Runs OrcaSlicer's plate-packing (`--arrange 1`) and, only if `orient=true`, "
+        "auto-orientation (`--orient 1`, which may tilt parts about X/Y) on an existing `.3mf` and returns the rearranged `.3mf` directly "
         "as `application/octet-stream`.\n\n"
         "**Blocking:** waits up to `ARRANGE_TIMEOUT_SECONDS` (default 120 s) for OrcaSlicer "
         "to finish. No job tracking — call completes synchronously.\n\n"
@@ -1964,7 +1964,8 @@ async def auto_arrange_3mf(
     orient: Optional[str] = Form(None),
 ):
     arrange = _form_default_true(arrange)
-    orient = _form_default_true(orient)
+    # Opt-in: --orient tilts parts about X/Y, changing layer-line direction.
+    orient = orient is not None and _form_default_true(orient)
     # Fix R1: _safe_filename now guards against None before any attribute access
     try:
         safe_name = _safe_filename(file.filename)

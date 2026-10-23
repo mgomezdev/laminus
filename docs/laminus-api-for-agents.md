@@ -318,7 +318,7 @@ Content-Type: multipart/form-data
 |-----------|---------|----------|---------|------------------------------------|
 | `file`    | file    | yes      |         | `.3mf` to arrange                  |
 | `arrange` | bool    | no       | `true`  | Run plate packing                  |
-| `orient`  | bool    | no       | `true`  | Run auto-orientation               |
+| `orient`  | bool    | no       | `false` | Run auto-orientation (may tilt parts about X/Y) |
 
 Returns the rearranged `.3mf` as `application/octet-stream`. Timeout: 35 seconds.
 
