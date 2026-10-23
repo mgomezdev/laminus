@@ -311,3 +311,128 @@ def restore_build_item_z(packed_path: str, z_offsets: list[float]) -> None:
     with zipfile.ZipFile(packed_path, "w", compression=zipfile.ZIP_DEFLATED) as dst:
         for info, _ in entries:
             dst.writestr(info.filename, files[info.filename])
+
+
+def _build_item_worlds(path: str) -> list[tuple[str, str, list[tuple[float, float, float]]]]:
+    """Per build item, in build order: (objectid, name, world-space vertices).
+
+    Row-vector 3MF transforms (`v' = v·R + t`), nested components and the per-part
+    `matrix` in Metadata/model_settings.config (matched to components by index) are applied.
+    """
+    import xml.etree.ElementTree as ET
+
+    def _tf(s: str | None) -> list[float]:
+        return [float(x) for x in s.split()] if s else [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]
+
+    def _mul(a: list[float], b: list[float]) -> list[float]:
+        """Apply a then b (row-vector convention)."""
+        r = [sum(a[3 * i + k] * b[3 * k + j] for k in range(3)) for i in range(3) for j in range(3)]
+        t = [sum(a[9 + k] * b[3 * k + j] for k in range(3)) + b[9 + j] for j in range(3)]
+        return r + t
+
+    def _part_matrix(s: str) -> list[float]:
+        """Orca's 4x4 row-major column-vector matrix -> 12-number row-vector transform."""
+        m = [float(x) for x in s.split()]
+        return [m[0], m[4], m[8], m[1], m[5], m[9], m[2], m[6], m[10], m[3], m[7], m[11]]
+
+    def _local(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1]
+
+    with zipfile.ZipFile(path, "r") as z:
+        def _root(name: str):
+            return ET.fromstring(z.read(name.lstrip("/")))
+
+        part_tf: dict[str, list[list[float]]] = {}
+        names: dict[str, str] = {}
+        if "Metadata/model_settings.config" in z.namelist():
+            for o in _root("Metadata/model_settings.config").findall("object"):
+                part_tf[o.get("id")] = [
+                    _part_matrix(md.get("value"))
+                    for p in o.findall("part") for md in p.findall("metadata") if md.get("key") == "matrix"
+                ]
+                names[o.get("id")] = next(
+                    (md.get("value") for md in o.findall("metadata") if md.get("key") == "name"), "")
+
+        models: dict[str, dict] = {}
+
+        def _objects(name: str) -> dict:
+            if name not in models:
+                models[name] = {o.get("id"): o for el in _root(name) for o in el if _local(o.tag) == "object"}
+            return models[name]
+
+        def _verts(model: str, oid: str, tf: list[float], parts: list[list[float]], out: list) -> None:
+            obj = _objects(model)[oid]
+            mesh = next((c for c in obj if _local(c.tag) == "mesh"), None)
+            if mesh is not None:
+                for v in mesh.iter():
+                    if _local(v.tag) == "vertex":
+                        x, y, zz = float(v.get("x")), float(v.get("y")), float(v.get("z"))
+                        out.append((x * tf[0] + y * tf[3] + zz * tf[6] + tf[9],
+                                    x * tf[1] + y * tf[4] + zz * tf[7] + tf[10],
+                                    x * tf[2] + y * tf[5] + zz * tf[8] + tf[11]))
+            comps = next((c for c in obj if _local(c.tag) == "components"), None)
+            if comps is not None:
+                comp_list = list(comps)
+                for i, c in enumerate(comp_list):
+                    ctf = _tf(c.get("transform"))
+                    if len(parts) == len(comp_list):
+                        ctf = _mul(parts[i], ctf)
+                    sub = next((v for k, v in c.attrib.items() if k.endswith("}path") or k == "path"), None)
+                    _verts((sub or model).lstrip("/"), c.get("objectid"), _mul(ctf, tf), [], out)
+
+        main = "3D/3dmodel.model"
+        build = next(el for el in _root(main) if _local(el.tag) == "build")
+        result = []
+        for item in build:
+            oid = item.get("objectid")
+            verts: list = []
+            _verts(main, oid, _tf(item.get("transform")), part_tf.get(oid, []), verts)
+            result.append((oid, names.get(oid, ""), verts))
+        return result
+
+
+def _shape_key(name: str, verts: list[tuple[float, float, float]]) -> tuple:
+    """Identity that survives rigid motion: object name + sorted vertex distances from the centroid."""
+    uniq = sorted({(round(x, 3), round(y, 3), round(z, 3)) for x, y, z in verts})
+    n = len(uniq) or 1
+    cx, cy, cz = (sum(v[i] for v in uniq) / n for i in range(3))
+    dists = sorted(round(((x - cx) ** 2 + (y - cy) ** 2 + (z - cz) ** 2) ** 0.5, 2) for x, y, z in uniq)
+    return (name, hash(tuple(dists)))
+
+
+def restore_z_from_source(source_path: str, packed_path: str) -> None:
+    """Shift each object of *packed_path* up by its min Z in *source_path* (Orca re-seats at 0).
+
+    Objects are matched across the two files by (name, shape): Orca reorders and renumbers
+    objects, but keeps names and rigid geometry. Identical (name, shape) twins are paired in
+    build order. Only valid when Orca applied no X/Y rotation. Rewrites *packed_path* in place;
+    raises ValueError if the objects can't be paired.
+    """
+    from collections import defaultdict
+
+    pending: dict[tuple, list[float]] = defaultdict(list)
+    for _, name, verts in _build_item_worlds(source_path):
+        pending[_shape_key(name, verts)].append(min((v[2] for v in verts), default=0.0))
+
+    shifts: dict[str, float] = {}
+    for oid, name, verts in _build_item_worlds(packed_path):
+        zs = pending.get(_shape_key(name, verts))
+        if not zs:
+            raise ValueError(f"object {oid} ('{name}') has no counterpart in the source 3MF")
+        shifts[oid] = zs.pop(0)
+
+    with zipfile.ZipFile(packed_path, "r") as src:
+        entries = [(info, src.read(info.filename)) for info in src.infolist()]
+    files = {info.filename: data for info, data in entries}
+    text = files["3D/3dmodel.model"].decode("utf-8")
+
+    def _shift(m: re.Match) -> str:
+        oid = re.search(r'objectid="(\d+)"', m.group(0)).group(1)
+        vals = m.group(2).split()
+        vals[11] = repr(float(vals[11]) + shifts[oid])
+        return m.group(1) + " ".join(vals) + m.group(3)
+
+    files["3D/3dmodel.model"] = _BUILD_ITEM_RE.sub(_shift, text).encode("utf-8")
+    with zipfile.ZipFile(packed_path, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+        for info, _ in entries:
+            dst.writestr(info.filename, files[info.filename])

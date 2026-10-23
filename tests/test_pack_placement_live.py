@@ -195,3 +195,57 @@ def test_tall_part_not_tilted():
     for world, tilted, _ in placements(content)[0]:
         assert not tilted
         assert np.ptp(world[:, 2]) == pytest.approx(80, abs=TOL)
+
+
+def _arrange(content: bytes, **data) -> bytes:
+    # Orca on Linux segfaults (exit 139) loading a 3MF carrying its own version metadata
+    strip = re.compile(rb'[ \t]*<metadata\s+name="(?:Application|OrcaSlicer)"\s*>[^<]*</metadata>\r?\n?')
+    src, buf = zipfile.ZipFile(io.BytesIO(content)), io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            raw = src.read(info.filename)
+            dst.writestr(info.filename, strip.sub(b"", raw) if info.filename.endswith(".model") else raw)
+    content = buf.getvalue()
+    r = httpx.post(f"{BASE}/api/v1/arrange", files={"file": ("in.3mf", content, "application/octet-stream")},
+                   data=data, timeout=300)
+    assert r.status_code == 200, r.text
+    return r.content
+
+
+def _reverse_build_order(content: bytes) -> bytes:
+    src = zipfile.ZipFile(io.BytesIO(content))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            data = src.read(info.filename)
+            if info.filename == "3D/3dmodel.model":
+                text = data.decode()
+                items = re.findall(r"<item\b[^>]*/>", text)
+                start = text.index(items[0])
+                end = text.index(items[-1]) + len(items[-1])
+                text = text[:start] + "\n".join(reversed(items)) + text[end:]
+                data = text.encode()
+            dst.writestr(info.filename, data)
+    return out.getvalue()
+
+
+def _shapes_with_min_z(content):
+    items, _ = placements(content)
+    return sorted((tuple(np.round(_shape_signature(w), 2)), round(float(w[:, 2].min()), 3)) for w, _, _ in items)
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["build_order", "reversed_build_order"])
+def test_arrange_preserves_min_z_per_object(reverse):
+    parts, qtys, bed = [FLOAT, BELOW, HIGH, A], [2, 2, 1, 1], (100, 100, 100)
+    packed = pack(parts, qtys, bed)
+    src = _reverse_build_order(packed) if reverse else packed
+    arranged = _arrange(src, arrange="true")
+    before = _shapes_with_min_z(src)
+    assert len({z for _, z in before}) >= 4          # several distinct min Z's, incl. non-zero
+    assert _shapes_with_min_z(arranged) == before
+
+
+def test_arrange_does_not_tilt_by_default():
+    packed = pack([TALL], [2], (100, 100, 100))
+    for world, tilted, _ in placements(_arrange(packed, arrange="true"))[0]:
+        assert not tilted and np.ptp(world[:, 2]) == pytest.approx(80, abs=TOL)

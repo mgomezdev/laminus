@@ -246,3 +246,41 @@ def test_stl_min_z_and_restore_build_item_z(tmp_path):
 
     with pytest.raises(ValueError):
         restore_build_item_z(str(packed), [1.0])
+
+
+def _box_3mf(path, objs):
+    """objs: [(objectid, name, (sx, sy, sz), tz)] -> minimal 3MF; box spans 0..s, item shifted by tz."""
+    import zipfile
+    res, items, cfg = [], [], []
+    for oid, name, (sx, sy, sz), tz in objs:
+        v = [(x, y, z) for x in (0, sx) for y in (0, sy) for z in (0, sz)]
+        tri = [(0, 1, 3), (0, 3, 2), (4, 6, 7), (4, 7, 5), (0, 4, 5), (0, 5, 1),
+               (2, 3, 7), (2, 7, 6), (0, 2, 6), (0, 6, 4), (1, 5, 7), (1, 7, 3)]
+        res.append(f'<object id="{oid}"><mesh><vertices>'
+                   + "".join(f'<vertex x="{a}" y="{b}" z="{c}"/>' for a, b, c in v)
+                   + '</vertices><triangles>'
+                   + "".join(f'<triangle v1="{a}" v2="{b}" v3="{c}"/>' for a, b, c in tri)
+                   + '</triangles></mesh></object>')
+        items.append(f'<item objectid="{oid}" transform="1 0 0 0 1 0 0 0 1 0 0 {tz}"/>')
+        cfg.append(f'<object id="{oid}"><metadata key="name" value="{name}"/></object>')
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("3D/3dmodel.model", f'<model><resources>{"".join(res)}</resources><build>{"".join(items)}</build></model>')
+        z.writestr("Metadata/model_settings.config", f'<config>{"".join(cfg)}</config>')
+
+
+def test_restore_z_from_source_matches_by_name_and_shape(tmp_path):
+    import zipfile
+    from app.stl_to_3mf import restore_z_from_source
+
+    src, out = str(tmp_path / "src.3mf"), str(tmp_path / "out.3mf")
+    _box_3mf(src, [("1", "tall", (10, 10, 40), 3.0), ("2", "wide", (30, 30, 5), -2.0)])
+    # Orca-like output: objects swapped/renumbered and re-seated at min Z 0
+    _box_3mf(out, [("7", "wide", (30, 30, 5), 0.0), ("9", "tall", (10, 10, 40), 0.0)])
+    restore_z_from_source(src, out)
+    model = zipfile.ZipFile(out).read("3D/3dmodel.model").decode()
+    assert 'objectid="7" transform="1 0 0 0 1 0 0 0 1 0 0 -2.0"' in model
+    assert 'objectid="9" transform="1 0 0 0 1 0 0 0 1 0 0 3.0"' in model
+
+    _box_3mf(out, [("7", "other", (30, 30, 5), 0.0)])
+    with pytest.raises(ValueError):
+        restore_z_from_source(src, out)

@@ -320,7 +320,7 @@ Content-Type: multipart/form-data
 | `arrange` | bool    | no       | `true`  | Run plate packing                  |
 | `orient`  | bool    | no       | `false` | Run auto-orientation (may tilt parts about X/Y) |
 
-Returns the rearranged `.3mf` as `application/octet-stream`. Timeout: 35 seconds.
+Returns the rearranged `.3mf` as `application/octet-stream`. Without `orient=true`, parts are not tilted about X/Y and each object keeps its input min Z (objects intentionally above/below the plate stay there). Timeout: 35 seconds.
 
 ```bash
 curl -X POST http://localhost:5000/api/arrange \

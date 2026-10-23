@@ -20,7 +20,7 @@ from app.profile_catalog import ProfileCatalog
 from app.project_config_builder import build_project_settings, embed_project_settings
 from app import preview_3mf as _preview
 from app import subset_3mf as _subset
-from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf, inject_stls_into_3mf as _inject_stls_into_3mf, stl_min_z as _stl_min_z, restore_build_item_z as _restore_build_item_z, strip_application_version as _strip_app_version
+from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf, inject_stls_into_3mf as _inject_stls_into_3mf, stl_min_z as _stl_min_z, restore_build_item_z as _restore_build_item_z, restore_z_from_source as _restore_z_from_source, strip_application_version as _strip_app_version
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("laminus")
@@ -2033,6 +2033,13 @@ async def auto_arrange_3mf(
                     status_code=400,
                     detail=f"Slicer auto-arrange process failed (exit code {exit_code}). Check server logs for details.",
                 )
+
+            if not orient:
+                # Orca re-seats every object at min Z = 0; restore each object's input min Z.
+                try:
+                    await asyncio.to_thread(_restore_z_from_source, in_file, out_file)
+                except Exception:
+                    logger.exception("Could not restore input Z positions; returning Orca's output as-is")
 
             stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_output.3mf")
             shutil.copy2(out_file, stable_out)
