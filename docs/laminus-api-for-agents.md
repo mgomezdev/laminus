@@ -318,9 +318,9 @@ Content-Type: multipart/form-data
 |-----------|---------|----------|---------|------------------------------------|
 | `file`    | file    | yes      |         | `.3mf` to arrange                  |
 | `arrange` | bool    | no       | `true`  | Run plate packing                  |
-| `orient`  | bool    | no       | `true`  | Run auto-orientation               |
+| `orient`  | bool    | no       | `false` | Run auto-orientation (may tilt parts about X/Y) |
 
-Returns the rearranged `.3mf` as `application/octet-stream`. Timeout: 35 seconds.
+Returns the rearranged `.3mf` as `application/octet-stream`. Without `orient=true`, parts are not tilted about X/Y and each object keeps its input min Z (objects intentionally above/below the plate stay there). Timeout: 35 seconds.
 
 ```bash
 curl -X POST http://localhost:5000/api/arrange \
@@ -342,6 +342,8 @@ Content-Type: multipart/form-data
 | `files`      | file[]    | yes      | 1–50 `.stl` files                                                  |
 | `items`      | JSON text | no       | `[{"file": "a.stl", "quantity": 3}, ...]` — pairs each upload with a copy count |
 | bed source   |           | yes      | One of `template`, `machine_uuid`+`process_uuid`+`filament_uuids`, `bed_x`+`bed_y`+`bed_z` |
+
+Orientation: parts are never tilted about X/Y (no auto-orient; layer-line direction is preserved). The arranger may rotate about Z. Each instance keeps its input STL's min Z, so models intentionally above or below the plate stay there.
 
 `items` omitted = 1 copy each. `file` is the uploaded filename; every upload needs exactly one entry (manifest order is irrelevant) and filenames must be unique when `items` is used. Each STL yields `quantity` arranged copies sharing one mesh in the 3MF, spread over as many plates as needed. 422 on bad JSON/shape, unknown/duplicate/missing file, quantity not an integer >= 1, or total copies > 500. The 50 cap applies to unique files.
 
