@@ -319,7 +319,7 @@ def _build_item_worlds(path: str) -> list[tuple[str, str, list[tuple[float, floa
     Row-vector 3MF transforms (`v' = v·R + t`), nested components and the per-part
     `matrix` in Metadata/model_settings.config (matched to components by index) are applied.
     """
-    import xml.etree.ElementTree as ET
+    from defusedxml import ElementTree as ET  # 3MFs are untrusted uploads: reject DTDs/entities
 
     def _tf(s: str | None) -> list[float]:
         return [float(x) for x in s.split()] if s else [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]

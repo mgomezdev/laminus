@@ -284,3 +284,16 @@ def test_restore_z_from_source_matches_by_name_and_shape(tmp_path):
     _box_3mf(out, [("7", "other", (30, 30, 5), 0.0)])
     with pytest.raises(ValueError):
         restore_z_from_source(src, out)
+
+
+def test_restore_z_rejects_entity_declarations(tmp_path):
+    import zipfile
+    from app.stl_to_3mf import restore_z_from_source
+
+    src, out = str(tmp_path / "src.3mf"), str(tmp_path / "out.3mf")
+    _box_3mf(out, [("1", "a", (10, 10, 10), 0.0)])
+    with zipfile.ZipFile(src, "w") as z:
+        z.writestr("3D/3dmodel.model",
+                   '<?xml version="1.0"?><!DOCTYPE m [<!ENTITY x "boom">]><model><resources/><build/></model>')
+    with pytest.raises(ValueError):  # defusedxml's exceptions subclass ValueError
+        restore_z_from_source(src, out)
