@@ -7,8 +7,8 @@ Contract (see docs/api-versioning.md):
   * ``POST /api/v1/jobs`` honours ``Idempotency-Key``
   * ``GET /api/v1`` is the capability-discovery document
   * legacy ``/api/*`` routes keep working unchanged; once ``LEGACY_DEPRECATION_HEADERS`` is
-    set, those with a v1 equivalent carry ``Deprecation`` / ``Link: <v1 route>;
-    rel="successor-version"`` response headers (off by default)
+    enabled (the default), those with a v1 equivalent carry ``Deprecation`` / ``Link: <v1 route>;
+    rel="successor-version"`` response headers and the agreed Sunset date
 
 The module is installed by ``main.py`` (``install(app, main_module)``) so handlers read the
 live job table / catalog through ``m`` at call time.
@@ -16,6 +16,7 @@ live job table / catalog through ``m`` at call time.
 import base64
 import hashlib
 import json
+import logging
 import os
 import time
 import uuid
@@ -26,6 +27,9 @@ from fastapi.exception_handlers import http_exception_handler, request_validatio
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+logger = logging.getLogger(__name__)
+LEGACY_SUNSET = "Sat, 24 Apr 2027 00:00:00 GMT"
 
 API_VERSION = "v1"
 PREFIX = "/api/v1"
@@ -79,9 +83,8 @@ V1_ALIASES = [
 LEGACY_TO_V1.update({old: new for old, _m, new, _t, _s in V1_ALIASES})
 
 def _legacy_deprecation_enabled() -> bool:
-    # Off by default: v1 ships additively, legacy responses stay byte-for-byte what
-    # consumers already get. Flipped on once consumers have moved (BIZ-334).
-    return os.environ.get("LEGACY_DEPRECATION_HEADERS", "").strip().lower() in ("1", "true", "yes", "on")
+    # Consumers migrated (BIZ-333); retain an emergency signalling opt-out.
+    return os.environ.get("LEGACY_DEPRECATION_HEADERS", "true").strip().lower() in ("1", "true", "yes", "on")
 
 
 _DEFAULT_CODES = {
@@ -171,12 +174,18 @@ def install(app: FastAPI, m) -> None:
         response.headers["X-Request-ID"] = request.state.request_id
         if _is_v1(request):
             response.headers["API-Version"] = API_VERSION
-        elif _legacy_deprecation_enabled():
+        else:
             route = request.scope.get("route")
             successor = LEGACY_TO_V1.get(getattr(route, "path", None))
             if successor:
-                response.headers["Deprecation"] = "true"
-                response.headers["Link"] = f'<{successor}>; rel="successor-version"'
+                for name, value in request.path_params.items():
+                    successor = successor.replace("{" + name + "}", str(value))
+                logger.info("Legacy API request method=%s route=%s status=%s request_id=%s",
+                            request.method, route.path, response.status_code, request.state.request_id)
+                if _legacy_deprecation_enabled():
+                    response.headers["Deprecation"] = "true"
+                    response.headers["Sunset"] = LEGACY_SUNSET
+                    response.headers["Link"] = f'<{successor}>; rel="successor-version"'
         return response
 
     @app.exception_handler(StarletteHTTPException)
@@ -208,7 +217,7 @@ def install(app: FastAPI, m) -> None:
         return {
             "api_version": API_VERSION,
             "supported_versions": [API_VERSION],
-            "legacy": {"prefix": "/api", "deprecated": True, "sunset": None,
+            "legacy": {"prefix": "/api", "deprecated": True, "sunset": LEGACY_SUNSET,
                        "policy": "docs/api-versioning.md"},
             "engine": {"name": "orcaslicer", "version": m._orca_version(),
                        "binary_version": m._orcaslicer_version},
@@ -430,3 +439,8 @@ def install(app: FastAPI, m) -> None:
             raise _err(404, "profile_not_found", f"Profile UUID '{profile_uuid}' not found.")
         return cat._public(entry)
 
+
+    # Keep runtime behavior intact while advertising retirement in both specs.
+    for route in app.routes:
+        if getattr(route, "path", None) in LEGACY_TO_V1:
+            route.deprecated = True

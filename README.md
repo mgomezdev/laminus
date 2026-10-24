@@ -34,6 +34,8 @@ ORCA_VERSION=2.4.2   # default
 
 ## API Reference
 
+New integrations should use `/api/v1` and [`openapi-v1.json`](openapi-v1.json). Versionless routes are deprecated, with a sunset of April 24, 2027; see [migration mapping and policy](docs/api-versioning.md).
+
 See [`openapi.json`](openapi.json) for the full OpenAPI 3.0 spec (CI-regenerated, so it always matches the running code), or [`docs/laminus-api-for-agents.md`](docs/laminus-api-for-agents.md) for a walked-through guide to the full slice workflow, including profile discovery and UUID stability.
 
 ### Slice a model
@@ -101,7 +103,7 @@ curl -X POST http://localhost:5000/api/profiles/upload \
 ## Health Check
 
 ```bash
-curl http://localhost:5000/api/health
+curl http://localhost:5000/api/v1/health
 ```
 
 ## Notes

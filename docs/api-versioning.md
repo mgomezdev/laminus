@@ -5,7 +5,7 @@
 | Version | Prefix | Status |
 |---|---|---|
 | v1 | `/api/v1` | Stable. The contract is `openapi-v1.json` (CI-regenerated) |
-| legacy | `/api/*` (no version) | Fully functional and unchanged; coexists with v1. Not yet deprecated (headers off by default), no sunset date set |
+| legacy | `/api/*` (no version) | Deprecated; coexists with v1 until at least April 24, 2027 |
 
 `GET /api/v1` is the discovery document: supported versions, engine, readiness, `features` flags and limits. Feature-detect from `features`; don't parse version strings.
 
@@ -78,7 +78,9 @@ Every legacy `/api/*` route now has a v1 equivalent.
 
 ## Deprecation policy
 
-* Legacy routes that have a v1 equivalent answer with `Deprecation: true` and `Link: </api/v1/…>; rel="successor-version"` **when `LEGACY_DEPRECATION_HEADERS=true`**. This is off by default: v1 is purely additive until consumers have migrated, then the flag is turned on. Bodies and status codes are unchanged either way.
-* A `Sunset` header (RFC 8594) is added only once a removal date is decided, at least **6 months** ahead, and recorded in `GET /api/v1` under `legacy.sunset`.
+* Legacy routes that have a v1 equivalent answer with `Deprecation: true` and `Link: </api/v1/…>; rel="successor-version"` **by default**. `LEGACY_DEPRECATION_HEADERS=false` disables response signalling as an emergency compatibility measure; OpenAPI and discovery still report deprecation. Bodies and status codes are unchanged either way.
+* The agreed sunset is **April 24, 2027, 00:00 UTC** (BIZ-334). Responses advertise `Sunset: Sat, 24 Apr 2027 00:00:00 GMT` (RFC 8594), also recorded in discovery under `legacy.sunset`. Removal is a separate release after this date and evidence of no legacy traffic. If first deployment leaves less than six months, extend the date before shipping.
 * A v1 endpoint is deprecated the same way, only after its replacement in a newer major version is released, and stays for at least one full major cycle.
 * Behaviour changes to legacy routes are limited to bug fixes and security fixes.
+
+Legacy operations are marked `deprecated: true` in OpenAPI. Each legacy request logs its method, route template, response status and request ID at INFO level; query strings and payloads are excluded. Configure INFO logging and inspect these records before retirement (BIZ-335). A calendar date alone does not remove routes.

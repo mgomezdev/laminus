@@ -6,7 +6,7 @@ Full OpenAPI 3.0 spec: [`openapi.json`](../openapi.json) (CI-regenerated, always
 Live Swagger UI (container must be running): `http://localhost:5000/docs`
 Live OpenAPI JSON: `http://localhost:5000/openapi.json`
 
-> **API v1 (`/api/v1`) is the stable, versioned contract**: uniform error envelope, cursor pagination, `Idempotency-Key` on job creation, typed SSE events, `GET /api/v1` discovery. New integrations should use it; the routes below remain supported and unchanged (they will carry `Deprecation` headers where a v1 equivalent exists once `LEGACY_DEPRECATION_HEADERS` is enabled). See [`api-versioning.md`](api-versioning.md) and [`openapi-v1.json`](../openapi-v1.json).
+> **Use API v1 (`/api/v1`) for all integrations.** The legacy reference below is retained for migration only. Versionless routes are deprecated and advertise a sunset of April 24, 2027. Use the [v1 resource map](api-versioning.md#resource-map), [`openapi-v1.json`](../openapi-v1.json), and `GET /api/v1` discovery. Legacy response shapes must not be assumed for v1 jobs or profiles.
 
 
 ---

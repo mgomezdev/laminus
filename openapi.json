@@ -14,6 +14,7 @@
         "summary": "List profiles in the catalog",
         "description": "Returns all machine, process, and filament presets known to this container.\n\n**Filtering:** supply all three of `manufacturer`, `model`, and `nozzle` together to receive only the matching machine preset plus all process and filament presets that declare that machine in their `compatible_printers` list. Supplying only one or two of the three parameters is a **422** error.\n\n**Refresh:** pass `refresh=true` to schedule a background catalog rebuild (e.g., after uploading new profiles via `POST /api/profiles/upload`). The response reflects the *current* catalog immediately; the new catalog is available after ~5 s. While rebuilding, `GET /api/health` will show `catalog_building: true`.\n\n**Response shape:**\n```json\n{\n  \"machine\":  [{ \"uuid\": \"...\", \"name\": \"...\", \"manufacturer\": \"...\", \"model\": \"...\", \"nozzle\": \"...\" }],\n  \"process\":  [{ \"uuid\": \"...\", \"name\": \"...\", \"layer_height\": 0.2, \"compatible_printers\": [...] }],\n  \"filament\": [{ \"uuid\": \"...\", \"name\": \"...\", \"filament_type\": \"PLA\", \"filament_colour\": \"#FFFFFF\", ... }]\n}\n```\n\nReturns **503** while the catalog is initialising on container start.",
         "operationId": "get_profiles_api_profiles_get",
+        "deprecated": true,
         "parameters": [
           {
             "name": "manufacturer",
@@ -125,7 +126,8 @@
           "503": {
             "description": "Catalog not yet ready \u2014 retry after /api/health reports catalog_loaded: true"
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/profiles/broken": {
@@ -148,7 +150,8 @@
           "503": {
             "description": "Catalog not yet ready"
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/profiles/machines/suggest": {
@@ -191,7 +194,8 @@
               }
             }
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/profiles/models/variants": {
@@ -234,7 +238,8 @@
               }
             }
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/profiles/machines/{machine_ref}/presets": {
@@ -245,6 +250,7 @@
         "summary": "Process/filament presets compatible with a machine",
         "description": "Presets whose resolved `compatible_printers` is empty or names this machine. `kind=process|filament` narrows; default both. `compatible_models` is omitted for universal presets. 404 `{\"error\": \"unknown_machine_ref\"}`, 422 `{\"error\": \"invalid_kind\"}`.",
         "operationId": "machine_presets_api_profiles_machines__machine_ref__presets_get",
+        "deprecated": true,
         "parameters": [
           {
             "name": "machine_ref",
@@ -301,6 +307,7 @@
         "summary": "Can this machine ref (and bed) be sliced for?",
         "description": "Always 200. `supported` is false with `reason` `unknown_machine_ref` or `bed_mismatch` (`bed_x`/`bed_y` in mm, 1 mm tolerance; a machine with no declared bed size is never ruled out). `reason` is null when supported.",
         "operationId": "machine_supports_api_profiles_machines__machine_ref__supports_get",
+        "deprecated": true,
         "parameters": [
           {
             "name": "machine_ref",
@@ -377,6 +384,7 @@
         "summary": "Get full detail for one profile",
         "description": "Returns all public fields for a single profile entry identified by its stable UUID. The `_resolved` (inheritance-flattened) dict is not included \u2014 use `POST /api/profiles/merged-config` for the fully merged config.\n\n**Fields by type:**\n\n*Machine:* `uuid`, `name`, `manufacturer`, `model`, `nozzle`, `nozzle_diameter`, `bed_size_x`, `bed_size_y`, `extruder_count`, `source`, `rel_path`\n\n*Process:* `uuid`, `name`, `layer_height`, `compatible_printers`, `source`, `rel_path`\n\n*Filament:* `uuid`, `name`, `display_name`, `filament_type`, `filament_colour`, `filament_vendor`, `filament_diameter`, `filament_density`, `nozzle_temperature`, `nozzle_temperature_range_low`, `nozzle_temperature_range_high`, `bed_temperature`, `bed_temperature_initial_layer`, `compatible_printers`, `source`, `rel_path`\n\nReturns **503** while the catalog is initialising.",
         "operationId": "get_profile_detail_api_profiles__profile_uuid__get",
+        "deprecated": true,
         "parameters": [
           {
             "name": "profile_uuid",
@@ -452,7 +460,8 @@
           "503": {
             "description": "Profile catalog not yet ready (retry after catalog_loaded: true), or too many concurrent slice jobs (retry when a slot opens)"
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/slice/prepared": {
@@ -491,7 +500,8 @@
           "503": {
             "description": "Too many concurrent slice jobs \u2014 retry when a slot opens (check active_jobs in GET /api/health)"
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/slice/thumbnail": {
@@ -524,7 +534,8 @@
           "422": {
             "description": "OrcaSlicer returned non-zero, no PNG found in output, plate < 1, bad filename, or non-.3mf file uploaded. Also returned on timeout (the OrcaSlicer process is killed)."
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/slice/status/{job_id}": {
@@ -535,6 +546,7 @@
         "summary": "Poll slice job status",
         "description": "Returns the current status of a slice job. Poll every 2\u20135 seconds until `status` is `completed` or `failed`.\n\n**Response fields:**\n- `job_id` \u2014 echoed back for correlation\n- `status` \u2014 one of `pending`, `slicing`, `completed`, `failed`\n- `output_format` \u2014 `gcode` (default) or `gcode_3mf` (when `export_3mf` was set)\n- `sliced_file` \u2014 basename of the output file when `completed`, otherwise `null`\n- `error` \u2014 human-readable error message when `failed`, otherwise `null`\n\n**Job lifecycle:** `pending` \u2192 `slicing` \u2192 `completed` or `failed`\n\nJobs are kept for `JOB_TTL_SECONDS` (default 3600) or until downloaded. A **404** on a previously-valid `job_id` means the job has already been evicted \u2014 either downloaded or timed out.",
         "operationId": "get_job_status_api_slice_status__job_id__get",
+        "deprecated": true,
         "parameters": [
           {
             "name": "job_id",
@@ -579,6 +591,7 @@
         "summary": "Stream slice job logs (Server-Sent Events)",
         "description": "Returns a Server-Sent Events stream of OrcaSlicer stdout/stderr lines, emitted in real time as the slicer runs.\n\n**Event format:** `data: <log line>\\r\\n\\r\\n`\n\n**Terminal events (stream ends after these):**\n- `data: __COMPLETED__` \u2014 job finished successfully\n- `data: __FAILED__: <reason>` \u2014 job failed; `<reason>` is a short label\n\n**Usage notes:**\n- The stream replays all buffered log lines immediately on connect, so connecting after the job has already completed still delivers the full log history.\n- Most callers can skip this and poll `GET /api/slice/status` instead \u2014 logs are primarily useful for debugging slice failures.\n- If the job is evicted before you connect, the endpoint returns **404**.",
         "operationId": "get_job_logs_api_slice_logs__job_id__get",
+        "deprecated": true,
         "parameters": [
           {
             "name": "job_id",
@@ -618,6 +631,7 @@
         "summary": "Download sliced output file",
         "description": "Returns the sliced output as `application/octet-stream`. The file extension indicates the format:\n- `.gcode` \u2014 standalone GCode file (default)\n- `.3mf` \u2014 GCode embedded inside a 3MF (when `export_3mf` was set during job creation)\n\n**\u26a0\ufe0f One-time download:** downloading evicts the job immediately \u2014 the in-memory record and all temporary files on disk are deleted. There is no second download. Only call this once you have confirmed `status == 'completed'`.\n\nReturns **400** if the job exists but is not yet complete (wrong status). Returns **404** if the job does not exist (never created, already downloaded, or evicted).",
         "operationId": "download_sliced_file_api_slice_download__job_id__get",
+        "deprecated": true,
         "parameters": [
           {
             "name": "job_id",
@@ -699,7 +713,8 @@
           "503": {
             "description": "Profile catalog not yet ready (UUID mode only)"
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/arrange": {
@@ -748,7 +763,8 @@
               }
             }
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/3mf/objects": {
@@ -791,7 +807,8 @@
               }
             }
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/3mf/previews": {
@@ -827,7 +844,8 @@
           "422": {
             "description": "size out of range"
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/arrange/subset": {
@@ -869,7 +887,8 @@
           "503": {
             "description": "machine_uuid given but catalog not ready"
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/arrange/merge": {
@@ -911,7 +930,8 @@
           "503": {
             "description": "machine_uuid given but catalog not ready"
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/profiles/upload": {
@@ -954,7 +974,8 @@
               }
             }
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/profiles/rescan": {
@@ -974,7 +995,8 @@
               }
             }
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/health": {
@@ -994,7 +1016,8 @@
               }
             }
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/jobs": {
@@ -1005,6 +1028,7 @@
         "summary": "List job history",
         "description": "Returns every slice job created during this container's lifetime, newest first \u2014 including jobs already evicted from the active job table (downloaded, or expired after `JOB_TTL_SECONDS`). Backs the Web UI's job status/history view.\n\n**Response fields per job:** `id`, `filename` (original upload name), `status` (`pending`/`slicing`/`completed`/`failed`), `output_format`, `sliced_file`, `error`, `created_at` / `updated_at` (Unix timestamps), and `evicted` (`true` once the sliced file has been deleted from disk \u2014 `GET /api/slice/download/{id}` will 404).\n\nHistory is capped at `JOB_HISTORY_LIMIT` (default 200) entries; oldest entries are dropped first. Persisted to `/data/job_history.json`, so it survives restarts.",
         "operationId": "list_jobs_api_jobs_get",
+        "deprecated": true,
         "parameters": [
           {
             "name": "limit",
@@ -1063,6 +1087,7 @@
         "summary": "Remove stale temp files from failed/interrupted jobs",
         "description": "Scans `/tmp/jobs` and `/tmp/arrange` for leftover directories/files not accounted for by any currently active job, and removes the ones older than `min_age_seconds`. This catches clutter that the normal job-eviction sweep can't see \u2014 e.g. scratch dirs from an `/api/arrange`, `/api/pack`, or `/api/slice/thumbnail` request that never finished because the container was killed mid-request, or `/tmp/jobs` entries left behind by a slice job that existed before a restart.\n\n**`dry_run=true`** reports what would be removed (path count + total bytes) without deleting anything \u2014 use this to preview before committing.\n\n**`min_age_seconds`** (default 300) guards against deleting a directory that's still being written to by an in-flight request; pass `0` to remove everything unowned regardless of age.",
         "operationId": "cleanup_temp_api_cleanup_post",
+        "deprecated": true,
         "parameters": [
           {
             "name": "min_age_seconds",

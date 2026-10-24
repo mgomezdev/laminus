@@ -722,4 +722,5 @@ def test_v1_projects_subset_supports_remap_and_enveloped_errors(tmp_path):
     assert bad.status_code == 422
     assert bad.json()["error"]["code"] == "unprocessable" and "slot" in bad.json()["error"]["message"]
     legacy = _post_subset(srcp, machine_uuid="m1")
-    assert "Deprecation" not in legacy.headers
+    assert legacy.headers["Deprecation"] == "true"
+    assert legacy.headers["Sunset"] == "Sat, 24 Apr 2027 00:00:00 GMT"
