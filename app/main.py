@@ -20,7 +20,7 @@ from app.profile_catalog import ProfileCatalog
 from app.project_config_builder import build_project_settings, embed_project_settings
 from app import preview_3mf as _preview
 from app import subset_3mf as _subset
-from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf, inject_stls_into_3mf as _inject_stls_into_3mf, strip_application_version as _strip_app_version
+from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf, inject_stls_into_3mf as _inject_stls_into_3mf, stl_min_z as _stl_min_z, restore_build_item_z as _restore_build_item_z, restore_z_from_source as _restore_z_from_source, strip_application_version as _strip_app_version
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("laminus")
@@ -178,7 +178,7 @@ app = FastAPI(
         "Retry after `GET /api/health` reports `catalog_loaded: true`.\n"
         "- **400 / 408 / 500** — OrcaSlicer-side failures; check server logs for details."
     ),
-    version="0.11.0",
+    version="0.11.1",
     lifespan=lifespan,
     openapi_tags=[
         {
@@ -1633,7 +1633,7 @@ def _parse_pack_items(raw: str, filenames: list[str]) -> list[int]:
     tags=["arrange"],
     summary="Pack N STLs onto as many plates as needed (synchronous)",
     description=(
-        "Distributes STL geometry across build plates via OrcaSlicer `--arrange 1 --orient 1`. "
+        "Distributes STL geometry across build plates via OrcaSlicer `--arrange 1` (no auto-orient). "
         "Returns the resulting multi-plate `.3mf` directly as `application/octet-stream`. "
         "**Blocks for up to 120 seconds.**\n\n"
         "## Bed / settings source (mutually exclusive — supply exactly one)\n\n"
@@ -1664,8 +1664,9 @@ def _parse_pack_items(raw: str, filenames: list[str]) -> list[int]:
         f"capped at {PACK_MAX_INSTANCES}. On `/api/v1/pack` a 422 lists each problem in "
         "`error.details` with a `loc` such as `[\"body\",\"items\",1,\"quantity\"]`.\n\n"
         "## Notes\n\n"
-        "- OrcaSlicer auto-orients objects (`--orient 1`) to minimise support material. "
-        "Pass orient=false to skip (not yet exposed as a parameter — file a request).\n"
+        "- Parts are never tilted about X/Y (no auto-orient), so layer-line direction is "
+        "preserved. Each instance keeps its input STL's min Z (models intentionally above or "
+        "below the plate stay there); the arranger may rotate about Z.\n"
         "- The packed `.3mf` preserves `Metadata/project_settings.config` from the template "
         "but discards any geometry or model_settings from it.\n"
         "- All temporary files are cleaned up after the response is sent."
@@ -1864,7 +1865,7 @@ async def pack_stls(
             "orcaslicer",
             "--datadir", ORCA_DATADIR,
             "--arrange", "1",
-            "--orient", "1",
+            "--orient", "0",  # --orient tilts parts about X/Y, changing layer-line direction
             "--export-3mf", out_file,
             combined_3mf,
         ]
@@ -1897,6 +1898,12 @@ async def pack_stls(
                     detail=f"Slicer pack failed (exit {exit_code}). Check server logs.",
                 )
 
+            # Orca re-seats every part at min Z = 0; put each back at its input STL's min Z.
+            min_zs = await asyncio.to_thread(lambda: [_stl_min_z(p) for p in stl_paths])
+            if any(min_zs):
+                per_instance = [z for z, q in zip(min_zs, qty_list or [1] * len(min_zs)) for _ in range(q)]
+                await asyncio.to_thread(_restore_build_item_z, out_file, per_instance)
+
             stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_packed.3mf")
             shutil.copy2(out_file, stable_out)
             background_tasks.add_task(cleanup_directory, job_dir)
@@ -1920,8 +1927,8 @@ async def pack_stls(
     tags=["arrange"],
     summary="Auto-arrange and orient objects in a 3MF (synchronous)",
     description=(
-        "Runs OrcaSlicer's plate-packing (`--arrange 1`) and auto-orientation "
-        "(`--orient 1`) on an existing `.3mf` and returns the rearranged `.3mf` directly "
+        "Runs OrcaSlicer's plate-packing (`--arrange 1`) and, only if `orient=true`, "
+        "auto-orientation (`--orient 1`, which may tilt parts about X/Y) on an existing `.3mf` and returns the rearranged `.3mf` directly "
         "as `application/octet-stream`.\n\n"
         "**Blocking:** waits up to `ARRANGE_TIMEOUT_SECONDS` (default 120 s) for OrcaSlicer "
         "to finish. No job tracking — call completes synchronously.\n\n"
@@ -1957,7 +1964,8 @@ async def auto_arrange_3mf(
     orient: Optional[str] = Form(None),
 ):
     arrange = _form_default_true(arrange)
-    orient = _form_default_true(orient)
+    # Opt-in: --orient tilts parts about X/Y, changing layer-line direction.
+    orient = orient is not None and _form_default_true(orient)
     # Fix R1: _safe_filename now guards against None before any attribute access
     try:
         safe_name = _safe_filename(file.filename)
@@ -2025,6 +2033,13 @@ async def auto_arrange_3mf(
                     status_code=400,
                     detail=f"Slicer auto-arrange process failed (exit code {exit_code}). Check server logs for details.",
                 )
+
+            if not orient:
+                # Orca re-seats every object at min Z = 0; restore each object's input min Z.
+                try:
+                    await asyncio.to_thread(_restore_z_from_source, in_file, out_file)
+                except Exception:
+                    logger.exception("Could not restore input Z positions; returning Orca's output as-is")
 
             stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_output.3mf")
             shutil.copy2(out_file, stable_out)
