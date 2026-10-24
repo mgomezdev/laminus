@@ -6,9 +6,7 @@ Contract (see docs/api-versioning.md):
   * list endpoints use opaque keyset cursors: ``{"data": [...], "page": {"limit", "next_cursor"}}``
   * ``POST /api/v1/jobs`` honours ``Idempotency-Key``
   * ``GET /api/v1`` is the capability-discovery document
-  * legacy ``/api/*`` routes keep working unchanged; once ``LEGACY_DEPRECATION_HEADERS`` is
-    enabled (the default), those with a v1 equivalent carry ``Deprecation`` / ``Link: <v1 route>;
-    rel="successor-version"`` response headers and the agreed Sunset date
+  * versionless API routes are retired (pre-alpha exception, BIZ-335)
 
 The module is installed by ``main.py`` (``install(app, main_module)``) so handlers read the
 live job table / catalog through ``m`` at call time.
@@ -16,7 +14,6 @@ live job table / catalog through ``m`` at call time.
 import base64
 import hashlib
 import json
-import logging
 import os
 import time
 import uuid
@@ -28,64 +25,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-logger = logging.getLogger(__name__)
-LEGACY_SUNSET = "Sat, 24 Apr 2027 00:00:00 GMT"
-
 API_VERSION = "v1"
 PREFIX = "/api/v1"
 IDEMPOTENCY_TTL_SECONDS = 24 * 3600
 _MAX_PAGE = 200
-
-# legacy route template -> v1 route template (drives Deprecation / successor-version headers)
-LEGACY_TO_V1 = {
-    "/api/slice/start": f"{PREFIX}/jobs",
-    "/api/slice/status/{job_id}": f"{PREFIX}/jobs/{{job_id}}",
-    "/api/slice/logs/{job_id}": f"{PREFIX}/jobs/{{job_id}}/events",
-    "/api/slice/download/{job_id}": f"{PREFIX}/jobs/{{job_id}}/artifact",
-    "/api/jobs": f"{PREFIX}/jobs",
-    "/api/profiles": f"{PREFIX}/profiles",
-    "/api/profiles/{profile_uuid}": f"{PREFIX}/profiles/{{profile_uuid}}",
-    "/api/3mf/objects": f"{PREFIX}/projects/inspect",
-    "/api/arrange/subset": f"{PREFIX}/projects/subset",
-    "/api/arrange/merge": f"{PREFIX}/projects/merge",
-}
-
-# (legacy path, method, v1 path, tag, summary): v1 serves the legacy handler unchanged apart from
-# the error envelope and response headers.
-V1_ALIASES = [
-    ("/api/3mf/objects", "POST", f"{PREFIX}/projects/inspect", "v1 projects", "List objects in a 3MF project"),
-    ("/api/arrange/subset", "POST", f"{PREFIX}/projects/subset", "v1 projects",
-     "Subset a 3MF by object x quantity and arrange"),
-    ("/api/arrange/merge", "POST", f"{PREFIX}/projects/merge", "v1 projects",
-     "Merge selections from several 3MFs and arrange"),
-    ("/api/health", "GET", f"{PREFIX}/health", "v1 health", "Service health"),
-    ("/api/pack", "POST", f"{PREFIX}/pack", "v1 projects", "Pack STL/3MF files onto plates"),
-    ("/api/arrange", "POST", f"{PREFIX}/arrange", "v1 projects", "Arrange and orient a 3MF"),
-    ("/api/3mf/previews", "POST", f"{PREFIX}/projects/previews", "v1 projects", "Render 3MF plate previews"),
-    ("/api/slice/prepared", "POST", f"{PREFIX}/slice/prepared", "v1 jobs", "Slice a prepared 3MF"),
-    ("/api/slice/thumbnail", "POST", f"{PREFIX}/slice/thumbnail", "v1 jobs", "Render a slice thumbnail"),
-    ("/api/profiles/rescan", "POST", f"{PREFIX}/profiles/rescan", "v1 profiles", "Force a catalog rebuild"),
-    ("/api/profiles/broken", "GET", f"{PREFIX}/profiles/broken", "v1 profiles",
-     "Profiles dropped for unresolved inheritance"),
-    ("/api/profiles/upload", "POST", f"{PREFIX}/profiles/upload", "v1 profiles", "Upload a user profile"),
-    ("/api/profiles/merged-config", "POST", f"{PREFIX}/profiles/merged-config", "v1 profiles",
-     "Resolve a merged project config"),
-    ("/api/profiles/machines/suggest", "POST", f"{PREFIX}/profiles/machines/suggest", "v1 profiles",
-     "Suggest machine presets"),
-    ("/api/profiles/models/variants", "POST", f"{PREFIX}/profiles/models/variants", "v1 profiles",
-     "Nozzle variants for a model"),
-    ("/api/profiles/machines/{machine_ref}/presets", "GET", f"{PREFIX}/profiles/machines/{{machine_ref}}/presets",
-     "v1 profiles", "Presets compatible with a machine"),
-    ("/api/profiles/machines/{machine_ref}/supports", "GET", f"{PREFIX}/profiles/machines/{{machine_ref}}/supports",
-     "v1 profiles", "Capabilities of a machine"),
-    ("/api/cleanup", "POST", f"{PREFIX}/cleanup", "v1 maintenance", "Clean up stale job directories"),
-]
-LEGACY_TO_V1.update({old: new for old, _m, new, _t, _s in V1_ALIASES})
-
-def _legacy_deprecation_enabled() -> bool:
-    # Consumers migrated (BIZ-333); retain an emergency signalling opt-out.
-    return os.environ.get("LEGACY_DEPRECATION_HEADERS", "true").strip().lower() in ("1", "true", "yes", "on")
-
 
 _DEFAULT_CODES = {
     400: "bad_request", 401: "unauthorized", 403: "forbidden", 404: "not_found",
@@ -174,18 +117,6 @@ def install(app: FastAPI, m) -> None:
         response.headers["X-Request-ID"] = request.state.request_id
         if _is_v1(request):
             response.headers["API-Version"] = API_VERSION
-        else:
-            route = request.scope.get("route")
-            successor = LEGACY_TO_V1.get(getattr(route, "path", None))
-            if successor:
-                for name, value in request.path_params.items():
-                    successor = successor.replace("{" + name + "}", str(value))
-                logger.info("Legacy API request method=%s route=%s status=%s request_id=%s",
-                            request.method, route.path, response.status_code, request.state.request_id)
-                if _legacy_deprecation_enabled():
-                    response.headers["Deprecation"] = "true"
-                    response.headers["Sunset"] = LEGACY_SUNSET
-                    response.headers["Link"] = f'<{successor}>; rel="successor-version"'
         return response
 
     @app.exception_handler(StarletteHTTPException)
@@ -217,7 +148,7 @@ def install(app: FastAPI, m) -> None:
         return {
             "api_version": API_VERSION,
             "supported_versions": [API_VERSION],
-            "legacy": {"prefix": "/api", "deprecated": True, "sunset": LEGACY_SUNSET,
+            "legacy": {"prefix": "/api", "deprecated": True, "retired": True, "sunset": "2026-10-24",
                        "policy": "docs/api-versioning.md"},
             "engine": {"name": "orcaslicer", "version": m._orca_version(),
                        "binary_version": m._orcaslicer_version},
@@ -259,7 +190,7 @@ def install(app: FastAPI, m) -> None:
         }
 
     @app.post(f"{PREFIX}/jobs", tags=["v1 jobs"], status_code=202, summary="Create a slice job",
-              description="Same inputs as the legacy `POST /api/slice/start`. Send an "
+              description="Upload an STL/3MF and resolved profile UUIDs. Send an "
                           "`Idempotency-Key` header to make retries safe: the same key with the "
                           "same body returns the original job (`Idempotent-Replay: true`); the same "
                           "key with a different body is a 422 `idempotency_key_reuse`; a key whose "
@@ -397,17 +328,6 @@ def install(app: FastAPI, m) -> None:
             raise _err(404, "artifact_gone", "Artifact was already downloaded, expired or lost in a restart.")
         return await m.download_sliced_file(job_id, background_tasks)
 
-    # ---- aliases: same handlers as the legacy routes, served under v1 (errors enveloped).
-    # Registered before the profile routes so literal paths (e.g. /profiles/broken) win over
-    # /profiles/{profile_uuid}.
-    legacy = {(r.path, meth): r for r in app.routes if hasattr(r, "endpoint") and hasattr(r, "methods")
-              for meth in r.methods}
-    for old, method, new, tag, summary in V1_ALIASES:
-        r = legacy[(old, method)]
-        app.add_api_route(new, r.endpoint, methods=[method], tags=[tag], summary=summary,
-                          description=r.description, responses=r.responses,
-                          operation_id=f"v1_{r.name}")
-
     # ---- profiles
     @app.get(f"{PREFIX}/profiles", tags=["v1 profiles"], summary="List profiles (cursor-paginated)",
              description="Flat list across machine/process/filament presets. `manufacturer`, `model` "
@@ -438,9 +358,3 @@ def install(app: FastAPI, m) -> None:
         if entry is None:
             raise _err(404, "profile_not_found", f"Profile UUID '{profile_uuid}' not found.")
         return cat._public(entry)
-
-
-    # Keep runtime behavior intact while advertising retirement in both specs.
-    for route in app.routes:
-        if getattr(route, "path", None) in LEGACY_TO_V1:
-            route.deprecated = True

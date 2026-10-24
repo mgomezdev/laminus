@@ -1,4 +1,4 @@
-"""/api/pack `items` (file + quantity pairs): validation, v1 error details, injector pass-through."""
+"""/api/v1/pack `items` (file + quantity pairs): validation, v1 error details, injector pass-through."""
 import io
 import json
 import struct
@@ -20,7 +20,7 @@ def _stl() -> bytes:
     return buf.getvalue()
 
 
-def _post(client, items=None, names=("a.stl", "b.stl"), path="/api/pack"):
+def _post(client, items=None, names=("a.stl", "b.stl"), path="/api/v1/pack"):
     data = {"bed_x": "200", "bed_y": "200", "bed_z": "200"}
     if items is not None:
         data["items"] = items if isinstance(items, str) else json.dumps(items)
@@ -68,10 +68,6 @@ def test_pack_rejects_duplicate_upload_filenames_when_items_given():
     assert resp.status_code == 422
 
 
-def test_legacy_422_keeps_plain_string_detail():
-    body = _post(TestClient(app), [_item("a.stl", 0), _item("b.stl", 1)]).json()
-    assert isinstance(body["detail"], str)
-    assert "must be >= 1" in body["detail"]
 
 
 def test_v1_422_lists_each_problem_in_details():

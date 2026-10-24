@@ -16,7 +16,7 @@ def test_download_stub_job_returns_404_not_misleading_400():
         "_wall_created_at": 0, "_stub": True,
     }
     try:
-        resp = client.get(f"/api/slice/download/{job_id}")
+        resp = client.get(f"/api/v1/jobs/{job_id}/artifact")
         assert resp.status_code == 404
     finally:
         main_mod.jobs.pop(job_id, None)
@@ -33,7 +33,7 @@ def test_logs_stub_job_returns_404_not_attribute_error():
         "_wall_created_at": 0, "_stub": True,
     }
     try:
-        resp = client.get(f"/api/slice/logs/{job_id}")
+        resp = client.get(f"/api/v1/jobs/{job_id}/events")
         assert resp.status_code == 404
     finally:
         main_mod.jobs.pop(job_id, None)

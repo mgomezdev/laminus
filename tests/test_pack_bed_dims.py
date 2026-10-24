@@ -1,4 +1,4 @@
-"""Regression: POST /api/pack in UUID mode must 422 (not 500) when the resolved
+"""Regression: POST /api/v1/pack in UUID mode must 422 (not 500) when the resolved
 machine profile has no printable_area/printable_height, and must clean up the
 job directory it already created.
 
@@ -27,7 +27,7 @@ def test_pack_uuid_mode_rejects_machine_without_bed_dims(profile_tree):
     main_mod.catalog = cat
     client = TestClient(main_mod.app)
     resp = client.post(
-        "/api/pack",
+        "/api/v1/pack",
         files=[("files", ("m.stl", b"solid t\nendsolid", "application/octet-stream"))],
         data={
             "machine_uuid": machine_uuid,
@@ -36,4 +36,4 @@ def test_pack_uuid_mode_rejects_machine_without_bed_dims(profile_tree):
         },
     )
     assert resp.status_code == 422
-    assert machine_uuid in resp.json()["detail"]
+    assert machine_uuid in resp.json()["error"]["message"]

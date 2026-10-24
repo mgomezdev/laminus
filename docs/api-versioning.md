@@ -5,7 +5,7 @@
 | Version | Prefix | Status |
 |---|---|---|
 | v1 | `/api/v1` | Stable. The contract is `openapi-v1.json` (CI-regenerated) |
-| legacy | `/api/*` (no version) | Deprecated; coexists with v1 until at least April 24, 2027 |
+| legacy | `/api/*` (no version) | Retired October 24, 2026 (pre-alpha exception); returns 404 |
 
 `GET /api/v1` is the discovery document: supported versions, engine, readiness, `features` flags and limits. Feature-detect from `features`; don't parse version strings.
 
@@ -62,7 +62,7 @@ These need a new major (`/api/v2`):
 
 Differences worth knowing: a job record outlives its artifact (`artifact.available: false` after the one-time download or TTL eviction, instead of a 404 on the job); artifact on a not-yet-complete job is 409 (legacy: 400); profile lists are flat with `type`, filtered by `type=`/`q=` and paginated (legacy: grouped, unpaginated).
 
-Also served under `/api/v1` (same handlers and request/response bodies as the legacy route; only the error envelope and `API-Version` header differ):
+Other supported v1 endpoints (the legacy paths in this migration map now return 404):
 
 | v1 | Replaces (legacy) |
 |---|---|
@@ -74,13 +74,24 @@ Also served under `/api/v1` (same handlers and request/response bodies as the le
 | `POST /api/v1/profiles/merged-config`, `POST /api/v1/profiles/machines/suggest`, `POST /api/v1/profiles/models/variants`, `GET /api/v1/profiles/machines/{ref}/presets`, `GET /api/v1/profiles/machines/{ref}/supports` | same paths under `/api` |
 | `POST /api/v1/cleanup` | `POST /api/cleanup` |
 
-Every legacy `/api/*` route now has a v1 equivalent.
+Every former legacy operation has a v1 replacement. Versionless routes are no longer registered.
 
-## Deprecation policy
+## Pre-alpha retirement exception (BIZ-334 / BIZ-335)
 
-* Legacy routes that have a v1 equivalent answer with `Deprecation: true` and `Link: </api/v1/…>; rel="successor-version"` **by default**. `LEGACY_DEPRECATION_HEADERS=false` disables response signalling as an emergency compatibility measure; OpenAPI and discovery still report deprecation. Bodies and status codes are unchanged either way.
-* The agreed sunset is **April 24, 2027, 00:00 UTC** (BIZ-334). Responses advertise `Sunset: Sat, 24 Apr 2027 00:00:00 GMT` (RFC 8594), also recorded in discovery under `legacy.sunset`. Removal is a separate release after this date and evidence of no legacy traffic. If first deployment leaves less than six months, extend the date before shipping.
-* A v1 endpoint is deprecated the same way, only after its replacement in a newer major version is released, and stays for at least one full major cycle.
-* Behaviour changes to legacy routes are limited to bug fixes and security fixes.
+On October 24, 2026 the owner explicitly waived the sunset window across the
+repository set because the stack is pre-alpha. This supersedes the previously
+agreed April 24, 2027 date and the zero-traffic waiting gate for this migration.
+Versionless API routes are removed immediately in Laminus and its mock; there
+are no compatibility redirects or environment flags to restore them. Upgrade
+clients and the bundled UI together. Themis, Ordinus, and Concordia already use
+v1 in their active clients and healthchecks.
 
-Legacy operations are marked `deprecated: true` in OpenAPI. Each legacy request logs its method, route template, response status and request ID at INFO level; query strings and payloads are excluded. Configure INFO logging and inspect these records before retirement (BIZ-335). A calendar date alone does not remove routes.
+`GET /api/v1` reports `legacy.retired: true` and `legacy.sunset: "2026-10-24"`.
+`openapi.json` now contains only the v1 contract; `openapi-v1.json` remains the
+version-specific artifact. Both are regenerated and checked by CI. Dashboard,
+Swagger, and OpenAPI document URLs remain operational outside `/api`.
+
+This is a breaking pre-alpha release (0.12.0). The exception does not change the
+compatibility guarantees for API v1 or future stable deprecations. Future route
+removals require a replacement and the normal six-month notice unless another
+explicit exception is agreed.

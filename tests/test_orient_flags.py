@@ -1,5 +1,5 @@
 """--orient tilts parts about X/Y (changes layer-line direction): pack never passes it
-as 1, and /api/arrange only passes it when orient=true is requested."""
+as 1, and /api/v1/arrange only passes it when orient=true is requested."""
 import io
 import struct
 import zipfile
@@ -51,7 +51,7 @@ def _orient_value(args):
     return args[args.index("--orient") + 1] if "--orient" in args else None
 
 
-@pytest.mark.parametrize("path", ["/api/pack", "/api/v1/pack"])
+@pytest.mark.parametrize("path", ["/api/v1/pack", "/api/v1/pack"])
 def test_pack_never_orients(path):
     args = _run(path, files=[("files", ("a.stl", _stl(), "application/octet-stream"))],
                 data={"bed_x": "200", "bed_y": "200", "bed_z": "200"})
@@ -60,5 +60,5 @@ def test_pack_never_orients(path):
 
 @pytest.mark.parametrize("data,expected", [({}, None), ({"orient": "false"}, None), ({"orient": "true"}, "1")])
 def test_arrange_orient_is_opt_in(data, expected):
-    args = _run("/api/arrange", files={"file": ("m.3mf", _3mf(), "application/octet-stream")}, data=data)
+    args = _run("/api/v1/arrange", files={"file": ("m.3mf", _3mf(), "application/octet-stream")}, data=data)
     assert _orient_value(args) == expected

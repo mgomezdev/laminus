@@ -62,7 +62,7 @@ def _by_name(items):
 # ---- suggest ----
 
 def test_suggest_exact_model_returns_all_nozzle_variants_default_first(client):
-    r = client.post("/api/profiles/machines/suggest", json={"manufacturer": "Bambu Lab", "model": "P1S"})
+    r = client.post("/api/v1/profiles/machines/suggest", json={"manufacturer": "Bambu Lab", "model": "P1S"})
     assert r.status_code == 200
     body = r.json()
     assert r.headers["X-Catalog-Version"] == body["catalog_version"]
@@ -81,7 +81,7 @@ def test_suggest_exact_model_returns_all_nozzle_variants_default_first(client):
 
 
 def test_suggest_fuzzy_and_model_key_and_embedded_manufacturer(client):
-    r = client.post("/api/profiles/machines/suggest",
+    r = client.post("/api/v1/profiles/machines/suggest",
                     json={"manufacturer": "Bambulab", "model": "Bambu Lab P1S Combo", "model_key": "p1s"})
     top = r.json()["candidates"][0]
     assert top["name"] == P1S_04
@@ -89,19 +89,19 @@ def test_suggest_fuzzy_and_model_key_and_embedded_manufacturer(client):
 
 
 def test_suggest_no_match_is_empty_not_404(client):
-    r = client.post("/api/profiles/machines/suggest", json={"manufacturer": "Nobody", "model": "Zzz9000"})
+    r = client.post("/api/v1/profiles/machines/suggest", json={"manufacturer": "Nobody", "model": "Zzz9000"})
     assert r.status_code == 200
     assert r.json()["candidates"] == []
 
 
 def test_suggest_requires_manufacturer_and_model(client):
-    assert client.post("/api/profiles/machines/suggest", json={"model": "P1S"}).status_code == 422
+    assert client.post("/api/v1/profiles/machines/suggest", json={"model": "P1S"}).status_code == 422
 
 
 # ---- variants ----
 
 def test_variants_multi_nozzle_model(client):
-    r = client.post("/api/profiles/models/variants", json={"manufacturer": "Bambu Lab", "model": "P1S"})
+    r = client.post("/api/v1/profiles/models/variants", json={"manufacturer": "Bambu Lab", "model": "P1S"})
     v = r.json()["variants"]
     assert [(x["nozzle_diameter_mm"], x["flow"]) for x in v] == [(0.4, "standard"), (0.4, "high_flow"), (0.6, "standard")]
     assert [x["is_default_guess"] for x in v] == [True, False, False]
@@ -114,20 +114,20 @@ def test_variants_default_falls_back_when_no_04(client, tree):
     write_json(tree["system_dir"] + "/Prusa/machine/Prusa XL 0.8 nozzle.json",
                {"name": "Prusa XL 0.8 nozzle", "nozzle_diameter": ["0.8"]})
     main_mod.catalog = _built(tree)
-    v = client.post("/api/profiles/models/variants", json={"manufacturer": "Prusa", "model": "XL"}).json()["variants"]
+    v = client.post("/api/v1/profiles/models/variants", json={"manufacturer": "Prusa", "model": "XL"}).json()["variants"]
     assert [x["is_default_guess"] for x in v] == [True, False]
     assert v[0]["nozzle_diameter_mm"] == 0.6
 
 
 def test_variants_unknown_model_empty(client):
-    r = client.post("/api/profiles/models/variants", json={"manufacturer": "Bambu Lab", "model": "Nope"})
+    r = client.post("/api/v1/profiles/models/variants", json={"manufacturer": "Bambu Lab", "model": "Nope"})
     assert r.status_code == 200 and r.json()["variants"] == []
 
 
 # ---- presets ----
 
 def test_presets_filtered_by_compatibility_and_inheritance(client):
-    r = client.get(f"/api/profiles/machines/{REF_P1S_04}/presets")
+    r = client.get(f"/api/v1/profiles/machines/{REF_P1S_04}/presets")
     assert r.status_code == 200
     body = r.json()
     assert body["machine_ref"] == REF_P1S_04
@@ -144,41 +144,41 @@ def test_presets_filtered_by_compatibility_and_inheritance(client):
 
 def test_presets_kind_filter(client):
     ref = "machine:bambu-lab-p1s-0.6-nozzle"
-    p = client.get(f"/api/profiles/machines/{ref}/presets?kind=process").json()["presets"]
+    p = client.get(f"/api/v1/profiles/machines/{ref}/presets?kind=process").json()["presets"]
     assert {x["kind"] for x in p} == {"process"} and "0.30mm P1S 0.6" in _by_name(p)
-    f = client.get(f"/api/profiles/machines/{ref}/presets?kind=filament").json()["presets"]
+    f = client.get(f"/api/v1/profiles/machines/{ref}/presets?kind=filament").json()["presets"]
     assert {x["kind"] for x in f} == {"filament"} and "PLA P1S+A1" not in _by_name(f)
-    assert client.get(f"/api/profiles/machines/{ref}/presets?kind=bogus").status_code == 422
+    assert client.get(f"/api/v1/profiles/machines/{ref}/presets?kind=bogus").status_code == 422
 
 
 def test_presets_unknown_machine_ref_404(client):
-    r = client.get("/api/profiles/machines/machine:nope/presets")
+    r = client.get("/api/v1/profiles/machines/machine:nope/presets")
     assert r.status_code == 404 and r.json()["error"] == "unknown_machine_ref"
 
 
 # ---- supports ----
 
 def test_supports(client):
-    base = f"/api/profiles/machines/{REF_P1S_04}/supports"
+    base = f"/api/v1/profiles/machines/{REF_P1S_04}/supports"
     assert client.get(base).json()["supported"] is True
     ok = client.get(base + "?bed_x=256&bed_y=256").json()
     assert (ok["supported"], ok["reason"]) == (True, None)
     bad = client.get(base + "?bed_x=180&bed_y=180").json()
     assert (bad["supported"], bad["reason"]) == (False, "bed_mismatch")
-    unk = client.get("/api/profiles/machines/machine:nope/supports")
+    unk = client.get("/api/v1/profiles/machines/machine:nope/supports")
     assert unk.status_code == 200
     assert unk.json()["supported"] is False and unk.json()["reason"] == "unknown_machine_ref"
 
 
 def test_supports_machine_without_bed_size_not_ruled_out(client):
-    r = client.get("/api/profiles/machines/machine:my-custom-printer/supports?bed_x=999&bed_y=1").json()
+    r = client.get("/api/v1/profiles/machines/machine:my-custom-printer/supports?bed_x=999&bed_y=1").json()
     assert r["supported"] is True
 
 
 # ---- refs / version / stale ----
 
 def test_refs_and_version_stable_across_rebuild_and_change_with_content(client, tree):
-    url = f"/api/profiles/machines/{REF_P1S_04}/supports"
+    url = f"/api/v1/profiles/machines/{REF_P1S_04}/supports"
     v1 = client.get(url).json()["catalog_version"]
     main_mod.catalog = _built(tree)
     r = client.get(url)
@@ -193,7 +193,7 @@ def test_refs_and_version_stable_across_rebuild_and_change_with_content(client, 
 
 def test_stale_flag_while_rebuilding(client, monkeypatch):
     monkeypatch.setattr(main_mod, "_catalog_building", True)
-    assert client.get("/api/profiles/machines/machine:x/supports").json()["stale"] is True
+    assert client.get("/api/v1/profiles/machines/machine:x/supports").json()["stale"] is True
 
 
 def test_serves_stale_cache_when_no_live_catalog(client, tree, tmp_path, monkeypatch):
@@ -201,7 +201,7 @@ def test_serves_stale_cache_when_no_live_catalog(client, tree, tmp_path, monkeyp
     _built(tree).save_to_cache(cache, "old-key")
     monkeypatch.setattr(main_mod, "catalog", None)
     monkeypatch.setattr(main_mod, "_CATALOG_CACHE_FILE", cache)
-    r = client.post("/api/profiles/models/variants", json={"manufacturer": "Bambu Lab", "model": "P1S"})
+    r = client.post("/api/v1/profiles/models/variants", json={"manufacturer": "Bambu Lab", "model": "P1S"})
     assert r.status_code == 200 and r.json()["stale"] is True and len(r.json()["variants"]) == 3
 
 
@@ -209,16 +209,16 @@ def test_503_when_no_catalog_at_all(client, tmp_path, monkeypatch):
     monkeypatch.setattr(main_mod, "catalog", None)
     monkeypatch.setattr(main_mod, "_CATALOG_CACHE_FILE", str(tmp_path / "missing.json"))
     for r in (
-        client.post("/api/profiles/machines/suggest", json={"manufacturer": "a", "model": "b"}),
-        client.get("/api/profiles/machines/machine:x/presets"),
-        client.get("/api/profiles/machines/machine:x/supports"),
+        client.post("/api/v1/profiles/machines/suggest", json={"manufacturer": "a", "model": "b"}),
+        client.get("/api/v1/profiles/machines/machine:x/presets"),
+        client.get("/api/v1/profiles/machines/machine:x/supports"),
     ):
         assert r.status_code == 503 and r.json() == {"error": "catalog_unavailable"}
 
 
 def test_existing_endpoints_unchanged(client):
-    assert set(client.get("/api/profiles").json()) == {"machine", "process", "filament"}
-    assert client.get("/api/profiles/broken").status_code == 200
+    assert set(client.get("/api/v1/profiles").json()) == {"data", "page"}
+    assert client.get("/api/v1/profiles/broken").status_code == 200
 
 
 def test_abstract_bases_hidden_and_printable_area_bed(client, tree):
@@ -230,11 +230,11 @@ def test_abstract_bases_hidden_and_printable_area_bed(client, tree):
                {"name": "Bambu Lab X1 0.4 nozzle", "nozzle_diameter": ["0.4"],
                 "printable_area": ["0x0", "256x0", "256x256", "0x256"]})
     main_mod.catalog = _built(tree)
-    names = {p["name"] for p in client.get(f"/api/profiles/machines/{REF_P1S_04}/presets").json()["presets"]}
+    names = {p["name"] for p in client.get(f"/api/v1/profiles/machines/{REF_P1S_04}/presets").json()["presets"]}
     assert "fdm_process_common" not in names
-    cands = client.post("/api/profiles/machines/suggest", json={"manufacturer": "Bambu Lab", "model": "X1"}).json()["candidates"]
+    cands = client.post("/api/v1/profiles/machines/suggest", json={"manufacturer": "Bambu Lab", "model": "X1"}).json()["candidates"]
     assert "fdm_machine_common" not in {c["name"] for c in cands}
-    base = "/api/profiles/machines/machine:bambu-lab-x1-0.4-nozzle/supports"
+    base = "/api/v1/profiles/machines/machine:bambu-lab-x1-0.4-nozzle/supports"
     assert client.get(base + "?bed_x=256&bed_y=256").json()["supported"] is True
     assert client.get(base + "?bed_x=220&bed_y=220").json()["reason"] == "bed_mismatch"
 
@@ -244,6 +244,6 @@ def test_universal_presets_scoped_to_vendor_bundle(client, tree):
     write_json(tree["system_dir"] + "/OrcaFilamentLibrary/filament/Generic PLA.json", {"name": "Generic PLA"})
     write_json(tree["user_dir"] + "/default/process/My Process.json", {"name": "My Process"})
     main_mod.catalog = _built(tree)
-    names = {p["name"] for p in client.get(f"/api/profiles/machines/{REF_P1S_04}/presets").json()["presets"]}
+    names = {p["name"] for p in client.get(f"/api/v1/profiles/machines/{REF_P1S_04}/presets").json()["presets"]}
     assert "Prusa Universal" not in names
     assert {"Generic PLA", "My Process", "Universal"} <= names
