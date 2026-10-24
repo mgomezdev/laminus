@@ -98,7 +98,7 @@ jobs:
           path: /tmp/laminus-mock-ci.tar
           retention-days: 1
 
-  # Ordinus is not started: it never talks to Laminus.
+  # Core checks Themis with the mock built above; Ordinus has its own integration gate.
   e2e-core:
     needs: [mock-image]
     # A called workflow's token is capped by the caller's; Concordia's e2e logs
@@ -108,9 +108,8 @@ jobs:
       packages: read
     uses: mgomezdev/concordia/.github/workflows/e2e.yml@main
     with:
-      # PRs onto develop run Concordia's develop suite. Kept as one job (not a
-      # separate @develop one) so the required check stays "e2e-core / e2e".
-      concordia_ref: ${{ (github.base_ref == 'develop' || github.ref_name == 'develop') && 'develop' || 'main' }}
+      # Concordia has no develop branch; its maintained integration suite is on main.
+      concordia_ref: main
       profile: core
       image_artifact: laminus-mock-ci-image
       mock_laminus_image: laminus-mock:ci
