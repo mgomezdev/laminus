@@ -36,7 +36,7 @@ docker exec laminus python3 /workspace/flatten_profiles.py \
 
 **Check API health:**
 ```bash
-curl http://localhost:5000/api/health
+curl http://localhost:5000/api/v1/health
 ```
 
 ## Architecture
@@ -52,23 +52,23 @@ curl http://localhost:5000/api/health
 - `/opt/orcaslicer/` — extracted OrcaSlicer AppImage, on its own cache volume (`laminus-slicer`); wiped and re-extracted when `ORCA_VERSION` changes, not backed up
 
 ### Request flow for slicing
-1. `POST /api/slice/start` saves the uploaded file to `/tmp/jobs/{uuid}/input/`, creates an in-memory job entry in the global `jobs` dict, and dispatches `run_orcaslicer_task` as a FastAPI `BackgroundTask`.
+1. `POST /api/v1/jobs` saves the uploaded file to `/tmp/jobs/{uuid}/input/`, returns 202 with an `id`, creates an in-memory job entry in the global `jobs` dict, and dispatches `run_orcaslicer_task` as a FastAPI `BackgroundTask`.
 2. `run_orcaslicer_task` resolves profile paths via the `ProfileCatalog` singleton, builds a `xvfb-run orcaslicer --slice ...` subprocess, and streams stdout line-by-line into a per-job `JobLogger` (an `asyncio.Queue` wrapper).
-3. `GET /api/slice/logs/{job_id}` streams those logs as SSE using `StreamingResponse`. The stream terminates when the logger emits `__COMPLETED__` or `__FAILED__:...` sentinel strings.
-4. `GET /api/slice/download/{job_id}` returns the first `.gcode` or `.3mf` found in the job's output dir.
+3. `GET /api/v1/jobs/{job_id}/events` streams those logs as SSE using `StreamingResponse`. The API converts internal logger sentinels into typed `log`, `dropped`, `completed`, and `failed` SSE events.
+4. `GET /api/v1/jobs/{job_id}/artifact` returns the first `.gcode` or `.3mf` found in the job's output dir.
 
 ### Request flow for arrangement
-`POST /api/arrange` runs `xvfb-run orcaslicer --arrange 1 --orient 1 --export-3mf` **synchronously** (35-second timeout) and streams the resulting `.3mf` file back directly, then queues directory cleanup as a background task.
+`POST /api/v1/arrange` runs `xvfb-run orcaslicer --arrange 1 --orient 1 --export-3mf` **synchronously** (35-second timeout) and streams the resulting `.3mf` file back directly, then queues directory cleanup as a background task.
 
 ### Profile resolution
-`ProfileCatalog` (`app/profile_catalog.py`) walks the OrcaSlicer system profiles dir and `/config/user/` in the background, verifies every `"inherits"` chain resolves, and builds the display catalog (`GET /api/profiles`) plus a name index. It does **not** retain the fully-merged preset per entry — that used to be 40% of an 87 MB cache file. `ProfileCatalog.resolved(uuid)` materializes the merged dict lazily, on demand, memoized per-process (`_RESOLVED_MEMO_MAX = 256`), and is what `build_project_settings` is fed at slice time.
+`ProfileCatalog` (`app/profile_catalog.py`) walks the OrcaSlicer system profiles dir and `/config/user/` in the background, verifies every `"inherits"` chain resolves, and builds the display catalog (`GET /api/v1/profiles`) plus a name index. It does **not** retain the fully-merged preset per entry — that used to be 40% of an 87 MB cache file. `ProfileCatalog.resolved(uuid)` materializes the merged dict lazily, on demand, memoized per-process (`_RESOLVED_MEMO_MAX = 256`), and is what `build_project_settings` is fed at slice time.
 
 Because resolution happens against the profile tree *as it currently is*, a thin user profile (`"inherits": "<vendor name>"` + only the keys it changes) automatically picks up vendor updates on the next catalog build — no reflattening step needed. This is why `flatten_profiles.py` should be a last resort, not the default path (see below).
 
-The catalog is cached to `/tmp/laminus_catalog_cache.json` (deliberately not the durable `/data` volume — it's fully rebuildable), keyed by `ORCA_VERSION` + a signature of the top-level vendor bundle files (`<Vendor>.json`: name, version, mtime, size — cheap, and catches a bind-mounted OrcaSlicer install self-updating a vendor bundle independently of `ORCA_VERSION`) + every file under `/config/user/`. Any preset change on either side voids the cache and forces re-verification. `POST /api/profiles/rescan` forces a rebuild manually (bypassing the cache check), e.g. after editing profiles directly on a bind mount. `GET /api/profiles/broken` lists profiles dropped from the catalog because their `inherits` chain didn't resolve — the signal an OrcaSlicer update renamed or removed a vendor base a user profile depended on.
+The catalog is cached to `/tmp/laminus_catalog_cache.json` (deliberately not the durable `/data` volume — it's fully rebuildable), keyed by `ORCA_VERSION` + a signature of the top-level vendor bundle files (`<Vendor>.json`: name, version, mtime, size — cheap, and catches a bind-mounted OrcaSlicer install self-updating a vendor bundle independently of `ORCA_VERSION`) + every file under `/config/user/`. Any preset change on either side voids the cache and forces re-verification. `POST /api/v1/profiles/rescan` forces a rebuild manually (bypassing the cache check), e.g. after editing profiles directly on a bind mount. `GET /api/v1/profiles/broken` lists profiles dropped from the catalog because their `inherits` chain didn't resolve — the signal an OrcaSlicer update renamed or removed a vendor base a user profile depended on.
 
 ### Job state
-`jobs` is an in-memory dict, but it's write-through: `_save_jobs()` snapshots serialisable job metadata to `/data/jobs.json` on every change, and `_load_jobs_on_startup()` restores it on boot — any job that was `pending`/`slicing` when the process stopped is marked `failed` on reload (its disk files are gone, so it comes back as a status-only stub). `job_history` is a separate, longer-lived `OrderedDict` backed by `/data/job_history.json`, capped at `JOB_HISTORY_LIMIT` (default 200); it survives a job's eviction from `jobs` (by download or the TTL sweep) so `GET /api/jobs` can still show what happened. Neither file is a database — both are just JSON dumps on the durable `/data` volume.
+`jobs` is an in-memory dict, but it's write-through: `_save_jobs()` snapshots serialisable job metadata to `/data/jobs.json` on every change, and `_load_jobs_on_startup()` restores it on boot — any job that was `pending`/`slicing` when the process stopped is marked `failed` on reload (its disk files are gone, so it comes back as a status-only stub). `job_history` is a separate, longer-lived `OrderedDict` backed by `/data/job_history.json`, capped at `JOB_HISTORY_LIMIT` (default 200); it survives a job's eviction from `jobs` (by download or the TTL sweep) so `GET /api/v1/jobs` can still show what happened. Neither file is a database — both are just JSON dumps on the durable `/data` volume.
 
 ### API reference for agents
 `docs/laminus-api-for-agents.md` documents the full request/response shape for every endpoint (canonical slice workflow, UUID stability, error shapes) — read it before calling the API rather than inferring the contract from this file or from `openapi.json` directly.
@@ -79,4 +79,4 @@ Prefer a thin user preset: `"inherits": "<vendor profile name>"` plus only the k
 `flatten_profiles.py` recursively resolves inheritance and writes a fully merged, standalone JSON with no `inherits` — use it only for a permanent fork (the vendor profile is being removed, or you need to diverge for good). A flattened profile is frozen at the OrcaSlicer version it was flattened from and will not receive any later vendor fix. It also patches in required fields (`"from": "user"`, `compatible_printers`, `layer_change_gcode`) that the CLI validator requires.
 
 ### Neutral profile API
-`app/neutral_profiles.py` (`ProfileCatalog.neutral`) answers model/nozzle-variant lookups (`/api/profiles/machines/suggest`, `/models/variants`, `/machines/{ref}/presets|supports`) purely from the catalog — no engine. Refs are `<kind>:<slug(name)>`; `catalog_version` hashes preset identity+compat data. `main._neutral_catalog()` falls back to the on-disk cache (any key) with `stale: true` when no live catalog exists. Catalog entry shape changes must bump `_CACHE_SCHEMA` in `profile_catalog.py`. Contract in `docs/laminus-api-for-agents.md` §2b.
+`app/neutral_profiles.py` (`ProfileCatalog.neutral`) answers model/nozzle-variant lookups (`/api/v1/profiles/machines/suggest`, `/models/variants`, `/machines/{ref}/presets|supports`) purely from the catalog — no engine. Refs are `<kind>:<slug(name)>`; `catalog_version` hashes preset identity+compat data. `main._neutral_catalog()` falls back to the on-disk cache (any key) with `stale: true` when no live catalog exists. Catalog entry shape changes must bump `_CACHE_SCHEMA` in `profile_catalog.py`. Contract in `docs/laminus-api-for-agents.md` §2b.

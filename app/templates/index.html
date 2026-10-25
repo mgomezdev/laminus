@@ -750,7 +750,7 @@
                 <div class="form-group">
                     <label class="form-label" for="machine-select">Printer Preset</label>
                     <select class="form-select" id="machine-select" name="machine">
-                        <option value="">-- Use Default / Saved Settings --</option>
+                        <option value="">-- Select a profile --</option>
                     </select>
                 </div>
 
@@ -758,7 +758,7 @@
                 <div class="form-group">
                     <label class="form-label" for="process-select">Print Process Profile</label>
                     <select class="form-select" id="process-select" name="process">
-                        <option value="">-- Use Default / Saved Settings --</option>
+                        <option value="">-- Select a profile --</option>
                     </select>
                 </div>
 
@@ -766,7 +766,7 @@
                 <div class="form-group">
                     <label class="form-label" for="filament-select">Filament Profile</label>
                     <select class="form-select" id="filament-select" name="filament">
-                        <option value="">-- Use Default / Saved Settings --</option>
+                        <option value="">-- Select a profile --</option>
                     </select>
                 </div>
 
@@ -927,22 +927,29 @@
         // Fetch configurations from backend
         async function fetchProfiles() {
             try {
-                const response = await fetch('/api/profiles');
-                if (!response.ok) throw new Error("Failed to fetch configurations.");
-                
-                const profiles = await response.json();
+                const profiles = {machine: [], process: [], filament: []};
+                let cursor = null;
+                do {
+                    const params = new URLSearchParams({limit: '200'});
+                    if (cursor) params.set('cursor', cursor);
+                    const response = await fetch(`/api/v1/profiles?${params}`);
+                    if (!response.ok) throw new Error("Failed to fetch configurations.");
+                    const page = await response.json();
+                    page.data.forEach(p => { if (profiles[p.type]) profiles[p.type].push(p); });
+                    cursor = page.page.next_cursor;
+                } while (cursor);
                 
                 // Clear dropdowns except first default option
-                machineSelect.innerHTML = '<option value="">-- Use Default / Saved Settings --</option>';
-                processSelect.innerHTML = '<option value="">-- Use Default / Saved Settings --</option>';
-                filamentSelect.innerHTML = '<option value="">-- Use Default / Saved Settings --</option>';
+                machineSelect.innerHTML = '<option value="">-- Select a profile --</option>';
+                processSelect.innerHTML = '<option value="">-- Select a profile --</option>';
+                filamentSelect.innerHTML = '<option value="">-- Select a profile --</option>';
                 
                 let totalProfiles = 0;
 
                 // Populate Printer Select
                 profiles.machine.forEach(p => {
                     const opt = document.createElement('option');
-                    opt.value = p.rel_path;
+                    opt.value = p.uuid;
                     opt.textContent = p.name;
                     machineSelect.appendChild(opt);
                     totalProfiles++;
@@ -951,7 +958,7 @@
                 // Populate Process Select
                 profiles.process.forEach(p => {
                     const opt = document.createElement('option');
-                    opt.value = p.rel_path;
+                    opt.value = p.uuid;
                     opt.textContent = p.name;
                     processSelect.appendChild(opt);
                     totalProfiles++;
@@ -960,7 +967,7 @@
                 // Populate Filament Select
                 profiles.filament.forEach(p => {
                     const opt = document.createElement('option');
-                    opt.value = p.rel_path;
+                    opt.value = p.uuid;
                     opt.textContent = p.name;
                     filamentSelect.appendChild(opt);
                     totalProfiles++;
@@ -985,7 +992,7 @@
         // Check health of container
         async function checkHealth() {
             try {
-                const res = await fetch('/api/health');
+                const res = await fetch('/api/v1/health');
                 const data = await res.json();
                 if (data.status === 'healthy') {
                     document.getElementById('api-status').innerHTML = '<div class="status-dot"></div><span>Connected</span>';
@@ -1133,49 +1140,50 @@
             clearConsole();
             logToConsole(`[SYSTEM] Packaging job parameters and uploading file...`, 'system');
 
-            const configObj = {
-                printer: machineSelect.value,
-                process: processSelect.value,
-                plate: parseInt(document.getElementById('plate-select').value, 10),
-                filaments: {
-                    "1": filamentSelect.value
-                }
-            };
-
+            if (!machineSelect.value || !processSelect.value || !filamentSelect.value) {
+                handleJobFailed("Select a printer, process, and filament profile before slicing.");
+                return;
+            }
             const formData = new FormData();
             formData.append('file', selectedFile);
-            formData.append('config', JSON.stringify(configObj));
+            formData.append('machine_uuid', machineSelect.value);
+            formData.append('process_uuid', processSelect.value);
+            formData.append('filament_uuids', JSON.stringify([filamentSelect.value]));
+            formData.append('plate', document.getElementById('plate-select').value);
 
             try {
                 // Step 1: Start slicing job (uploads file and gets job_id)
-                const startRes = await fetch('/api/slice/start', {
+                const startRes = await fetch('/api/v1/jobs', {
                     method: 'POST',
                     body: formData
                 });
 
                 if (!startRes.ok) {
                     const errData = await startRes.json();
-                    throw new Error(errData.detail || "Failed to start slicing job.");
+                    throw new Error(errData.error?.message || "Failed to start slicing job.");
                 }
 
                 const jobData = await startRes.json();
-                const jobId = jobData.job_id;
+                const jobId = jobData.id;
                 logToConsole(`[SYSTEM] Slicing job initialized with ID: ${jobId}`, 'system');
 
                 // Step 2: Stream logs via EventSource
-                activeEventSource = new EventSource(`/api/slice/logs/${jobId}`);
+                activeEventSource = new EventSource(`/api/v1/jobs/${encodeURIComponent(jobId)}/events`);
                 
-                activeEventSource.onmessage = (event) => {
-                    const logMsg = event.data;
+                activeEventSource.addEventListener('completed', () => {
+                    activeEventSource.close();
+                    handleJobComplete(jobId);
+                });
+                activeEventSource.addEventListener('failed', event => {
+                    activeEventSource.close();
+                    handleJobFailed(JSON.parse(event.data).reason || "Slicing failed.");
+                });
+                activeEventSource.addEventListener('dropped', event => {
+                    logToConsole(JSON.parse(event.data).message, 'warning');
+                });
+                activeEventSource.addEventListener('log', (event) => {
+                    const logMsg = JSON.parse(event.data).message;
                     
-                    if (logMsg === '__COMPLETED__') {
-                        activeEventSource.close();
-                        handleJobComplete(jobId);
-                    } else if (logMsg.startsWith('__FAILED__')) {
-                        activeEventSource.close();
-                        const reason = logMsg.replace('__FAILED__:', '').trim();
-                        handleJobFailed(reason || "OrcaSlicer process exited with errors.");
-                    } else {
                         // Classify log outputs to style differently
                         if (logMsg.includes('WARNING') || logMsg.includes('warning:')) {
                             logToConsole(logMsg, 'warning');
@@ -1188,8 +1196,7 @@
                         } else {
                             logToConsole(logMsg);
                         }
-                    }
-                };
+                });
 
                 activeEventSource.onerror = (err) => {
                     console.error("SSE Connection error:", err);
@@ -1209,8 +1216,9 @@
         async function checkJobStatusFallback(jobId) {
             logToConsole("[SYSTEM] Connection to live log stream closed. Querying job status...", "warning");
             try {
-                const res = await fetch(`/api/slice/status/${jobId}`);
+                const res = await fetch(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
                 const data = await res.json();
+                if (!res.ok) throw new Error(data.error?.message || "Failed to fetch job status.");
                 if (data.status === 'completed') {
                     handleJobComplete(jobId);
                 } else if (data.status === 'failed') {
@@ -1241,7 +1249,7 @@
 
             // Bind download action
             downloadBtn.onclick = () => {
-                window.location.href = `/api/slice/download/${jobId}`;
+                window.location.href = `/api/v1/jobs/${encodeURIComponent(jobId)}/artifact`;
             };
         }
 
@@ -1291,10 +1299,10 @@
 
         async function fetchJobs() {
             try {
-                const res = await fetch('/api/jobs?limit=50');
+                const res = await fetch('/api/v1/jobs?limit=50');
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
-                renderJobs(data.jobs || []);
+                renderJobs(data.data || []);
             } catch (err) {
                 jobsTbody.innerHTML = `<tr><td colspan="6" class="jobs-empty">Failed to load job history: ${escapeHtml(err.message)}</td></tr>`;
             }
@@ -1307,16 +1315,16 @@
             }
             jobsTbody.innerHTML = list.map(j => {
                 const shortId = (j.id || '').slice(0, 8);
-                const canDownload = j.status === 'completed' && !j.evicted;
-                const detail = j.status === 'failed' ? (j.error || '') : (j.sliced_file || '');
-                const evictedTag = j.evicted && j.status === 'completed' ? '<span class="evicted-tag">(downloaded)</span>' : '';
+                const canDownload = j.status === 'completed' && j.artifact?.available;
+                const detail = j.status === 'failed' ? (j.error || '') : (j.artifact?.name || '');
+                const evictedTag = !j.artifact?.available && j.status === 'completed' ? '<span class="evicted-tag">(downloaded)</span>' : '';
                 return `<tr>
                     <td class="mono" title="${escapeHtml(j.id)}">${escapeHtml(shortId)}</td>
                     <td class="ellipsis" title="${escapeHtml(j.filename)}">${escapeHtml(j.filename) || '—'}</td>
                     <td>${statusPill(j.status)}</td>
                     <td title="${j.created_at ? new Date(j.created_at * 1000).toLocaleString() : ''}">${fmtRelTime(j.created_at)}</td>
                     <td class="ellipsis" title="${escapeHtml(detail)}">${escapeHtml(detail) || '—'}${evictedTag}</td>
-                    <td>${canDownload ? `<a class="jobs-download" href="/api/slice/download/${encodeURIComponent(j.id)}">Download</a>` : ''}</td>
+                    <td>${canDownload ? `<a class="jobs-download" href="/api/v1/jobs/${encodeURIComponent(j.id)}/artifact">Download</a>` : ''}</td>
                 </tr>`;
             }).join('');
         }
@@ -1351,7 +1359,7 @@
             cleanupRunBtn.disabled = true;
             try {
                 const age = cleanupAgeSelect.value;
-                const res = await fetch(`/api/cleanup?dry_run=true&min_age_seconds=${encodeURIComponent(age)}`, { method: 'POST' });
+                const res = await fetch(`/api/v1/cleanup?dry_run=true&min_age_seconds=${encodeURIComponent(age)}`, { method: 'POST' });
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
                 if (data.count === 0) {
@@ -1373,7 +1381,7 @@
             cleanupScanBtn.disabled = true;
             try {
                 const age = cleanupAgeSelect.value;
-                const res = await fetch(`/api/cleanup?dry_run=false&min_age_seconds=${encodeURIComponent(age)}`, { method: 'POST' });
+                const res = await fetch(`/api/v1/cleanup?dry_run=false&min_age_seconds=${encodeURIComponent(age)}`, { method: 'POST' });
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
                 cleanupPreview.textContent = `Removed ${data.count} item(s), freed ${formatBytes(data.freed_bytes)}.`;

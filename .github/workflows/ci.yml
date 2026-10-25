@@ -51,6 +51,12 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt pytest pytest-asyncio httpx
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Verify dashboard v1 integration
+        run: node --test tests/test_dashboard_v1.mjs
+
       # mock/orca_cli.py stands in for the real 200 MB AppImage so the suite
       # never downloads it. tests/test_mock_contract.py separately asserts the
       # HTTP mock and the real app satisfy identical contracts -- which is what

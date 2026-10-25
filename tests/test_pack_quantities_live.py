@@ -1,4 +1,4 @@
-"""Live /api/pack `quantities` tests against a running Laminus (real OrcaSlicer).
+"""Live /api/v1/pack `quantities` tests against a running Laminus (real OrcaSlicer).
 
 Skipped unless LAMINUS_URL is set, e.g.:
     docker compose up -d && LAMINUS_URL=http://localhost:5000 pytest tests/test_pack_quantities_live.py
@@ -36,7 +36,7 @@ def cube_stl(size: float) -> bytes:
     return buf.getvalue()
 
 
-def pack(stls, qty=None, bed=(100, 100, 100), timeout=150, path="/api/pack", items=None):
+def pack(stls, qty=None, bed=(100, 100, 100), timeout=150, path="/api/v1/pack", items=None):
     """stls: list of (filename, bytes); qty: copy counts aligned with stls (sent as `items`).
 
     Pass `items` (raw str) to send an arbitrary manifest. Returns the httpx.Response.
@@ -89,7 +89,7 @@ def analyse(content: bytes):
 @pytest.fixture(scope="module", autouse=True)
 def _live():
     try:
-        r = httpx.get(f"{BASE}/api/health", timeout=5)
+        r = httpx.get(f"{BASE}/api/v1/health", timeout=5)
         assert r.json().get("orcaslicer_installed")
     except Exception as e:  # pragma: no cover
         pytest.skip(f"Laminus not reachable at {BASE}: {e}")
@@ -175,7 +175,7 @@ BAD = {
 
 
 @pytest.mark.parametrize("items", BAD.values(), ids=BAD.keys())
-@pytest.mark.parametrize("path", ["/api/pack", "/api/v1/pack"])
+@pytest.mark.parametrize("path", ["/api/v1/pack", "/api/v1/pack"])
 def test_bad_items_rejected_422(items, path):
     raw = items if isinstance(items, str) else json.dumps(items)
     r = pack([A, B], items=raw, path=path)
@@ -222,6 +222,6 @@ def test_too_many_unique_files_still_422():
 
 
 def test_rejection_does_not_leak_work_dirs():
-    before = httpx.get(f"{BASE}/api/health", timeout=5).json().get("active_jobs")
+    before = httpx.get(f"{BASE}/api/v1/health", timeout=5).json().get("active_jobs")
     pack([A, B], [0,1])
-    assert httpx.get(f"{BASE}/api/health", timeout=5).json().get("active_jobs") == before
+    assert httpx.get(f"{BASE}/api/v1/health", timeout=5).json().get("active_jobs") == before

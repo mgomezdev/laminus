@@ -34,15 +34,17 @@ ORCA_VERSION=2.4.2   # default
 
 ## API Reference
 
+New integrations should use `/api/v1` and [`openapi-v1.json`](openapi-v1.json). Versionless routes were retired immediately on October 24, 2026 under the pre-alpha exception; see [migration mapping and policy](docs/api-versioning.md).
+
 See [`openapi.json`](openapi.json) for the full OpenAPI 3.0 spec (CI-regenerated, so it always matches the running code), or [`docs/laminus-api-for-agents.md`](docs/laminus-api-for-agents.md) for a walked-through guide to the full slice workflow, including profile discovery and UUID stability.
 
 ### Slice a model
 
-Profiles are referenced by UUID, resolved via `GET /api/profiles` (or `machine_uuid` directly if you already have it — see the agent doc above):
+Profiles are referenced by UUID, resolved via `GET /api/v1/profiles` (or `machine_uuid` directly if you already have it — see the agent doc above):
 
 ```bash
-# Start job
-curl -X POST http://localhost:5000/api/slice/start \
+# Start job (202; response.id is the job ID)
+curl -X POST http://localhost:5000/api/v1/jobs \
   -F "file=@model.stl" \
   -F "machine_uuid=<uuid-from-catalog>" \
   -F "process_uuid=<uuid-from-catalog>" \
@@ -50,19 +52,19 @@ curl -X POST http://localhost:5000/api/slice/start \
   -F "plate=1"
 
 # Poll status
-curl http://localhost:5000/api/slice/status/<job_id>
+curl http://localhost:5000/api/v1/jobs/<job_id>
 
 # Stream logs (SSE)
-curl http://localhost:5000/api/slice/logs/<job_id>
+curl http://localhost:5000/api/v1/jobs/<job_id>/events
 
 # Download result
-curl -O http://localhost:5000/api/slice/download/<job_id>
+curl -O http://localhost:5000/api/v1/jobs/<job_id>/artifact
 ```
 
 ### Arrange a 3MF
 
 ```bash
-curl -X POST http://localhost:5000/api/arrange \
+curl -X POST http://localhost:5000/api/v1/arrange \
   -F "file=@project.3mf" \
   -F "arrange=true" \
   -F "orient=true" \
@@ -72,7 +74,7 @@ curl -X POST http://localhost:5000/api/arrange \
 ### List profiles
 
 ```bash
-curl http://localhost:5000/api/profiles
+curl http://localhost:5000/api/v1/profiles
 ```
 
 ## Loading Profiles
@@ -93,7 +95,7 @@ Built-in profiles are located at `/opt/orcaslicer/resources/profiles/` inside th
 You can also upload profile JSON files directly via the API:
 
 ```bash
-curl -X POST http://localhost:5000/api/profiles/upload \
+curl -X POST http://localhost:5000/api/v1/profiles/upload \
   -F "type=filament" \
   -F "file=@MyFilament.json"
 ```
@@ -101,7 +103,7 @@ curl -X POST http://localhost:5000/api/profiles/upload \
 ## Health Check
 
 ```bash
-curl http://localhost:5000/api/health
+curl http://localhost:5000/api/v1/health
 ```
 
 ## Notes

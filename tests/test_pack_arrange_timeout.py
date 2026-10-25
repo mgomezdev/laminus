@@ -1,4 +1,4 @@
-"""Regression: /api/pack and /api/arrange must kill the OrcaSlicer subprocess on timeout
+"""Regression: /api/v1/pack and /api/v1/arrange must kill the OrcaSlicer subprocess on timeout
 instead of leaving it (and its Xvfb) running against a deleted job directory."""
 import asyncio
 import io
@@ -54,7 +54,7 @@ def test_pack_kills_process_on_timeout(monkeypatch):
     client = TestClient(app)
     with patch("asyncio.create_subprocess_exec", new=_make_timeout_subprocess(processes)):
         resp = client.post(
-            "/api/pack",
+            "/api/v1/pack",
             files=[("files", ("m.stl", _stl(), "application/octet-stream"))],
             data={"bed_x": "200", "bed_y": "200", "bed_z": "200"},
         )
@@ -72,7 +72,7 @@ def test_arrange_kills_process_on_timeout(monkeypatch):
     client = TestClient(app)
     with patch("asyncio.create_subprocess_exec", new=_make_timeout_subprocess(processes)):
         resp = client.post(
-            "/api/arrange",
+            "/api/v1/arrange",
             files={"file": ("m.3mf", _minimal_3mf(), "application/octet-stream")},
             data={"arrange": "true", "orient": "true"},
         )

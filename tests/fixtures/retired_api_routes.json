@@ -1,0 +1,20 @@
+[
+  "GET /api/health",
+  "GET /api/jobs",
+  "GET /api/profiles",
+  "GET /api/profiles/broken",
+  "GET /api/profiles/{profile_uuid}",
+  "GET /api/slice/download/{job_id}",
+  "GET /api/slice/logs/{job_id}",
+  "GET /api/slice/status/{job_id}",
+  "GET /api/test/known-profile",
+  "POST /api/arrange",
+  "POST /api/cleanup",
+  "POST /api/pack",
+  "POST /api/profiles/merged-config",
+  "POST /api/profiles/rescan",
+  "POST /api/profiles/upload",
+  "POST /api/slice/prepared",
+  "POST /api/slice/start",
+  "POST /api/slice/thumbnail"
+]

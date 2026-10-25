@@ -1,4 +1,4 @@
-"""Live /api/pack placement checks against a running Laminus (real OrcaSlicer).
+"""Live /api/v1/pack placement checks against a running Laminus (real OrcaSlicer).
 
 Every packed instance must (a) sit inside its plate's bed footprint, (b) keep the input
 model's geometry (rigid transform only), and (c) keep the input model's Z: a model whose
