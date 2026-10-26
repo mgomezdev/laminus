@@ -248,12 +248,20 @@ def strip_application_version(src_path: str, dst_path: str, fix_settings: bool =
     import json as _json
 
     with zipfile.ZipFile(src_path, "r") as src:
-        total = sum(i.file_size for i in src.infolist())
-        if total > MAX_3MF_UNCOMPRESSED_BYTES:
-            raise ValueError(f"3MF expands to {total} bytes (limit {MAX_3MF_UNCOMPRESSED_BYTES})")
+        infos = src.infolist()
+        if len({i.filename for i in infos}) != len(infos):
+            raise ValueError("3MF contains duplicate entry names")
+        budget = MAX_3MF_UNCOMPRESSED_BYTES  # enforced on bytes actually decompressed, not zip headers
         with zipfile.ZipFile(dst_path, "w", compression=zipfile.ZIP_DEFLATED) as dst:
-            for item in src.infolist():
-                data = src.read(item.filename)
+            for item in infos:
+                chunks = []
+                with src.open(item) as fh:
+                    while chunk := fh.read(1024 * 1024):
+                        budget -= len(chunk)
+                        if budget < 0:
+                            raise ValueError(f"3MF expands past {MAX_3MF_UNCOMPRESSED_BYTES} bytes")
+                        chunks.append(chunk)
+                data = b"".join(chunks)
                 if item.filename.endswith(".model"):
                     text = data.decode("utf-8", errors="replace")
                     text = _VERSION_META_RE.sub("", text)

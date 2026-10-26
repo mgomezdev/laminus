@@ -327,3 +327,18 @@ def test_strip_application_version_rejects_oversized_archive(tmp_path, monkeypat
     monkeypatch.setattr(mod, "MAX_3MF_UNCOMPRESSED_BYTES", 1000)
     with pytest.raises(ValueError):
         mod.strip_application_version(str(src), str(tmp_path / "o.3mf"))
+
+
+def test_strip_application_version_rejects_duplicate_entries(tmp_path):
+    import warnings
+    import zipfile
+    import app.stl_to_3mf as mod
+
+    dup = tmp_path / "dup.3mf"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with zipfile.ZipFile(dup, "w") as z:
+            z.writestr("a.model", "<m/>")
+            z.writestr("a.model", "<m/>")
+    with pytest.raises(ValueError):
+        mod.strip_application_version(str(dup), str(tmp_path / "o.3mf"))
