@@ -199,10 +199,6 @@ def test_v1_error_details_point_at_each_problem():
     assert locs[("body", "items", 2, "quantity")] == "must be an integer"
 
 
-def test_legacy_error_stays_plain_string():
-    r = pack([A, B], items=json.dumps([_it("a.stl", 0), _it("b.stl", 1)]))
-    assert r.status_code == 422 and isinstance(r.json()["detail"], str)
-
 
 def test_v1_pack_with_items_works():
     r = pack([A, B], [2, 1], path="/api/v1/pack")

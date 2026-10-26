@@ -58,7 +58,7 @@ curl http://localhost:5000/api/v1/health
 4. `GET /api/v1/jobs/{job_id}/artifact` returns the first `.gcode` or `.3mf` found in the job's output dir.
 
 ### Request flow for arrangement
-`POST /api/v1/arrange` runs `xvfb-run orcaslicer --arrange 1 --orient 1 --export-3mf` **synchronously** (35-second timeout) and streams the resulting `.3mf` file back directly, then queues directory cleanup as a background task.
+`POST /api/v1/arrange` runs `xvfb-run orcaslicer --arrange 1 --export-3mf` (plus `--orient 1` only when `orient=true`; it tilts parts about X/Y) **synchronously** (35-second timeout) and streams the resulting `.3mf` file back directly, then queues directory cleanup as a background task.
 
 ### Profile resolution
 `ProfileCatalog` (`app/profile_catalog.py`) walks the OrcaSlicer system profiles dir and `/config/user/` in the background, verifies every `"inherits"` chain resolves, and builds the display catalog (`GET /api/v1/profiles`) plus a name index. It does **not** retain the fully-merged preset per entry — that used to be 40% of an 87 MB cache file. `ProfileCatalog.resolved(uuid)` materializes the merged dict lazily, on demand, memoized per-process (`_RESOLVED_MEMO_MAX = 256`), and is what `build_project_settings` is fed at slice time.

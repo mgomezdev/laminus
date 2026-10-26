@@ -198,14 +198,6 @@ def test_tall_part_not_tilted():
 
 
 def _arrange(content: bytes, **data) -> bytes:
-    # Orca on Linux segfaults (exit 139) loading a 3MF carrying its own version metadata
-    strip = re.compile(rb'[ \t]*<metadata\s+name="(?:Application|OrcaSlicer)"\s*>[^<]*</metadata>\r?\n?')
-    src, buf = zipfile.ZipFile(io.BytesIO(content)), io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as dst:
-        for info in src.infolist():
-            raw = src.read(info.filename)
-            dst.writestr(info.filename, strip.sub(b"", raw) if info.filename.endswith(".model") else raw)
-    content = buf.getvalue()
     r = httpx.post(f"{BASE}/api/v1/arrange", files={"file": ("in.3mf", content, "application/octet-stream")},
                    data=data, timeout=300)
     assert r.status_code == 200, r.text

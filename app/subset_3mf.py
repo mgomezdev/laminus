@@ -17,6 +17,9 @@ import re
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
+
+from defusedxml import DefusedXmlException
+from defusedxml.ElementTree import fromstring as _defused_fromstring
 from typing import Optional
 
 NS_CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
@@ -144,9 +147,13 @@ class SubsetError(ValueError):
 
 def _parse(data: bytes) -> ET.Element:
     # Uploaded XML: refuse DTDs/entities outright (billion-laughs); 3MF never needs them.
+    # defusedxml also catches encodings (e.g. UTF-16) that hide the markers from a byte scan.
     if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
         raise SubsetError("3MF XML containing DOCTYPE/ENTITY declarations is not accepted")
-    return ET.fromstring(data)
+    try:
+        return _defused_fromstring(data)
+    except DefusedXmlException:
+        raise SubsetError("3MF XML containing DOCTYPE/ENTITY declarations is not accepted")
 
 
 def _q(tag: str) -> str:

@@ -229,7 +229,7 @@ _VERSION_META_RE = re.compile(
 )
 
 
-def strip_application_version(src_path: str, dst_path: str) -> None:
+def strip_application_version(src_path: str, dst_path: str, fix_settings: bool = True) -> None:
     """Copy *src_path* to *dst_path* with two fixes for OrcaSlicer Linux slice bugs:
 
     1. Remove version-bearing metadata tags from .model files to avoid segfaults
@@ -239,6 +239,7 @@ def strip_application_version(src_path: str, dst_path: str) -> None:
        empty ``layer_gcode``, override to ``"0"`` so OrcaSlicer generates M82 +
        absolute E values — correct for machines whose start-gcode uses M83 only
        for purge lines before handing off to the slicer's generated print body.
+       Skipped when *fix_settings* is False (e.g. arrange, whose output keeps its settings).
     """
     import json as _json
 
@@ -250,7 +251,7 @@ def strip_application_version(src_path: str, dst_path: str) -> None:
                     text = data.decode("utf-8", errors="replace")
                     text = _VERSION_META_RE.sub("", text)
                     data = text.encode("utf-8")
-                elif item.filename == "Metadata/project_settings.config":
+                elif fix_settings and item.filename == "Metadata/project_settings.config":
                     try:
                         cfg = _json.loads(data.decode("utf-8"))
                         if cfg.get("use_relative_e_distances") == "1":

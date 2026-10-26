@@ -62,3 +62,26 @@ def test_pack_never_orients(path):
 def test_arrange_orient_is_opt_in(data, expected):
     args = _run("/api/v1/arrange", files={"file": ("m.3mf", _3mf(), "application/octet-stream")}, data=data)
     assert _orient_value(args) == expected
+
+
+def test_arrange_feeds_orca_a_version_stripped_copy():
+    model = '<model><metadata name="OrcaSlicer">2.4.2</metadata></model>'
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("3D/3dmodel.model", model)
+    seen = {}
+
+    async def _fake(*args, **kwargs):
+        args = list(args)
+        seen["in"] = zipfile.ZipFile(args[-1]).read("3D/3dmodel.model").decode()
+        with open(args[args.index("--export-3mf") + 1], "wb") as fh:
+            fh.write(_3mf())
+        proc = AsyncMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"", None))
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", new=_fake):
+        resp = TestClient(app).post("/api/v1/arrange", files={"file": ("m.3mf", buf.getvalue(), "application/octet-stream")})
+    assert resp.status_code == 200
+    assert "OrcaSlicer" not in seen["in"]
