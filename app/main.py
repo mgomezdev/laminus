@@ -1783,6 +1783,9 @@ async def auto_arrange_3mf(
             stripped = os.path.join(input_dir, f"stripped_{safe_name}")
             await asyncio.to_thread(_strip_app_version, in_file, stripped, False)
             orca_in = stripped
+        except ValueError as e:  # decompression-bomb guard
+            background_tasks.add_task(cleanup_directory, job_dir)
+            raise HTTPException(status_code=422, detail=str(e))
         except Exception:
             logger.warning("Could not strip version metadata from arrange input", exc_info=True)
 

@@ -315,3 +315,15 @@ def test_strip_application_version_fix_settings_flag(tmp_path):
         with zipfile.ZipFile(dst) as z:
             assert b"Application" not in z.read("3D/3dmodel.model")
             assert json.loads(z.read("Metadata/project_settings.config"))["use_relative_e_distances"] == expected
+
+
+def test_strip_application_version_rejects_oversized_archive(tmp_path, monkeypatch):
+    import zipfile
+    import app.stl_to_3mf as mod
+
+    src = tmp_path / "big.3mf"
+    with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("3D/3dmodel.model", "<model/>" + " " * 10_000)
+    monkeypatch.setattr(mod, "MAX_3MF_UNCOMPRESSED_BYTES", 1000)
+    with pytest.raises(ValueError):
+        mod.strip_application_version(str(src), str(tmp_path / "o.3mf"))

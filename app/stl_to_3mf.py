@@ -229,6 +229,10 @@ _VERSION_META_RE = re.compile(
 )
 
 
+# Uncompressed-size ceiling for a 3MF we rewrite in memory (decompression-bomb guard).
+MAX_3MF_UNCOMPRESSED_BYTES = int(os.environ.get("MAX_3MF_UNCOMPRESSED_BYTES", 2 * 1024**3))
+
+
 def strip_application_version(src_path: str, dst_path: str, fix_settings: bool = True) -> None:
     """Copy *src_path* to *dst_path* with two fixes for OrcaSlicer Linux slice bugs:
 
@@ -244,6 +248,9 @@ def strip_application_version(src_path: str, dst_path: str, fix_settings: bool =
     import json as _json
 
     with zipfile.ZipFile(src_path, "r") as src:
+        total = sum(i.file_size for i in src.infolist())
+        if total > MAX_3MF_UNCOMPRESSED_BYTES:
+            raise ValueError(f"3MF expands to {total} bytes (limit {MAX_3MF_UNCOMPRESSED_BYTES})")
         with zipfile.ZipFile(dst_path, "w", compression=zipfile.ZIP_DEFLATED) as dst:
             for item in src.infolist():
                 data = src.read(item.filename)
