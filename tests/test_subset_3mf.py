@@ -721,3 +721,11 @@ def test_v1_projects_subset_supports_remap_and_enveloped_errors(tmp_path):
     bad = _post_subset(srcp, _url=url, machine_uuid="m1", filament_uuids='["f1","f1"]')
     assert bad.status_code == 422
     assert bad.json()["error"]["code"] == "unprocessable" and "slot" in bad.json()["error"]["message"]
+
+
+def test_parse_rejects_utf16_entity_declaration():
+    # a byte scan for b"<!ENTITY" misses UTF-16; defusedxml must still refuse it
+    from app.subset_3mf import SubsetError, _parse
+    xml = '<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE m [<!ENTITY x "boom">]><m>&x;</m>'
+    with pytest.raises(SubsetError):
+        _parse(xml.encode("utf-16"))

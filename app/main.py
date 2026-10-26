@@ -1776,7 +1776,20 @@ async def auto_arrange_3mf(
         if orient:
             cmd.extend(["--orient", "1"])
 
-        cmd.append(in_file)
+        # Orca on Linux segfaults (exit 139) on 3MFs carrying its own version metadata, which
+        # includes anything Orca wrote (e.g. a /pack output). Hand it a stripped copy.
+        orca_in = in_file
+        try:
+            stripped = os.path.join(input_dir, f"stripped_{safe_name}")
+            await asyncio.to_thread(_strip_app_version, in_file, stripped, False)
+            orca_in = stripped
+        except ValueError as e:  # decompression-bomb guard
+            background_tasks.add_task(cleanup_directory, job_dir)
+            raise HTTPException(status_code=422, detail=str(e))
+        except Exception:
+            logger.warning("Could not strip version metadata from arrange input", exc_info=True)
+
+        cmd.append(orca_in)
         logger.info(f"Running arrange command: {' '.join(cmd)}")
 
         try:

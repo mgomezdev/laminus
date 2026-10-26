@@ -229,7 +229,11 @@ _VERSION_META_RE = re.compile(
 )
 
 
-def strip_application_version(src_path: str, dst_path: str) -> None:
+# Uncompressed-size ceiling for a 3MF we rewrite in memory (decompression-bomb guard).
+MAX_3MF_UNCOMPRESSED_BYTES = int(os.environ.get("MAX_3MF_UNCOMPRESSED_BYTES", 2 * 1024**3))
+
+
+def strip_application_version(src_path: str, dst_path: str, fix_settings: bool = True) -> None:
     """Copy *src_path* to *dst_path* with two fixes for OrcaSlicer Linux slice bugs:
 
     1. Remove version-bearing metadata tags from .model files to avoid segfaults
@@ -239,18 +243,30 @@ def strip_application_version(src_path: str, dst_path: str) -> None:
        empty ``layer_gcode``, override to ``"0"`` so OrcaSlicer generates M82 +
        absolute E values — correct for machines whose start-gcode uses M83 only
        for purge lines before handing off to the slicer's generated print body.
+       Skipped when *fix_settings* is False (e.g. arrange, whose output keeps its settings).
     """
     import json as _json
 
     with zipfile.ZipFile(src_path, "r") as src:
+        infos = src.infolist()
+        if len({i.filename for i in infos}) != len(infos):
+            raise ValueError("3MF contains duplicate entry names")
+        budget = MAX_3MF_UNCOMPRESSED_BYTES  # enforced on bytes actually decompressed, not zip headers
         with zipfile.ZipFile(dst_path, "w", compression=zipfile.ZIP_DEFLATED) as dst:
-            for item in src.infolist():
-                data = src.read(item.filename)
+            for item in infos:
+                chunks = []
+                with src.open(item) as fh:
+                    while chunk := fh.read(1024 * 1024):
+                        budget -= len(chunk)
+                        if budget < 0:
+                            raise ValueError(f"3MF expands past {MAX_3MF_UNCOMPRESSED_BYTES} bytes")
+                        chunks.append(chunk)
+                data = b"".join(chunks)
                 if item.filename.endswith(".model"):
                     text = data.decode("utf-8", errors="replace")
                     text = _VERSION_META_RE.sub("", text)
                     data = text.encode("utf-8")
-                elif item.filename == "Metadata/project_settings.config":
+                elif fix_settings and item.filename == "Metadata/project_settings.config":
                     try:
                         cfg = _json.loads(data.decode("utf-8"))
                         if cfg.get("use_relative_e_distances") == "1":

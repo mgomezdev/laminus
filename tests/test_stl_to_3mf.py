@@ -297,3 +297,48 @@ def test_restore_z_rejects_entity_declarations(tmp_path):
                    '<?xml version="1.0"?><!DOCTYPE m [<!ENTITY x "boom">]><model><resources/><build/></model>')
     with pytest.raises(ValueError):  # defusedxml's exceptions subclass ValueError
         restore_z_from_source(src, out)
+
+
+def test_strip_application_version_fix_settings_flag(tmp_path):
+    import json
+    import zipfile
+    from app.stl_to_3mf import strip_application_version
+
+    src = tmp_path / "s.3mf"
+    cfg = json.dumps({"use_relative_e_distances": "1", "layer_gcode": ""})
+    with zipfile.ZipFile(src, "w") as z:
+        z.writestr("3D/3dmodel.model", '<model><metadata name="Application">BambuStudio-2.3.2</metadata></model>')
+        z.writestr("Metadata/project_settings.config", cfg)
+    for fix, expected in ((True, "0"), (False, "1")):
+        dst = tmp_path / f"d{fix}.3mf"
+        strip_application_version(str(src), str(dst), fix_settings=fix)
+        with zipfile.ZipFile(dst) as z:
+            assert b"Application" not in z.read("3D/3dmodel.model")
+            assert json.loads(z.read("Metadata/project_settings.config"))["use_relative_e_distances"] == expected
+
+
+def test_strip_application_version_rejects_oversized_archive(tmp_path, monkeypatch):
+    import zipfile
+    import app.stl_to_3mf as mod
+
+    src = tmp_path / "big.3mf"
+    with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("3D/3dmodel.model", "<model/>" + " " * 10_000)
+    monkeypatch.setattr(mod, "MAX_3MF_UNCOMPRESSED_BYTES", 1000)
+    with pytest.raises(ValueError):
+        mod.strip_application_version(str(src), str(tmp_path / "o.3mf"))
+
+
+def test_strip_application_version_rejects_duplicate_entries(tmp_path):
+    import warnings
+    import zipfile
+    import app.stl_to_3mf as mod
+
+    dup = tmp_path / "dup.3mf"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with zipfile.ZipFile(dup, "w") as z:
+            z.writestr("a.model", "<m/>")
+            z.writestr("a.model", "<m/>")
+    with pytest.raises(ValueError):
+        mod.strip_application_version(str(dup), str(tmp_path / "o.3mf"))
