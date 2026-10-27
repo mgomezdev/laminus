@@ -729,3 +729,30 @@ def test_parse_rejects_utf16_entity_declaration():
     xml = '<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE m [<!ENTITY x "boom">]><m>&x;</m>'
     with pytest.raises(SubsetError):
         _parse(xml.encode("utf-16"))
+
+
+def test_open_zip_rejects_oversized_expansion(tmp_path, monkeypatch):
+    path = str(tmp_path / "big.3mf")
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("a.bin", b"x" * 4096)
+    monkeypatch.setattr(s, "MAX_3MF_UNCOMPRESSED_BYTES", 1024)
+    with pytest.raises(s.SubsetError, match="expands past"):
+        s.open_zip(path)
+
+
+def test_open_zip_rejects_duplicate_entries(tmp_path):
+    path = str(tmp_path / "dup.3mf")
+    with pytest.warns(UserWarning):
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("a.txt", b"1")
+            z.writestr("a.txt", b"2")
+    with pytest.raises(s.SubsetError, match="duplicate"):
+        s.open_zip(path)
+
+
+def test_list_objects_rejects_zip_bomb(tmp_path, monkeypatch):
+    path = str(tmp_path / "in.3mf")
+    make_3mf(path)
+    monkeypatch.setattr(s, "MAX_3MF_UNCOMPRESSED_BYTES", 10)
+    with pytest.raises(s.SubsetError):
+        s.list_objects(path)
