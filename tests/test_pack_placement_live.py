@@ -241,3 +241,22 @@ def test_arrange_does_not_tilt_by_default():
     packed = pack([TALL], [2], (100, 100, 100))
     for world, tilted, _ in placements(_arrange(packed, arrange="true"))[0]:
         assert not tilted and np.ptp(world[:, 2]) == pytest.approx(80, abs=TOL)
+
+
+def test_machine_uuid_alone_uses_machine_bed():
+    """machine_uuid with no process/filament == geometry mode on that machine's bed."""
+    r = httpx.get(f"{BASE}/api/v1/profiles", params={"type": "machine", "q": "Bambu Lab X1 Carbon 0.4 nozzle"})
+    machine = next((m for m in r.json()["data"] if m["name"] == "Bambu Lab X1 Carbon 0.4 nozzle"), None)
+    if machine is None or not machine.get("bed_size_x"):
+        pytest.skip("reference machine not in this catalog")
+    bed = (machine["bed_size_x"], machine["bed_size_y"], 1000)
+    parts, qtys = [A, B], [6, 4]
+    resp = httpx.post(
+        f"{BASE}/api/v1/pack",
+        files=[("files", (p.name, p.stl, "application/octet-stream")) for p in parts],
+        data={"machine_uuid": machine["uuid"],
+              "items": json.dumps([{"file": p.name, "quantity": q} for p, q in zip(parts, qtys)])},
+        timeout=300,
+    )
+    assert resp.status_code == 200, resp.text
+    check_on_bed(resp.content, expand(parts, qtys), bed)

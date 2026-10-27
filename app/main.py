@@ -1420,7 +1420,11 @@ def _parse_pack_items(raw: str, filenames: list[str]) -> list[int]:
         "`printable_height` are embedded — no full machine config that could override the "
         "bed size). Templates for a given UUID combination are cached in memory, so repeated "
         "calls with the same profiles are fast. This mode requires `catalog_loaded: true`.\n\n"
-        "**3. Explicit bed dimensions** (`bed_x` + `bed_y` + `bed_z`, all in mm)\n"
+        "**3. Machine UUID alone** (`machine_uuid`, no `process_uuid`/`filament_uuids`)\n"
+        "Shortcut for geometry mode: the bed (`printable_area`, `printable_height`) is read from "
+        "that machine's catalog profile, so callers need not look up bed_x/bed_y/bed_z first. "
+        "If `bed_x`/`bed_y`/`bed_z` are all given too, they win. Requires `catalog_loaded: true`.\n\n"
+        "**4. Explicit bed dimensions** (`bed_x` + `bed_y` + `bed_z`, all in mm)\n"
         "Laminus constructs a minimal bed template from the supplied dimensions. "
         "`bed_z` is the printable height (not the physical Z travel). "
         "No profile catalog or template file needed — useful when you want geometry-only "
@@ -1606,11 +1610,38 @@ async def pack_stls(
             with open(template_path, "wb") as buf:
                 buf.write(_build_bed_template_bytes(area, bed_z))
 
+        elif machine_uuid and not process_uuid and not filament_uuids:
+            # machine_uuid alone: shortcut for geometry mode using that machine's bed
+            if catalog is None:
+                background_tasks.add_task(cleanup_directory, job_dir)
+                raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
+            cache_key = f"{machine_uuid}|bed"
+            cached_bytes = _template_cache.get(cache_key)
+            if cached_bytes is None:
+                machine_entry = catalog.get_by_uuid(machine_uuid)
+                if machine_entry is None or machine_entry.get("type") != "machine":
+                    background_tasks.add_task(cleanup_directory, job_dir)
+                    raise HTTPException(status_code=422, detail=f"Machine UUID '{machine_uuid}' not found.")
+                machine_cfg = await asyncio.to_thread(catalog.resolved, machine_entry["uuid"])
+                printable_area = machine_cfg.get("printable_area")
+                printable_height = machine_cfg.get("printable_height")
+                if not printable_area or not printable_height:
+                    background_tasks.add_task(cleanup_directory, job_dir)
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Machine UUID '{machine_uuid}' is missing bed dimensions (printable_area/printable_height).",
+                    )
+                cached_bytes = await asyncio.to_thread(_build_bed_template_bytes, printable_area, printable_height)
+                _template_cache[cache_key] = cached_bytes
+            template_path = os.path.join(input_dir, "settings_template.3mf")
+            with open(template_path, "wb") as buf:
+                buf.write(cached_bytes)
+
         else:
             background_tasks.add_task(cleanup_directory, job_dir)
             raise HTTPException(
                 status_code=422,
-                detail="Provide 'template' (a .3mf file) OR 'machine_uuid'/'process_uuid'/'filament_uuids' OR 'bed_x'/'bed_y'/'bed_z'.",
+                detail="Provide 'template' (a .3mf file) OR 'machine_uuid' (alone, or with 'process_uuid'/'filament_uuids') OR 'bed_x'/'bed_y'/'bed_z'.",
             )
 
         # Write uploaded STLs

@@ -64,7 +64,9 @@ be picked up; flatten only for permanent forks.
 ## Packing, arrangement, and project operations
 
 `POST /api/v1/pack` takes multipart `files` (STL/3MF) and either `template_3mf`,
-profile UUIDs, or explicit `bed_x`, `bed_y`, `bed_z`. It returns a packed 3MF.
+profile UUIDs, a `machine_uuid` alone (shortcut: uses that machine's bed, no
+process/filament needed; explicit `bed_*` win if also sent), or explicit `bed_x`, `bed_y`,
+`bed_z`. It returns a packed 3MF.
 For quantities send `items` as a JSON array string:
 
 ```json
