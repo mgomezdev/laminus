@@ -2069,7 +2069,7 @@ class _Retarget:
         """Warn when an embedded (not overridden) preset lists printers excluding the target."""
         if self.machine is None or catalog is None:
             return []
-        with zipfile.ZipFile(path) as z:
+        with _subset.open_zip(path) as z:
             cfg = json.loads(z.read(_subset.PROJECT_SETTINGS))
         wanted = []
         if self.process_cfg is None:
