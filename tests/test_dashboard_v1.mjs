@@ -20,8 +20,8 @@ test('dashboard paginates profiles, submits UUIDs, handles typed events and arti
     const job = {id: 'job-1', status: 'completed', artifact: {name: 'part.gcode', available: true}};
     const context = vm.createContext({
         console, URLSearchParams, FormData, Date, Math, setInterval() {}, clearInterval() {},
-        setTimeout() {}, document: {getElementById: get, createElement: element, head: element()},
-        window: {location: {}},
+        setTimeout() {}, document: {getElementById: get, createElement: element, head: element(), addEventListener() {}},
+        window: {location: {}, addEventListener() {}},
         EventSource: class {
             constructor(url) { this.url = url; this.listeners = {}; streams.push(this); }
             addEventListener(name, fn) { this.listeners[name] = fn; }

@@ -11,6 +11,7 @@ Supported invocations:
 """
 import os
 import sys
+import time
 import zipfile
 
 # Minimal 1×1 red PNG (37 bytes)
@@ -60,6 +61,17 @@ def main():
 
     if "--slice" in args:
         plate = int(_get(args, "--slice") or 1)
+        # e2e hooks, keyed on plate (the input is always a server-side prepared.3mf, so
+        # the plate is the only knob a client controls): slicing MOCK_ORCA_SLOW_PLATE
+        # takes MOCK_ORCA_SLICE_DELAY seconds, slicing MOCK_ORCA_FAIL_PLATE fails.
+        delay = float(os.environ.get("MOCK_ORCA_SLICE_DELAY", "0"))
+        if delay and os.environ.get("MOCK_ORCA_SLOW_PLATE") == str(plate):
+            for step in range(1, 4):
+                print(f"mock: slicing step {step}/3", flush=True)
+                time.sleep(delay / 3)
+        if os.environ.get("MOCK_ORCA_FAIL_PLATE") == str(plate):
+            print("mock: ERROR slicing failed: mesh is not manifold", flush=True)
+            sys.exit(1)
         if output_dir and export_3mf:
             # Slice → 3MF: outputdir/export_3mf (relative name)
             _write_3mf(os.path.join(output_dir, export_3mf))
