@@ -676,6 +676,172 @@
             min-height: 20px;
         }
 
+        /* Let grid columns shrink below their content (the jobs table scrolls instead). */
+        main > *, .jobs-section > * { min-width: 0; }
+
+        .card-title-row { flex-wrap: wrap; }
+        .card-title-actions { flex-wrap: wrap; }
+
+        @media (max-width: 600px) {
+            header { padding: 1rem; }
+            main, .jobs-section { padding: 0 16px; gap: 1.5rem; margin-top: 1.5rem; }
+            .card { padding: 1.25rem; }
+            .side-stack { gap: 1.5rem; }
+        }
+
+        .side-stack {
+            display: flex;
+            flex-direction: column;
+            gap: 2.5rem;
+        }
+
+        .form-select.compact {
+            width: auto;
+            padding: 4px 8px;
+            font-size: 0.8rem;
+        }
+
+        .btn-link {
+            background: none;
+            border: none;
+            color: var(--primary);
+            font-family: var(--font-main);
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            padding: 0;
+            white-space: nowrap;
+        }
+
+        .btn-link:hover { text-decoration: underline; }
+
+        .row-actions {
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+        }
+
+        /* Queue */
+        .queue-slots {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+
+        .queue-slots strong {
+            color: var(--text-color);
+            font-size: 1.4rem;
+            font-weight: 600;
+            margin-right: 4px;
+        }
+
+        .slot-bar {
+            height: 6px;
+            border-radius: 99px;
+            background: rgba(255, 255, 255, 0.06);
+            overflow: hidden;
+            margin-bottom: 1.25rem;
+        }
+
+        .slot-bar-fill {
+            height: 100%;
+            width: 0;
+            background: linear-gradient(90deg, var(--primary), var(--success));
+            transition: width 0.3s ease;
+        }
+
+        .slot-bar-fill.full { background: var(--warning); }
+
+        .queue-list {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .queue-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.85rem;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            padding: 8px 10px;
+        }
+
+        .queue-item .ellipsis {
+            flex: 1;
+            min-width: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .queue-empty {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            text-align: center;
+            padding: 0.75rem 0;
+        }
+
+        /* Job log viewer */
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.65);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+            z-index: 200;
+        }
+
+        .modal {
+            width: min(960px, 100%);
+            max-height: calc(100vh - 32px);
+            display: flex;
+            flex-direction: column;
+            background: #0b1120;
+            border: 1px solid var(--panel-border);
+            border-radius: 14px;
+            overflow: hidden;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+
+        .modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--panel-border);
+        }
+
+        .modal-title {
+            font-family: var(--font-mono);
+            font-size: 0.95rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .modal-meta {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            min-width: 0;
+        }
+
+        .modal .console-body {
+            border: none;
+            border-radius: 0;
+            height: 65vh;
+            max-height: 65vh;
+        }
+
         footer {
             padding: 1.5rem;
             text-align: center;
@@ -774,9 +940,9 @@
                 <div class="form-group">
                     <label class="form-label" for="plate-select">Slicing Target</label>
                     <select class="form-select" id="plate-select" name="plate">
-                        <option value="0">Slice all plates (Plate 0)</option>
-                        <option value="1">Slice Plate 1</option>
+                        <option value="1" selected>Slice Plate 1</option>
                         <option value="2">Slice Plate 2</option>
+                        <option value="3">Slice Plate 3</option>
                     </select>
                 </div>
 
@@ -841,6 +1007,13 @@
                     Job Status &amp; History
                 </span>
                 <span class="card-title-actions">
+                    <select class="form-select compact" id="jobs-status-filter" aria-label="Filter by status">
+                        <option value="">All</option>
+                        <option value="pending">Pending</option>
+                        <option value="slicing">Slicing</option>
+                        <option value="completed">Completed</option>
+                        <option value="failed">Failed</option>
+                    </select>
                     <label class="auto-refresh-label"><input type="checkbox" id="jobs-auto-refresh" checked> Auto-refresh</label>
                     <button type="button" class="btn-small" id="jobs-refresh-btn">Refresh</button>
                 </span>
@@ -862,6 +1035,20 @@
                     </tbody>
                 </table>
             </div>
+        </section>
+
+        <div class="side-stack">
+        <!-- Queue: jobs currently holding a slicer slot -->
+        <section class="card" id="queue-card">
+            <h2 class="card-title">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                Queue
+            </h2>
+            <div class="queue-slots"><strong id="queue-slots">–</strong>slicer slots in use</div>
+            <div class="slot-bar"><div class="slot-bar-fill" id="queue-bar"></div></div>
+            <ul class="queue-list" id="queue-list">
+                <li class="queue-empty">Loading…</li>
+            </ul>
         </section>
 
         <!-- Disk Cleanup -->
@@ -890,7 +1077,23 @@
                 <button type="button" class="btn download-btn" id="cleanup-run-btn" disabled>Clean Up</button>
             </div>
         </section>
+        </div>
     </section>
+
+    <!-- Job log viewer (deep-linkable as #job=<id>) -->
+    <div class="modal-backdrop" id="log-viewer" role="dialog" aria-modal="true" aria-labelledby="log-viewer-title">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-meta">
+                    <span class="modal-title" id="log-viewer-title">Job</span>
+                    <span id="log-viewer-status"></span>
+                    <span class="ellipsis" id="log-viewer-file"></span>
+                </div>
+                <button type="button" class="btn-small" id="log-viewer-close">Close</button>
+            </div>
+            <div class="console-body" id="log-viewer-body"></div>
+        </div>
+    </div>
 
     <footer>
         <p>OrcaSlicer container wrapper running on <code>FastAPI</code> & <code>Xvfb</code> virtual X-Server. Mounted volume path: <code>/config</code></p>
@@ -933,6 +1136,12 @@
                     const params = new URLSearchParams({limit: '200'});
                     if (cursor) params.set('cursor', cursor);
                     const response = await fetch(`/api/v1/profiles?${params}`);
+                    if (response.status === 503) {
+                        // Catalog still building right after container start; try again shortly.
+                        logToConsole('[SYSTEM] Profile catalog is still building, retrying...', 'warning');
+                        setTimeout(fetchProfiles, 3000);
+                        return;
+                    }
                     if (!response.ok) throw new Error("Failed to fetch configurations.");
                     const page = await response.json();
                     page.data.forEach(p => { if (profiles[p.type]) profiles[p.type].push(p); });
@@ -1042,6 +1251,15 @@
 
         function clearConsole() {
             consoleOutput.innerHTML = '';
+        }
+
+        // Classify slicer log lines so they're styled differently
+        function classifyLog(msg) {
+            if (msg.includes('WARNING') || msg.includes('warning:')) return 'warning';
+            if (msg.includes('ERROR') || msg.includes('error:')) return 'error';
+            if (msg.includes('Executing command:') || msg.startsWith('[SYSTEM]')) return 'system';
+            if (msg.includes('completed successfully') || msg.includes('Sliced file generated:')) return 'success';
+            return '';
         }
 
         // Dropzone interactions
@@ -1183,20 +1401,9 @@
                 });
                 activeEventSource.addEventListener('log', (event) => {
                     const logMsg = JSON.parse(event.data).message;
-                    
-                        // Classify log outputs to style differently
-                        if (logMsg.includes('WARNING') || logMsg.includes('warning:')) {
-                            logToConsole(logMsg, 'warning');
-                        } else if (logMsg.includes('ERROR') || logMsg.includes('error:')) {
-                            logToConsole(logMsg, 'error');
-                        } else if (logMsg.includes('Executing command:') || logMsg.startsWith('[SYSTEM]')) {
-                            logToConsole(logMsg, 'system');
-                        } else if (logMsg.includes('completed successfully') || logMsg.includes('Sliced file generated:')) {
-                            logToConsole(logMsg, 'success');
-                        } else {
-                            logToConsole(logMsg);
-                        }
+                    logToConsole(logMsg, classifyLog(logMsg));
                 });
+                fetchQueueAndJobs();
 
                 activeEventSource.onerror = (err) => {
                     console.error("SSE Connection error:", err);
@@ -1234,6 +1441,7 @@
 
         function handleJobComplete(jobId) {
             logToConsole(`[SYSTEM] Slicing job completed. G-code generated successfully!`, 'success');
+            fetchQueueAndJobs();
             
             // Reset slicing button
             submitBtn.disabled = false;
@@ -1255,6 +1463,7 @@
 
         function handleJobFailed(reason) {
             logToConsole(`[ERROR] Slicing failed: ${reason}`, 'error');
+            fetchQueueAndJobs();
             
             submitBtn.disabled = false;
             submitBtn.innerHTML = `
@@ -1273,6 +1482,7 @@
         const jobsTbody = document.getElementById('jobs-tbody');
         const jobsAutoRefresh = document.getElementById('jobs-auto-refresh');
         const jobsRefreshBtn = document.getElementById('jobs-refresh-btn');
+        const jobsStatusFilter = document.getElementById('jobs-status-filter');
         let jobsPollHandle = null;
 
         function escapeHtml(str) {
@@ -1299,7 +1509,8 @@
 
         async function fetchJobs() {
             try {
-                const res = await fetch('/api/v1/jobs?limit=50');
+                const status = jobsStatusFilter.value;
+                const res = await fetch(`/api/v1/jobs?limit=50${status ? `&status=${encodeURIComponent(status)}` : ''}`);
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
                 renderJobs(data.data || []);
@@ -1310,7 +1521,8 @@
 
         function renderJobs(list) {
             if (!list.length) {
-                jobsTbody.innerHTML = `<tr><td colspan="6" class="jobs-empty">No jobs yet. Start a slicing job to see it here.</td></tr>`;
+                const msg = jobsStatusFilter.value ? `No ${escapeHtml(jobsStatusFilter.value)} jobs.` : 'No jobs yet. Start a slicing job to see it here.';
+                jobsTbody.innerHTML = `<tr><td colspan="6" class="jobs-empty">${msg}</td></tr>`;
                 return;
             }
             jobsTbody.innerHTML = list.map(j => {
@@ -1318,35 +1530,192 @@
                 const canDownload = j.status === 'completed' && j.artifact?.available;
                 const detail = j.status === 'failed' ? (j.error || '') : (j.artifact?.name || '');
                 const evictedTag = !j.artifact?.available && j.status === 'completed' ? '<span class="evicted-tag">(downloaded)</span>' : '';
-                return `<tr>
+                return `<tr data-job-id="${escapeHtml(j.id)}">
                     <td class="mono" title="${escapeHtml(j.id)}">${escapeHtml(shortId)}</td>
                     <td class="ellipsis" title="${escapeHtml(j.filename)}">${escapeHtml(j.filename) || '—'}</td>
                     <td>${statusPill(j.status)}</td>
                     <td title="${j.created_at ? new Date(j.created_at * 1000).toLocaleString() : ''}">${fmtRelTime(j.created_at)}</td>
                     <td class="ellipsis" title="${escapeHtml(detail)}">${escapeHtml(detail) || '—'}${evictedTag}</td>
-                    <td>${canDownload ? `<a class="jobs-download" href="/api/v1/jobs/${encodeURIComponent(j.id)}/artifact">Download</a>` : ''}</td>
+                    <td><span class="row-actions">
+                        <button type="button" class="btn-link" data-logs="${escapeHtml(j.id)}">Logs</button>
+                        ${canDownload ? `<a class="jobs-download" href="/api/v1/jobs/${encodeURIComponent(j.id)}/artifact">Download</a>` : ''}
+                    </span></td>
                 </tr>`;
             }).join('');
         }
 
-        function startJobsPolling() {
-            if (jobsPollHandle) clearInterval(jobsPollHandle);
-            jobsPollHandle = setInterval(fetchJobs, 5000);
+        // --- Queue ---------------------------------------------------------------------
+        // There is no waiting line server-side: a job holds one of max_concurrent_jobs
+        // slots while pending/slicing, and new jobs are rejected (503) once all are taken.
+        const queueSlots = document.getElementById('queue-slots');
+        const queueBar = document.getElementById('queue-bar');
+        const queueList = document.getElementById('queue-list');
+        let maxConcurrentJobs = null;
+
+        async function fetchQueue() {
+            try {
+                if (maxConcurrentJobs == null) {
+                    const caps = await (await fetch('/api/v1')).json();
+                    maxConcurrentJobs = caps.limits?.max_concurrent_jobs ?? null;
+                }
+                const pages = await Promise.all(['slicing', 'pending'].map(async status => {
+                    const res = await fetch(`/api/v1/jobs?limit=200&status=${status}`);
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    return (await res.json()).data || [];
+                }));
+                renderQueue(pages.flat());
+            } catch (err) {
+                queueList.innerHTML = `<li class="queue-empty">Failed to load queue: ${escapeHtml(err.message)}</li>`;
+            }
         }
 
-        jobsRefreshBtn.addEventListener('click', fetchJobs);
+        function renderQueue(active) {
+            const max = maxConcurrentJobs;
+            queueSlots.textContent = max ? `${active.length} / ${max}` : String(active.length);
+            const pct = max ? Math.min(100, (active.length / max) * 100) : 0;
+            queueBar.style.width = `${pct}%`;
+            if (max && active.length >= max) queueBar.classList.add('full'); else queueBar.classList.remove('full');
+            if (!active.length) {
+                queueList.innerHTML = '<li class="queue-empty">Idle. No jobs are slicing.</li>';
+                return;
+            }
+            queueList.innerHTML = active.map(j => `<li class="queue-item" data-job-id="${escapeHtml(j.id)}">
+                    ${statusPill(j.status)}
+                    <span class="ellipsis" title="${escapeHtml(j.filename)}">${escapeHtml(j.filename) || escapeHtml((j.id || '').slice(0, 8))}</span>
+                    <span class="mono">${fmtRelTime(j.created_at)}</span>
+                    <button type="button" class="btn-link" data-logs="${escapeHtml(j.id)}">Logs</button>
+                </li>`).join('');
+        }
+
+        function fetchQueueAndJobs() {
+            return Promise.all([fetchJobs(), fetchQueue()]);
+        }
+
+        function startJobsPolling() {
+            if (jobsPollHandle) clearInterval(jobsPollHandle);
+            jobsPollHandle = setInterval(fetchQueueAndJobs, 5000);
+        }
+
+        jobsRefreshBtn.addEventListener('click', fetchQueueAndJobs);
+        jobsStatusFilter.addEventListener('change', fetchJobs);
         jobsAutoRefresh.addEventListener('change', () => {
             if (jobsAutoRefresh.checked) {
                 startJobsPolling();
-                fetchJobs();
+                fetchQueueAndJobs();
             } else if (jobsPollHandle) {
                 clearInterval(jobsPollHandle);
                 jobsPollHandle = null;
             }
         });
 
-        fetchJobs();
+        fetchQueueAndJobs();
         startJobsPolling();
+
+        // --- Job log viewer --------------------------------------------------------------
+        // Streams /events with fetch rather than EventSource so a 404 (job evicted after
+        // download/TTL, or lost in a restart) can be told apart from a dropped connection.
+        const logViewer = document.getElementById('log-viewer');
+        const logViewerTitle = document.getElementById('log-viewer-title');
+        const logViewerStatus = document.getElementById('log-viewer-status');
+        const logViewerFile = document.getElementById('log-viewer-file');
+        const logViewerBody = document.getElementById('log-viewer-body');
+        let logViewerAbort = null;
+
+        function appendViewerLine(text, type = '') {
+            const line = document.createElement('div');
+            line.className = `console-line ${type}`;
+            line.textContent = text;
+            logViewerBody.appendChild(line);
+            logViewerBody.scrollTop = logViewerBody.scrollHeight;
+        }
+
+        async function refreshViewerMeta(jobId) {
+            try {
+                const res = await fetch(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
+                if (!res.ok) return;
+                const job = await res.json();
+                logViewerStatus.innerHTML = statusPill(job.status);
+                logViewerFile.textContent = job.filename || '';
+            } catch (err) { /* meta is decorative; the log stream reports real errors */ }
+        }
+
+        function handleViewerEvent(raw, jobId) {
+            let event = 'message', data = '';
+            raw.split('\n').forEach(line => {
+                if (line.startsWith('event:')) event = line.slice(6).trim();
+                else if (line.startsWith('data:')) data += line.slice(5).trim();
+            });
+            const payload = data ? JSON.parse(data) : {};
+            if (event === 'log') appendViewerLine(payload.message, classifyLog(payload.message));
+            else if (event === 'dropped') appendViewerLine(payload.message, 'warning');
+            else if (event === 'completed') appendViewerLine('[SYSTEM] Job completed.', 'success');
+            else if (event === 'failed') appendViewerLine(`[ERROR] Job failed: ${payload.reason || 'unknown reason'}`, 'error');
+            if (event === 'completed' || event === 'failed') refreshViewerMeta(jobId);
+        }
+
+        async function openJobLogs(jobId) {
+            closeJobLogs();
+            const abort = logViewerAbort = new AbortController();
+            logViewer.style.display = 'flex';
+            logViewerTitle.textContent = `Job ${jobId.slice(0, 8)}`;
+            logViewerTitle.title = jobId;
+            logViewerStatus.innerHTML = '';
+            logViewerFile.textContent = '';
+            logViewerBody.innerHTML = '';
+            history.replaceState(null, '', `#job=${encodeURIComponent(jobId)}`);
+            refreshViewerMeta(jobId);
+            try {
+                const res = await fetch(`/api/v1/jobs/${encodeURIComponent(jobId)}/events`, {signal: abort.signal});
+                if (!res.ok) {
+                    const body = await res.json().catch(() => ({}));
+                    const code = body.error?.code;
+                    appendViewerLine(code === 'job_data_lost' || code === 'job_not_found'
+                        ? 'Logs are no longer available: the job was downloaded, expired, or lost in a restart.'
+                        : `[ERROR] Failed to load logs: ${body.error?.message || `HTTP ${res.status}`}`, 'warning');
+                    return;
+                }
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let buf = '';
+                for (;;) {
+                    const {value, done} = await reader.read();
+                    if (done) break;
+                    buf += decoder.decode(value, {stream: true});
+                    let sep;
+                    while ((sep = buf.indexOf('\n\n')) >= 0) {
+                        handleViewerEvent(buf.slice(0, sep), jobId);
+                        buf = buf.slice(sep + 2);
+                    }
+                }
+            } catch (err) {
+                if (err.name !== 'AbortError') appendViewerLine(`[ERROR] Log stream failed: ${err.message}`, 'error');
+            }
+        }
+
+        function closeJobLogs() {
+            if (logViewerAbort) logViewerAbort.abort();
+            logViewerAbort = null;
+            if (logViewer.style.display !== 'flex') return;
+            logViewer.style.display = 'none';
+            history.replaceState(null, '', window.location.pathname + window.location.search);
+        }
+
+        function onLogsClick(e) {
+            const btn = e.target.closest('[data-logs]');
+            if (btn) openJobLogs(btn.dataset.logs);
+        }
+        jobsTbody.addEventListener('click', onLogsClick);
+        queueList.addEventListener('click', onLogsClick);
+        document.getElementById('log-viewer-close').addEventListener('click', closeJobLogs);
+        logViewer.addEventListener('click', e => { if (e.target === logViewer) closeJobLogs(); });
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') closeJobLogs(); });
+
+        function openLogsFromHash() {
+            const match = /^#job=(.+)$/.exec(window.location.hash || '');
+            if (match) openJobLogs(decodeURIComponent(match[1]));
+        }
+        window.addEventListener('hashchange', openLogsFromHash);
+        openLogsFromHash();
 
         // --- Disk Cleanup -------------------------------------------------------------
         const cleanupAgeSelect = document.getElementById('cleanup-age');

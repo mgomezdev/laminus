@@ -37,7 +37,9 @@ def _form_default_true(value) -> bool:
     return str(value).strip().lower() not in ("false", "0", "no", "off", "")
 
 
-CONFIG_DIR = "/config"
+# CONFIG_DIR / DATA_DIR are env-overridable so the e2e suite can run the real app as a
+# non-root user; in the container they stay at their mount points.
+CONFIG_DIR = os.environ.get("CONFIG_DIR", "/config")
 USER_CONFIG_DIR = os.environ.get("USER_CONFIG_DIR", os.path.join(CONFIG_DIR, "user"))
 # The datadir passed to the OrcaSlicer CLI itself (--datadir). Set by entrypoint.sh to
 # a disposable scratch path, with only user/ and plugins/ symlinked back into the
@@ -45,9 +47,9 @@ USER_CONFIG_DIR = os.environ.get("USER_CONFIG_DIR", os.path.join(CONFIG_DIR, "us
 # given, and neither belongs in a volume that gets backed up. Falls back to CONFIG_DIR
 # so local (non-Docker, non-entrypoint.sh) dev keeps working.
 ORCA_DATADIR = os.environ.get("ORCA_DATADIR", CONFIG_DIR)
-DATA_DIR = "/data"
-JOBS_DIR = "/tmp/jobs"
-ARRANGE_DIR = "/tmp/arrange"
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
+JOBS_DIR = os.environ.get("JOBS_DIR", "/tmp/jobs")
+ARRANGE_DIR = os.environ.get("ARRANGE_DIR", "/tmp/arrange")
 
 JOB_TTL = int(os.environ.get("JOB_TTL_SECONDS", "3600"))
 JOB_SWEEP_INTERVAL = int(os.environ.get("JOB_SWEEP_INTERVAL_SECONDS", "300"))

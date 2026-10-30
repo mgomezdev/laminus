@@ -97,6 +97,18 @@ SYSTEM_PROFILES_DIR=/opt/orcaslicer/resources/profiles pytest tests/ -v
 
 In CI, the mock binary (`mock/orca_cli.py`) is symlinked to `/usr/local/bin/orcaslicer` and `SYSTEM_PROFILES_DIR` is set to `tests/fixtures/profiles/` so all tests including real-client contract tests run without the full AppImage.
 
+### Dashboard e2e
+
+`e2e/` drives the web dashboard in Chromium against the real app, booted per test with the mock slicer (no OrcaSlicer, no Xvfb, no root). Linux only — on Windows run it from WSL.
+
+```bash
+pip install -r requirements.txt -r e2e/requirements.txt
+python -m playwright install chromium   # add --with-deps on a fresh machine
+pytest e2e -v                           # --headed to watch
+```
+
+Mock slicer knobs used by the suite: `MOCK_ORCA_FAIL_PLATE` (slicing that plate exits non-zero) and `MOCK_ORCA_SLOW_PLATE` + `MOCK_ORCA_SLICE_DELAY` (that plate takes N seconds, printing progress lines).
+
 ---
 
 ## Architecture

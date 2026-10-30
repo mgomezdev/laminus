@@ -1,6 +1,6 @@
 # OrcaSlicer Headless API
 
-A Dockerized REST API wrapping the [OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer) CLI for headless 3D model slicing and plate arrangement. Includes a web dashboard at `http://localhost:5000`.
+A Dockerized REST API wrapping the [OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer) CLI for headless 3D model slicing and plate arrangement. Includes a web dashboard at `http://localhost:5000` (slice form, job history with status filter, live slicer-slot queue, and per-job log viewer deep-linkable as `/#job=<id>`). No auth; the port binds on all interfaces, so it's reachable from the LAN or a Tailscale tailnet at `http://<host>:5000` — don't expose it to the internet.
 
 ## Quick Start
 
