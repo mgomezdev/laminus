@@ -155,6 +155,51 @@ def test_extract_needs_bed_size_for_later_plates(tmp_path):
         extract_plate(str(src), 2, str(tmp_path / "out.3mf"))
 
 
+_CUSTOM_GCODE = """<?xml version="1.0" encoding="utf-8"?>
+<custom_gcodes_per_layer>
+<plate>
+<plate_info id="1"/>
+<layer top_z="1.0" type="1" extruder="1" color="" extra="" gcode="M601"/>
+<mode value="SingleExtruder"/>
+</plate>
+<plate>
+<plate_info id="2"/>
+<layer top_z="2.4" type="1" extruder="1" color="" extra="" gcode="M601"/>
+<layer top_z="5.0" type="0" extruder="1" color="#FF0000" extra="" gcode="M600"/>
+<mode value="SingleExtruder"/>
+</plate>
+</custom_gcodes_per_layer>
+"""
+
+
+def _custom_plates(path):
+    with zipfile.ZipFile(path) as z:
+        xml = z.read("Metadata/custom_gcode_per_layer.xml").decode()
+    return re.findall(r'plate_info id="(\d+)"', xml), re.findall(r'top_z="([\d.]+)"', xml)
+
+
+def test_extract_keeps_only_that_plates_custom_gcode_as_plate_one(tmp_path):
+    src, dst = tmp_path / "in.3mf", tmp_path / "out.3mf"
+    _project(src, [[("2", 50, 50)], [("4", 290, 40)]],
+             extra_files=[("Metadata/custom_gcode_per_layer.xml", _CUSTOM_GCODE)])
+    info = extract_plate(str(src), 2, str(dst))
+    # plate 2's pause + colour change, now under plate 1; plate 1's pause gone
+    assert _custom_plates(dst) == (["1"], ["2.4", "5.0"])
+    assert info["custom_gcode"] == {"kept": 2, "dropped_plates": [1]}
+    extract_plate(str(src), 1, str(dst))
+    assert _custom_plates(dst) == (["1"], ["1.0"])
+
+
+def test_extract_plate_without_custom_gcode_drops_other_plates_blocks(tmp_path):
+    src, dst = tmp_path / "in.3mf", tmp_path / "out.3mf"
+    xml = _CUSTOM_GCODE.replace('<plate_info id="2"/>', '<plate_info id="3"/>')
+    _project(src, [[("2", 50, 50)], [("4", 290, 40)]],
+             extra_files=[("Metadata/custom_gcode_per_layer.xml", xml)])
+    info = extract_plate(str(src), 2, str(dst))
+    assert _custom_plates(dst) == ([], [])
+    assert info["custom_gcode"] == {"kept": 0, "dropped_plates": [1, 3]}
+
+
 def test_extract_without_plate_data(tmp_path):
     src, dst = tmp_path / "in.3mf", tmp_path / "out.3mf"
     with zipfile.ZipFile(src, "w") as z:
@@ -197,16 +242,16 @@ def test_unreadable_3mf_is_an_error(tmp_path):
 
 # ------------------------------------------------------------------ run_orcaslicer_task
 
-def _run(tmp_path, src, plate_id, gcode_names, export="out.3mf"):
+def _run(tmp_path, src, plate_id, gcode_names, export="out.3mf", returncodes=(0,), **kwargs):
     out = tmp_path / "out"
     out.mkdir()
-    captured = {}
+    calls = []
 
-    async def _fake(*args, **kwargs):
-        captured["args"] = list(args)
+    async def _fake(*args, **_kw):
+        calls.append(list(args))
         _gcode_zip(str(out / export), gcode_names)
         proc = AsyncMock()
-        proc.returncode = 0
+        proc.returncode = returncodes[min(len(calls), len(returncodes)) - 1]
         proc.stdout.readline = AsyncMock(return_value=b"")
         proc.wait = AsyncMock()
         return proc
@@ -216,10 +261,16 @@ def _run(tmp_path, src, plate_id, gcode_names, export="out.3mf"):
     try:
         with patch("asyncio.create_subprocess_exec", new=_fake):
             asyncio.run(run_orcaslicer_task("biz349", str(src), str(out), plate_id=plate_id,
-                                            export_3mf=export, geometry_only_retry=False))
+                                            export_3mf=export, **kwargs))
     finally:
         main.jobs.pop("biz349", None)
-    return job, captured.get("args")
+    job["calls"] = calls
+    job["log"] = _drain(job["logger"])
+    return job, (calls[0] if calls else None)
+
+
+def _drain(job_logger):
+    return "\n".join(job_logger._logs)
 
 
 @pytest.mark.parametrize("plate_id", [1, 2])
@@ -249,6 +300,34 @@ def test_missing_plate_fails_before_orca_runs(tmp_path):
     job, args = _run(tmp_path, src, 3, ["Metadata/plate_1.gcode"])
     assert job["status"] == "failed" and "plate 3" in job["error"]
     assert args is None
+
+
+def test_failed_slice_is_not_retried_by_default(tmp_path):
+    src = tmp_path / "in.3mf"
+    _project(src, [[("2", 50, 50)]])
+    job, _ = _run(tmp_path, src, 1, ["Metadata/plate_1.gcode"], returncodes=(1, 0))
+    assert job["status"] == "failed"
+    assert len(job["calls"]) == 1
+    assert "geometry_only_retry not requested" in job["log"]
+
+
+def test_geometry_only_retry_is_opt_in_and_flagged(tmp_path):
+    src = tmp_path / "in.3mf"
+    _project(src, [[("2", 50, 50)], [("4", 290, 40)]])
+    job, _ = _run(tmp_path, src, 2, ["Metadata/plate_1.gcode"], returncodes=(1, 0),
+                  geometry_only_retry=True)
+    assert job["status"] == "completed"
+    assert len(job["calls"]) == 2
+    retried = job["calls"][1][-1]
+    assert "_plate2" in retried  # the retry still slices only the extracted plate
+    assert "Metadata/model_settings.config" not in zipfile.ZipFile(retried).namelist()
+    assert "REMOVED" in job["log"] and "produced by the geometry-only fallback" in job["log"]
+
+
+@pytest.mark.parametrize("value,expected", [(None, False), ("", False), ("false", False),
+                                            ("0", False), ("true", True), ("1", True), ("on", True)])
+def test_geometry_only_retry_form_parsing(value, expected):
+    assert main._form_default_false(value) is expected
 
 
 def test_input_without_plates_keeps_arrange(tmp_path):

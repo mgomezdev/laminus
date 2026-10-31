@@ -39,6 +39,24 @@ def _form_default_true(value) -> bool:
     return str(value).strip().lower() not in ("false", "0", "no", "off", "")
 
 
+def _form_default_false(value) -> bool:
+    """Opt-in flag: omitted means False; "true"/"1"/"yes"/"on" turn it on."""
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
+
+
+GEOMETRY_ONLY_RETRY_DESC = (
+    "Opt-in fallback, default `false`. When `true` and the first slice fails, retry once with "
+    "`Metadata/model_settings.config` removed. The retry DISCARDS every per-object and per-part "
+    "override (walls, infill, supports, brim, modifiers, layer ranges, extruder assignment) and "
+    "the plate settings, so the result can differ from the project; the job log says so when it "
+    "happens."
+)
+
+
 # CONFIG_DIR / DATA_DIR are env-overridable so the e2e suite can run the real app as a
 # non-root user; in the container they stay at their mount points.
 CONFIG_DIR = os.environ.get("CONFIG_DIR", "/config")
@@ -832,7 +850,7 @@ async def run_orcaslicer_task(
     output_dir: str,
     plate_id: int = 1,
     export_3mf: Optional[str] = None,
-    geometry_only_retry: bool = True,
+    geometry_only_retry: bool = False,
 ):
     job = jobs.get(job_id)
     if job is None:
@@ -918,6 +936,11 @@ async def run_orcaslicer_task(
                 f"Plate extraction: plate {plate_id} of {info['source_plates']} -> single-plate project; "
                 f"{info['kept_items']} build item(s) kept, {info['dropped_items']} dropped, "
                 f"shift {info['origin_shift']} mm (bed {info['bed_mm']}), objects {info['objects']}")
+            cg = info.get("custom_gcode")
+            if cg:
+                job_logger.log(f"Plate extraction: custom layer G-code (pauses/colour changes): "
+                               f"{cg['kept']} kept for plate {plate_id}, other plates' blocks "
+                               f"dropped {cg['dropped_plates']}")
             if info["missing_instances"]:
                 job_logger.log(f"WARNING: {info['missing_instances']} instance(s) listed on plate "
                                f"{plate_id} have no build item and were skipped")
@@ -933,15 +956,29 @@ async def run_orcaslicer_task(
 
     success = await _attempt(input_file_path, "Attempt 1")
 
+    used_geometry_only = False
     if not success and geometry_only_retry:
-        job_logger.log("Attempt 1 failed - retrying with model_settings stripped")
+        job_logger.log(
+            "WARNING: Attempt 1 failed - geometry_only_retry=true, retrying with model_settings.config "
+            "REMOVED. Per-object/per-part overrides, modifiers, layer ranges, extruder assignment and "
+            "plate settings will NOT be applied to this slice.")
+        logger.warning("Job %s: attempt 1 failed, geometry-only retry requested", job_id)
         base, ext = os.path.splitext(input_file_path)
         geo_path = base + "_geo" + ext
         try:
             await _strip_model_settings(input_file_path, geo_path)
             success = await _attempt(geo_path, "Attempt 2 (geometry-only)")
+            used_geometry_only = success
         except Exception as exc:
             job_logger.log(f"ERROR stripping model_settings: {exc}")
+    elif not success:
+        job_logger.log("Attempt 1 failed (geometry_only_retry not requested; no fallback attempted)")
+
+    if used_geometry_only:
+        job_logger.log("WARNING: output was produced by the geometry-only fallback; per-object "
+                       "settings from the project were discarded")
+        logger.warning("Job %s: completed via geometry-only fallback (per-object settings discarded)",
+                       job_id)
 
     if success:
         if export_3mf:
@@ -991,10 +1028,10 @@ async def start_slice(
     filament_uuids: str = Form(..., description='JSON array, e.g. ["uuid1"]'),
     plate: int = Form(...),
     export_3mf: Optional[str] = Form(None),
-    geometry_only_retry: Optional[str] = Form(None),
+    geometry_only_retry: Optional[str] = Form(None, description=GEOMETRY_ONLY_RETRY_DESC),
     extra_config: Optional[str] = Form(None, description='JSON object merged into project settings after resolution'),
 ):
-    geometry_only_retry = _form_default_true(geometry_only_retry)
+    geometry_only_retry = _form_default_false(geometry_only_retry)
     if catalog is None:
         raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
 
@@ -1140,9 +1177,14 @@ async def start_slice(
         "Use this endpoint when you already have a fully-configured 3MF and want to avoid "
         "the overhead of profile resolution. Typical callers: Themis queue engine dispatching "
         "pre-packed project 3MFs, or debugging with a known-good 3MF from the desktop app.\n\n"
-        "**Geometry-only retry** works the same as in `POST /api/v1/jobs`: when "
-        "`geometry_only_retry=true` (default) and the first slice fails, the API retries "
-        "with `Metadata/model_settings.config` stripped from the 3MF.\n\n"
+        "**Plate selection:** the requested plate is extracted into its own single-plate "
+        "project (moved to plate-1 coordinates, with its own custom layer G-code) and sliced "
+        "with `--arrange 0`, so parts are never re-packed across plates. A missing or empty "
+        "plate fails the job.\n\n"
+        "**Geometry-only retry** is opt-in (`geometry_only_retry=true`, default `false`), as in "
+        "`POST /api/v1/jobs`: if the first slice fails, retry once with "
+        "`Metadata/model_settings.config` removed, which discards per-object settings. The job "
+        "log flags it whenever it is used.\n\n"
         "**`export_3mf`:** when set, OrcaSlicer embeds the sliced GCode into a `.3mf` and "
         "the download endpoint returns that file instead of a standalone `.gcode`.\n\n"
         "The response and job lifecycle are identical to `POST /api/v1/jobs`."
@@ -1163,9 +1205,9 @@ async def slice_prepared(
     file: UploadFile = File(...),
     plate: int = Form(...),
     export_3mf: Optional[str] = Form(None),
-    geometry_only_retry: Optional[str] = Form(None),
+    geometry_only_retry: Optional[str] = Form(None, description=GEOMETRY_ONLY_RETRY_DESC),
 ):
-    geometry_only_retry = _form_default_true(geometry_only_retry)
+    geometry_only_retry = _form_default_false(geometry_only_retry)
     if plate < 1:
         raise HTTPException(status_code=422, detail="plate must be >= 1.")
 

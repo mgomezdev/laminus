@@ -28,6 +28,8 @@ from app import subset_3mf as _subset
 MODEL = "3D/3dmodel.model"
 MODEL_SETTINGS = "Metadata/model_settings.config"
 PROJECT_SETTINGS = "Metadata/project_settings.config"
+# Per-plate pauses / colour changes / custom layer G-code, keyed by <plate_info id="N"/>.
+CUSTOM_GCODE = "Metadata/custom_gcode_per_layer.xml"
 PLATE_GAP = 0.2
 
 # Per-plate files Orca/Bambu write under Metadata/ (thumbnails, sliced output).
@@ -78,6 +80,27 @@ def _meta(el: ET.Element, key: str) -> Optional[ET.Element]:
         if m.get("key") == key:
             return m
     return None
+
+
+def _custom_gcode_for_plate(data: bytes, plate: int) -> tuple[bytes, int, list[int]]:
+    """Keep only *plate*'s block of custom_gcode_per_layer.xml, renumbered to plate 1.
+
+    Returns (xml, entries kept, other plate ids dropped). Without this, slicing plate N
+    would silently pick up plate 1's pauses/colour changes and lose its own.
+    """
+    root = _subset._parse(data)
+    kept, dropped = 0, []
+    for pl in list(root.findall("plate")):
+        info = pl.find("plate_info")
+        pid = int(info.get("id")) if info is not None and info.get("id") else None
+        if pid == plate:
+            info.set("id", "1")
+            kept = len(pl.findall("layer"))
+        else:
+            dropped.append(pid)
+            root.remove(pl)
+    return (b'<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="utf-8"),
+            kept, dropped)
 
 
 def extract_plate(src: str, plate: int, dst: str) -> dict:
@@ -178,6 +201,11 @@ def extract_plate(src: str, plate: int, dst: str) -> dict:
                 m.set("value", re.sub(rf"_{plate}(\.\w+)$", r"_1\1", v))
         settings_out = b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="utf-8")
 
+        custom_gcode = None
+        if CUSTOM_GCODE in names:
+            custom_out, cg_kept, cg_dropped = _custom_gcode_for_plate(z.read(CUSTOM_GCODE), plate)
+            custom_gcode = {"kept": cg_kept, "dropped_plates": cg_dropped}
+
         with zipfile.ZipFile(dst, "w", compression=zipfile.ZIP_DEFLATED) as out:
             for info in z.infolist():
                 name = info.filename
@@ -185,6 +213,8 @@ def extract_plate(src: str, plate: int, dst: str) -> dict:
                     out.writestr(info, model.encode("utf-8"))
                 elif name == MODEL_SETTINGS:
                     out.writestr(info, settings_out)
+                elif name == CUSTOM_GCODE:
+                    out.writestr(info, custom_out)
                 else:
                     pm = _PER_PLATE_FILE.match(name)
                     if pm:
@@ -206,4 +236,5 @@ def extract_plate(src: str, plate: int, dst: str) -> dict:
         "missing_instances": missing,
         "objects": sorted(set(kept), key=lambda s: int(s) if s.isdigit() else 0),
         "positions": moved,
+        "custom_gcode": custom_gcode,
     }

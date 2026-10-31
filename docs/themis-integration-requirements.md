@@ -261,7 +261,7 @@ Accept a source model file plus profile UUIDs. The container resolves and flatte
 | `filament_uuids` | string (JSON array) | yes | Ordered array of filament UUIDs, one per extruder slot: `["uuid-slot-1", "uuid-slot-2"]` |
 | `plate` | int | yes | Plate index, 1-based |
 | `export_3mf` | string | no | If provided, passes `--export-3mf <value>` to OrcaSlicer; download returns `.gcode.3mf` (Bambu printers) |
-| `geometry_only_retry` | bool | no | Default `true`; retry without `model_settings.config` on first failure |
+| `geometry_only_retry` | bool | no | Default `false` (opt-in); retry without `model_settings.config` on first failure (see REQ-SLICE-04) |
 
 The machine is resolved from the `(manufacturer, model, nozzle)` tuple, not a UUID, because this is the natural selection key in Themis's UI. The container looks up the matching machine entry in the catalog and returns 422 with a clear message if no match is found.
 
@@ -274,11 +274,13 @@ The machine is resolved from the `(manufacturer, model, nozzle)` tuple, not a UU
 5. Build `project_settings.config` by merging the flattened presets (machine → process → per-filament)
 6. If the source file is an STL, wrap it into a minimal 3MF
 7. Embed the generated `project_settings.config` into the 3MF; preserve any existing `model_settings.config`
-8. Run OrcaSlicer:
+8. Extract the requested plate (plate 1 included) into a single-plate project: keep only that plate's build items, shift them to plate-1 coordinates, keep its own `custom_gcode_per_layer.xml` block, and renumber it to plate 1. A missing or empty plate fails the job before OrcaSlicer runs (BIZ-349).
+9. Run OrcaSlicer on the extracted project (`--arrange 1` only for inputs with no plate layout, e.g. bare STL):
    ```
-   xvfb-run orcaslicer --slice <plate> --outputdir <dir> --arrange 1 [--export-3mf <val>] <prepared.3mf>
+   xvfb-run orcaslicer --slice 1 --outputdir <dir> --arrange 0 [--export-3mf <val>] <prepared_plateN.3mf>
    ```
-9. Return `{"job_id": "...", "status": "pending"}` after file ingestion; subprocess runs in background
+   A run that reports success without G-code for the plate fails the job.
+10. Return `{"job_id": "...", "status": "pending"}` after file ingestion; subprocess runs in background
 
 **Returns:** HTTP 200 `{job_id, status: "pending"}` or HTTP 422 on unresolvable machine tuple, unknown UUIDs, or compatibility mismatch.
 
@@ -295,7 +297,7 @@ For callers that have already embedded `project_settings.config` into the 3MF th
 | `file` | file | yes | A `.3mf` with embedded `project_settings.config` |
 | `plate` | int | yes | Plate index, 1-based |
 | `export_3mf` | string | no | Same semantics as REQ-SLICE-01 |
-| `geometry_only_retry` | bool | no | Default `true` |
+| `geometry_only_retry` | bool | no | Default `false` (opt-in) |
 
 This endpoint exists to support a phased migration: Themis can adopt the profile catalog (REQ-PROFILES-01 through REQ-PROFILES-05) while continuing to prepare 3MFs itself, then migrate to REQ-SLICE-01 in a second phase.
 
@@ -313,7 +315,7 @@ Job status (`GET /api/slice/status/{job_id}`) includes `"output_format": "gcode"
 
 #### REQ-SLICE-04 — Geometry-Only Retry
 
-When OrcaSlicer exits non-zero on a first attempt, if `geometry_only_retry=true` (default), the container strips `Metadata/model_settings.config` from the 3MF and retries. The retry is transparent: same job ID, same log stream (with a log line announcing the retry). The job fails only if both attempts fail.
+Opt-in: the caller must send `geometry_only_retry=true` (default `false`). When OrcaSlicer exits non-zero on a first attempt and the flag is set, the container strips `Metadata/model_settings.config` from the 3MF and retries once (same job ID, same log stream). The retry discards every per-object/per-part override, modifier, layer range, extruder assignment and plate setting, so the job log carries a `WARNING` line when the retry starts and another when the output came from it. Without the flag a failed first attempt fails the job.
 
 ---
 
