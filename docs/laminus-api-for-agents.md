@@ -63,7 +63,9 @@ be picked up; flatten only for permanent forks.
 
 ## Packing, arrangement, and project operations
 
-`POST /api/v1/pack` takes multipart `files` (STL/3MF) and either `template_3mf`,
+`POST /api/v1/pack` takes multipart `files` (STL only; 3MF uploads are rejected
+with 422, so use `projects/subset` or `projects/merge` to rearrange existing
+projects without losing per-object data) and either a `template` 3MF,
 profile UUIDs, a `machine_uuid` alone (shortcut: uses that machine's bed, no
 process/filament needed; explicit `bed_*` win if also sent), or explicit `bed_x`, `bed_y`,
 `bed_z`. It returns a packed 3MF.
