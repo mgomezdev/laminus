@@ -5,7 +5,10 @@ history and the queue start empty. Linux-only (the app needs POSIX process group
 run via WSL or the CI `e2e` job.
 
 Mock slicer knobs (see mock/orca_cli.py): plate 2 fails, plate 3 slices slowly.
+Slicing extracts the requested plate from the project (BIZ-349), so an STL only has
+plate 1; tests that need plates 2/3 upload PROJECT_3MF, a 3-plate project.
 """
+import io
 import json
 import os
 import socket
@@ -14,6 +17,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import zipfile
 
 import pytest
 
@@ -56,6 +60,42 @@ facet normal 1 1 1
 endfacet
 endsolid t
 """
+
+
+def _project_3mf(n_plates: int = 3) -> bytes:
+    """A minimal Orca-style project: one tetrahedron per plate, laid out on Orca's plate grid
+    for a 256 mm bed (stride 1.2 x 256), with plates declared in model_settings.config."""
+    verts = '<vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/><vertex x="0" y="10" z="0"/><vertex x="0" y="0" z="10"/>'
+    tris = '<triangle v1="0" v2="2" v3="1"/><triangle v1="0" v2="1" v3="3"/><triangle v1="0" v2="3" v3="2"/><triangle v1="1" v2="2" v3="3"/>'
+    cols = 2 if n_plates > 1 else 1
+    objects, items, ms_objects, ms_plates = [], [], [], []
+    for i in range(n_plates):
+        oid = i + 1
+        x = (i % cols) * 307.2 + 128
+        y = -(i // cols) * 307.2 + 128
+        objects.append(f'<object id="{oid}" type="model"><mesh><vertices>{verts}</vertices>'
+                       f'<triangles>{tris}</triangles></mesh></object>')
+        items.append(f'<item objectid="{oid}" transform="1 0 0 0 1 0 0 0 1 {x} {y} 0" printable="1"/>')
+        ms_objects.append(f'<object id="{oid}"><metadata key="name" value="part{oid}"/></object>')
+        ms_plates.append(f'<plate><metadata key="plater_id" value="{oid}"/><model_instance>'
+                         f'<metadata key="object_id" value="{oid}"/><metadata key="instance_id" value="0"/>'
+                         f'</model_instance></plate>')
+    model = ('<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" '
+             'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources>'
+             + "".join(objects) + '</resources><build>' + "".join(items) + '</build></model>')
+    settings = ('<?xml version="1.0" encoding="UTF-8"?>\n<config>' + "".join(ms_objects)
+                + "".join(ms_plates) + '</config>')
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
+        z.writestr("3D/3dmodel.model", model)
+        z.writestr("Metadata/model_settings.config", settings)
+        z.writestr("Metadata/project_settings.config",
+                   json.dumps({"printable_area": ["0x0", "256x0", "256x256", "0x256"]}))
+    return buf.getvalue()
+
+
+PROJECT_3MF = _project_3mf()
 
 
 def _free_port() -> int:
@@ -129,6 +169,13 @@ def stl_file(tmp_path):
 
 
 @pytest.fixture
+def project_file(tmp_path):
+    path = tmp_path / "project.3mf"
+    path.write_bytes(PROJECT_3MF)
+    return path
+
+
+@pytest.fixture
 def api(server, playwright):
     """Drive the API directly to set up state the UI then has to reflect."""
     ctx = playwright.request.new_context(base_url=server["url"])
@@ -142,9 +189,12 @@ def api(server, playwright):
 
     class Api:
         def create_job(self, plate="1", filename="part.stl"):
-            r = ctx.post("/api/v1/jobs", multipart={
-                **profiles, "plate": plate,
-                "file": {"name": filename, "mimeType": "model/stl", "buffer": STL}})
+            """STL upload, or the 3-plate PROJECT_3MF when *filename* ends in .3mf."""
+            if filename.endswith(".3mf"):
+                file = {"name": filename, "mimeType": "model/3mf", "buffer": PROJECT_3MF}
+            else:
+                file = {"name": filename, "mimeType": "model/stl", "buffer": STL}
+            r = ctx.post("/api/v1/jobs", multipart={**profiles, "plate": plate, "file": file})
             assert r.status == 202, r.text()
             return r.json()["id"]
 
