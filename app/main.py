@@ -5,6 +5,7 @@ import asyncio
 import signal
 import uuid
 import glob
+import re
 import time
 import logging
 import json
@@ -807,6 +808,31 @@ async def _strip_model_settings(src: str, dst: str) -> None:
     await asyncio.to_thread(_do_strip)
 
 
+def _plate_count_or_one(path: str) -> int:
+    """Plates declared in model_settings.config; 1 when absent/unreadable (e.g. bare STL-derived 3MF)."""
+    try:
+        return max(1, _subset.count_plates(path))
+    except Exception:
+        return 1
+
+
+def _sliced_plate_gcode_error(threemf: str, plate_id: int) -> Optional[str]:
+    """None if the exported 3MF holds G-code for the requested plate (any plate when plate_id==0)."""
+    try:
+        with zipfile.ZipFile(threemf) as z:
+            names = z.namelist()
+    except Exception as exc:
+        return f"exported 3MF unreadable: {exc}"
+    want = f"Metadata/plate_{plate_id}.gcode"
+    if plate_id > 0 and want in names:
+        return None
+    if plate_id == 0 and any(re.fullmatch(r"Metadata/plate_\d+\.gcode", n) for n in names):
+        return None
+    which = f"plate {plate_id}" if plate_id > 0 else "any plate"
+    return (f"OrcaSlicer reported success but produced no G-code for {which} "
+            f"(plate missing or empty in the project).")
+
+
 async def run_orcaslicer_task(
     job_id: str,
     input_file_path: str,
@@ -825,10 +851,14 @@ async def run_orcaslicer_task(
     job_logger.log(f"Starting slice: {os.path.basename(input_file_path)}")
 
     async def _attempt(slice_input: str, label: str) -> bool:
+        # --arrange 1 re-packs across plates and collapses a multi-plate project onto
+        # plate 1 (BIZ-349), after which --slice N>=2 "succeeds" with nothing sliced.
+        # Only arrange single-plate projects; multi-plate ones keep their layout.
+        arrange = "0" if _plate_count_or_one(slice_input) > 1 else "1"
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
             "orcaslicer", "--slice", str(plate_id),
-            "--outputdir", output_dir, "--arrange", "1",
+            "--outputdir", output_dir, "--arrange", arrange,
         ]
         if export_3mf:
             cmd.extend(["--export-3mf", export_3mf])
@@ -879,6 +909,15 @@ async def run_orcaslicer_task(
         if export_3mf:
             target = os.path.join(output_dir, export_3mf)
             found = target if os.path.exists(target) else None
+            empty = _sliced_plate_gcode_error(target, plate_id) if found else None
+            if empty:
+                job["status"] = "failed"
+                job["error"] = empty
+                _save_jobs()
+                _history_upsert(job_id, status="failed", error=empty, updated_at=time.time())
+                job_logger.log(f"ERROR: {empty}")
+                job_logger.log("__FAILED__: No G-code produced")
+                return
         else:
             gcodes = sorted(glob.glob(os.path.join(output_dir, "*.gcode")))
             found = gcodes[0] if gcodes else None
