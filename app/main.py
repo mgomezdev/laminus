@@ -21,6 +21,7 @@ from app.profile_catalog import ProfileCatalog
 from app.project_config_builder import build_project_settings, embed_project_settings
 from app import preview_3mf as _preview
 from app import subset_3mf as _subset
+from app.plate_extract import extract_plate as _extract_plate, PlateExtractError as _PlateExtractError
 from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf, inject_stls_into_3mf as _inject_stls_into_3mf, stl_min_z as _stl_min_z, restore_build_item_z as _restore_build_item_z, restore_z_from_source as _restore_z_from_source, strip_application_version as _strip_app_version
 
 logging.basicConfig(level=logging.INFO)
@@ -808,14 +809,6 @@ async def _strip_model_settings(src: str, dst: str) -> None:
     await asyncio.to_thread(_do_strip)
 
 
-def _plate_count_or_one(path: str) -> int:
-    """Plates declared in model_settings.config; 1 when absent/unreadable (e.g. bare STL-derived 3MF)."""
-    try:
-        return max(1, _subset.count_plates(path))
-    except Exception:
-        return 1
-
-
 def _sliced_plate_gcode_error(threemf: str, plate_id: int) -> Optional[str]:
     """None if the exported 3MF holds G-code for the requested plate (any plate when plate_id==0)."""
     try:
@@ -850,14 +843,23 @@ async def run_orcaslicer_task(
     _history_upsert(job_id, status="slicing", updated_at=time.time())
     job_logger.log(f"Starting slice: {os.path.basename(input_file_path)}")
 
+    def _fail(error: str, sentinel: str) -> None:
+        job["status"] = "failed"
+        job["error"] = error
+        _save_jobs()
+        _history_upsert(job_id, status="failed", error=error, updated_at=time.time())
+        job_logger.log(f"ERROR: {error}")
+        job_logger.log(f"__FAILED__: {sentinel}")
+
+    # Orca slices plate 1 of the single-plate project built below; `arrange` is decided
+    # once extraction tells us whether the input carried a plate layout.
+    slice_plate = plate_id
+    arrange = "1"
+
     async def _attempt(slice_input: str, label: str) -> bool:
-        # --arrange 1 re-packs across plates and collapses a multi-plate project onto
-        # plate 1 (BIZ-349), after which --slice N>=2 "succeeds" with nothing sliced.
-        # Only arrange single-plate projects; multi-plate ones keep their layout.
-        arrange = "0" if _plate_count_or_one(slice_input) > 1 else "1"
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-            "orcaslicer", "--slice", str(plate_id),
+            "orcaslicer", "--slice", str(slice_plate),
             "--outputdir", output_dir, "--arrange", arrange,
         ]
         if export_3mf:
@@ -893,6 +895,42 @@ async def run_orcaslicer_task(
         except Exception as exc:
             job_logger.log(f"WARNING: could not strip Application version: {exc}")
 
+    # BIZ-349: never hand Orca a multi-plate project. `--arrange 1` re-packs objects across
+    # plates (plates collapse, parts migrate off the requested plate and silently vanish
+    # from the job) and `--arrange 0` checks plate bounds against a stride that does not
+    # always match the project's. Pull the requested plate - plate 1 included - into its own
+    # single-plate project at plate-1 coordinates and slice that with `--arrange 0`.
+    if input_file_path.lower().endswith(".3mf") and plate_id >= 1:
+        single_path = input_file_path[:-4] + f"_plate{plate_id}.3mf"
+        try:
+            info = await asyncio.to_thread(_extract_plate, input_file_path, plate_id, single_path)
+        except _PlateExtractError as exc:
+            logger.warning("Job %s: plate extraction rejected plate %d: %s", job_id, plate_id, exc)
+            _fail(f"Cannot slice plate {plate_id}: {exc}", "Plate extraction failed")
+            return
+        except Exception as exc:
+            logger.exception("Job %s: plate extraction crashed", job_id)
+            _fail(f"Could not extract plate {plate_id}: {exc}", "Plate extraction failed")
+            return
+        logger.info("Job %s plate extraction: %s", job_id, json.dumps(info))
+        if info["has_plate_data"]:
+            job_logger.log(
+                f"Plate extraction: plate {plate_id} of {info['source_plates']} -> single-plate project; "
+                f"{info['kept_items']} build item(s) kept, {info['dropped_items']} dropped, "
+                f"shift {info['origin_shift']} mm (bed {info['bed_mm']}), objects {info['objects']}")
+            if info["missing_instances"]:
+                job_logger.log(f"WARNING: {info['missing_instances']} instance(s) listed on plate "
+                               f"{plate_id} have no build item and were skipped")
+            for p in info["positions"]:
+                job_logger.log(f"  object {p['object_id']}#{p['instance']} at x={p['x']} y={p['y']}")
+            arrange = "0"
+        else:
+            # No plate layout (bare STL-derived 3MF): nothing to collapse, but parts still
+            # need placing, so let Orca arrange them.
+            job_logger.log("Plate extraction: input declares no plates; slicing as-is with --arrange 1")
+        input_file_path = single_path
+        slice_plate = 1
+
     success = await _attempt(input_file_path, "Attempt 1")
 
     if not success and geometry_only_retry:
@@ -909,14 +947,11 @@ async def run_orcaslicer_task(
         if export_3mf:
             target = os.path.join(output_dir, export_3mf)
             found = target if os.path.exists(target) else None
-            empty = _sliced_plate_gcode_error(target, plate_id) if found else None
+            empty = _sliced_plate_gcode_error(target, slice_plate) if found else None
             if empty:
-                job["status"] = "failed"
-                job["error"] = empty
-                _save_jobs()
-                _history_upsert(job_id, status="failed", error=empty, updated_at=time.time())
-                job_logger.log(f"ERROR: {empty}")
-                job_logger.log("__FAILED__: No G-code produced")
+                logger.warning("Job %s: %s (requested plate %d, sliced plate %d)",
+                               job_id, empty, plate_id, slice_plate)
+                _fail(empty, "No G-code produced")
                 return
         else:
             gcodes = sorted(glob.glob(os.path.join(output_dir, "*.gcode")))
