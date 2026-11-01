@@ -7,6 +7,7 @@ from playwright.sync_api import Page, expect
 from e2e.conftest import FILAMENT, MACHINE, PROCESS
 
 FAILPLATE_LABEL = "Slice Plate 2"  # mock slicer fails plate 2 (see conftest)
+PROJECT = "project.3mf"  # 3-plate upload; an STL only has plate 1
 
 # Mock slices finish in well under a second, except the slow plate (SLOW_SECONDS).
 expect.set_options(timeout=15_000)
@@ -101,8 +102,8 @@ def test_slice_success_streams_logs_and_downloads(dash: Page, stl_file):
     expect(row.locator(".jobs-download")).to_have_count(0)
 
 
-def test_slice_failure_shows_error(dash: Page, stl_file):
-    dash.set_input_files("#file-input", str(stl_file))
+def test_slice_failure_shows_error(dash: Page, project_file):
+    dash.set_input_files("#file-input", str(project_file))
     choose_profiles(dash, plate=FAILPLATE_LABEL)
     dash.click("#submit-btn")
     expect(dash.locator("#error-card")).to_be_visible()
@@ -112,6 +113,16 @@ def test_slice_failure_shows_error(dash: Page, stl_file):
     expect(row.locator(".status-pill")).to_have_text("failed")
     expect(row).to_contain_text("OrcaSlicer slice process failed")
     expect(row.locator(".jobs-download")).to_have_count(0)
+
+
+def test_stl_has_no_plate_two(dash: Page, stl_file):
+    dash.set_input_files("#file-input", str(stl_file))
+    choose_profiles(dash, plate=FAILPLATE_LABEL)
+    dash.click("#submit-btn")
+    expect(dash.locator("#error-card")).to_be_visible()
+    row = dash.locator("#jobs-tbody tr").first
+    expect(row.locator(".status-pill")).to_have_text("failed")
+    expect(row).to_contain_text("Cannot slice plate 2: project declares no plates")
 
 
 # ---- job history -------------------------------------------------------------------
@@ -137,7 +148,7 @@ def test_auto_refresh_picks_up_external_jobs(dash: Page, api):
 def test_status_filter(dash: Page, api):
     ok = api.create_job()
     api.wait_for(ok, "completed")
-    bad = api.create_job(plate="2")
+    bad = api.create_job(plate="2", filename=PROJECT)
     api.wait_for(bad, "failed")
     dash.click("#jobs-refresh-btn")
     expect(dash.locator("#jobs-tbody tr")).to_have_count(2)
@@ -160,10 +171,10 @@ def test_queue_tracks_active_job_and_full_slots(dash: Page, api, page: Page, ser
     expect(dash.locator("#queue-list")).to_contain_text("Idle")
     expect(dash.locator("#queue-slots")).to_have_text("0 / 1")
 
-    job_id = api.create_job(plate="3")
+    job_id = api.create_job(plate="3", filename=PROJECT)
     item = dash.locator(f'#queue-list [data-job-id="{job_id}"]')
     expect(item.locator(".status-pill")).to_have_text("slicing")
-    expect(item).to_contain_text("part.stl")
+    expect(item).to_contain_text(PROJECT)
     expect(dash.locator("#queue-slots")).to_have_text("1 / 1")
     expect(dash.locator("#queue-bar")).to_have_class(re.compile(r"\bfull\b"))
 
@@ -184,12 +195,13 @@ def test_queue_tracks_active_job_and_full_slots(dash: Page, api, page: Page, ser
 # ---- log viewer ------------------------------------------------------------------------
 
 def test_log_viewer_streams_live_job(dash: Page, api):
-    job_id = api.create_job(plate="3")
+    job_id = api.create_job(plate="3", filename=PROJECT)
     dash.locator(f'#queue-list [data-job-id="{job_id}"] [data-logs]').click()
     viewer = dash.locator("#log-viewer")
     expect(viewer).to_be_visible()
     expect(dash.locator("#log-viewer-title")).to_have_text(f"Job {job_id[:8]}")
-    expect(dash.locator("#log-viewer-file")).to_have_text("part.stl")
+    expect(dash.locator("#log-viewer-file")).to_have_text(PROJECT)
+    expect(dash.locator("#log-viewer-body")).to_contain_text("Plate extraction: plate 3 of 3")
     body = dash.locator("#log-viewer-body")
     expect(body).to_contain_text("mock: slicing step 1/3")
     expect(dash.locator("#log-viewer-status .status-pill")).to_have_text("slicing")
@@ -199,7 +211,7 @@ def test_log_viewer_streams_live_job(dash: Page, api):
 
 
 def test_log_viewer_for_failed_job_from_history(dash: Page, api):
-    job_id = api.create_job(plate="2")
+    job_id = api.create_job(plate="2", filename=PROJECT)
     api.wait_for(job_id, "failed")
     job_row(dash, job_id).locator("[data-logs]").click()
     body = dash.locator("#log-viewer-body")
