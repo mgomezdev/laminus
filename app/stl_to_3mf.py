@@ -398,7 +398,10 @@ def _build_item_worlds(path: str) -> list[tuple[str, str, list[tuple[float, floa
                     _verts((sub or model).lstrip("/"), c.get("objectid"), _mul(ctf, tf), [], out)
 
         main = "3D/3dmodel.model"
-        build = next(el for el in _root(main) if _local(el.tag) == "build")
+        # Default matters: a bare StopIteration can't cross asyncio.to_thread on py3.12 and hangs the caller.
+        build = next((el for el in _root(main) if _local(el.tag) == "build"), None)
+        if build is None:
+            raise ValueError(f"{main} has no <build> element")
         result = []
         for item in build:
             oid = item.get("objectid")

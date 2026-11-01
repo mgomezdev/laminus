@@ -299,6 +299,18 @@ def test_restore_z_rejects_entity_declarations(tmp_path):
         restore_z_from_source(src, out)
 
 
+def test_restore_z_without_build_raises_value_error(tmp_path):
+    # A leaked StopIteration hangs asyncio.to_thread callers on py3.12 (/arrange never returned).
+    import zipfile
+    from app.stl_to_3mf import restore_z_from_source
+
+    src = str(tmp_path / "src.3mf")
+    with zipfile.ZipFile(src, "w") as z:
+        z.writestr("3D/3dmodel.model", "<model/>")
+    with pytest.raises(ValueError):
+        restore_z_from_source(src, src)
+
+
 def test_strip_application_version_fix_settings_flag(tmp_path):
     import json
     import zipfile
