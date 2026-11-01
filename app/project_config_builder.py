@@ -36,6 +36,8 @@ def build_project_settings(machine: dict, process: dict, filaments: list[dict]) 
             values.append(val)
         config[key] = values
 
+    normalize_filament_ids(config, len(filaments))
+
     config["from"] = "user"
     config.setdefault("version", process.get("version", machine.get("version", "1.0.0")))
     # OrcaSlicer CLI -51: if machine_start_gcode uses M83 (relative extrusion),
@@ -44,6 +46,24 @@ def build_project_settings(machine: dict, process: dict, filaments: list[dict]) 
     config.setdefault("layer_gcode", "G92 E0\n")
     _ensure_extruder_reset_per_layer(config)
     return config
+
+
+def normalize_filament_ids(config: dict, filament_count: int | None = None) -> bool:
+    """BIZ-351: projects carry each filament's id as ``filament_ids``, never the preset-level
+    ``filament_id``. OrcaSlicer 2.4.2 segfaults in --export-3mf if ``filament_id`` is present
+    or ``filament_ids`` is missing/empty; "" is accepted for a filament without an id.
+    Fixes *config* in place and returns whether anything changed."""
+    preset_ids = config.pop("filament_id", None)
+    if config.get("filament_ids"):
+        return preset_ids is not None
+    if isinstance(preset_ids, list) and preset_ids:
+        config["filament_ids"] = preset_ids
+    else:
+        if filament_count is None:
+            types = config.get("filament_type")
+            filament_count = len(types) if isinstance(types, list) else 0
+        config["filament_ids"] = [""] * max(filament_count, 1)
+    return True
 
 
 def _ensure_extruder_reset_per_layer(config: dict) -> None:

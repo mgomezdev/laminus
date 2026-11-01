@@ -5,6 +5,7 @@ import asyncio
 import signal
 import uuid
 import glob
+import re
 import time
 import logging
 import json
@@ -20,6 +21,7 @@ from app.profile_catalog import ProfileCatalog
 from app.project_config_builder import build_project_settings, embed_project_settings
 from app import preview_3mf as _preview
 from app import subset_3mf as _subset
+from app.plate_extract import extract_plate as _extract_plate, PlateExtractError as _PlateExtractError
 from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf, inject_stls_into_3mf as _inject_stls_into_3mf, stl_min_z as _stl_min_z, restore_build_item_z as _restore_build_item_z, restore_z_from_source as _restore_z_from_source, strip_application_version as _strip_app_version
 
 logging.basicConfig(level=logging.INFO)
@@ -35,6 +37,24 @@ def _form_default_true(value) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() not in ("false", "0", "no", "off", "")
+
+
+def _form_default_false(value) -> bool:
+    """Opt-in flag: omitted means False; "true"/"1"/"yes"/"on" turn it on."""
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
+
+
+GEOMETRY_ONLY_RETRY_DESC = (
+    "Opt-in fallback, default `false`. When `true` and the first slice fails, retry once with "
+    "`Metadata/model_settings.config` removed. The retry DISCARDS every per-object and per-part "
+    "override (walls, infill, supports, brim, modifiers, layer ranges, extruder assignment) and "
+    "the plate settings, so the result can differ from the project; the job log says so when it "
+    "happens."
+)
 
 
 # CONFIG_DIR / DATA_DIR are env-overridable so the e2e suite can run the real app as a
@@ -807,13 +827,30 @@ async def _strip_model_settings(src: str, dst: str) -> None:
     await asyncio.to_thread(_do_strip)
 
 
+def _sliced_plate_gcode_error(threemf: str, plate_id: int) -> Optional[str]:
+    """None if the exported 3MF holds G-code for the requested plate (any plate when plate_id==0)."""
+    try:
+        with zipfile.ZipFile(threemf) as z:
+            names = z.namelist()
+    except Exception as exc:
+        return f"exported 3MF unreadable: {exc}"
+    want = f"Metadata/plate_{plate_id}.gcode"
+    if plate_id > 0 and want in names:
+        return None
+    if plate_id == 0 and any(re.fullmatch(r"Metadata/plate_\d+\.gcode", n) for n in names):
+        return None
+    which = f"plate {plate_id}" if plate_id > 0 else "any plate"
+    return (f"OrcaSlicer reported success but produced no G-code for {which} "
+            f"(plate missing or empty in the project).")
+
+
 async def run_orcaslicer_task(
     job_id: str,
     input_file_path: str,
     output_dir: str,
     plate_id: int = 1,
     export_3mf: Optional[str] = None,
-    geometry_only_retry: bool = True,
+    geometry_only_retry: bool = False,
 ):
     job = jobs.get(job_id)
     if job is None:
@@ -824,11 +861,24 @@ async def run_orcaslicer_task(
     _history_upsert(job_id, status="slicing", updated_at=time.time())
     job_logger.log(f"Starting slice: {os.path.basename(input_file_path)}")
 
+    def _fail(error: str, sentinel: str) -> None:
+        job["status"] = "failed"
+        job["error"] = error
+        _save_jobs()
+        _history_upsert(job_id, status="failed", error=error, updated_at=time.time())
+        job_logger.log(f"ERROR: {error}")
+        job_logger.log(f"__FAILED__: {sentinel}")
+
+    # Orca slices plate 1 of the single-plate project built below; `arrange` is decided
+    # once extraction tells us whether the input carried a plate layout.
+    slice_plate = plate_id
+    arrange = "1"
+
     async def _attempt(slice_input: str, label: str) -> bool:
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-            "orcaslicer", "--slice", str(plate_id),
-            "--outputdir", output_dir, "--arrange", "1",
+            "orcaslicer", "--slice", str(slice_plate),
+            "--outputdir", output_dir, "--arrange", arrange,
         ]
         if export_3mf:
             cmd.extend(["--export-3mf", export_3mf])
@@ -863,22 +913,83 @@ async def run_orcaslicer_task(
         except Exception as exc:
             job_logger.log(f"WARNING: could not strip Application version: {exc}")
 
+    # BIZ-349: never hand Orca a multi-plate project. `--arrange 1` re-packs objects across
+    # plates (plates collapse, parts migrate off the requested plate and silently vanish
+    # from the job) and `--arrange 0` checks plate bounds against a stride that does not
+    # always match the project's. Pull the requested plate - plate 1 included - into its own
+    # single-plate project at plate-1 coordinates and slice that with `--arrange 0`.
+    if input_file_path.lower().endswith(".3mf") and plate_id >= 1:
+        single_path = input_file_path[:-4] + f"_plate{plate_id}.3mf"
+        try:
+            info = await asyncio.to_thread(_extract_plate, input_file_path, plate_id, single_path)
+        except _PlateExtractError as exc:
+            logger.warning("Job %s: plate extraction rejected plate %d: %s", job_id, plate_id, exc)
+            _fail(f"Cannot slice plate {plate_id}: {exc}", "Plate extraction failed")
+            return
+        except Exception as exc:
+            logger.exception("Job %s: plate extraction crashed", job_id)
+            _fail(f"Could not extract plate {plate_id}: {exc}", "Plate extraction failed")
+            return
+        logger.info("Job %s plate extraction: %s", job_id, json.dumps(info))
+        if info["has_plate_data"]:
+            job_logger.log(
+                f"Plate extraction: plate {plate_id} of {info['source_plates']} -> single-plate project; "
+                f"{info['kept_items']} build item(s) kept, {info['dropped_items']} dropped, "
+                f"shift {info['origin_shift']} mm (bed {info['bed_mm']}), objects {info['objects']}")
+            cg = info.get("custom_gcode")
+            if cg:
+                job_logger.log(f"Plate extraction: custom layer G-code (pauses/colour changes): "
+                               f"{cg['kept']} kept for plate {plate_id}, other plates' blocks "
+                               f"dropped {cg['dropped_plates']}")
+            if info["missing_instances"]:
+                job_logger.log(f"WARNING: {info['missing_instances']} instance(s) listed on plate "
+                               f"{plate_id} have no build item and were skipped")
+            for p in info["positions"]:
+                job_logger.log(f"  object {p['object_id']}#{p['instance']} at x={p['x']} y={p['y']}")
+            arrange = "0"
+        else:
+            # No plate layout (bare STL-derived 3MF): nothing to collapse, but parts still
+            # need placing, so let Orca arrange them.
+            job_logger.log("Plate extraction: input declares no plates; slicing as-is with --arrange 1")
+        input_file_path = single_path
+        slice_plate = 1
+
     success = await _attempt(input_file_path, "Attempt 1")
 
+    used_geometry_only = False
     if not success and geometry_only_retry:
-        job_logger.log("Attempt 1 failed - retrying with model_settings stripped")
+        job_logger.log(
+            "WARNING: Attempt 1 failed - geometry_only_retry=true, retrying with model_settings.config "
+            "REMOVED. Per-object/per-part overrides, modifiers, layer ranges, extruder assignment and "
+            "plate settings will NOT be applied to this slice.")
+        logger.warning("Job %s: attempt 1 failed, geometry-only retry requested", job_id)
         base, ext = os.path.splitext(input_file_path)
         geo_path = base + "_geo" + ext
         try:
             await _strip_model_settings(input_file_path, geo_path)
             success = await _attempt(geo_path, "Attempt 2 (geometry-only)")
+            used_geometry_only = success
         except Exception as exc:
             job_logger.log(f"ERROR stripping model_settings: {exc}")
+    elif not success:
+        job_logger.log("Attempt 1 failed (geometry_only_retry not requested; no fallback attempted)")
+
+    if used_geometry_only:
+        job_logger.log("WARNING: output was produced by the geometry-only fallback; per-object "
+                       "settings from the project were discarded")
+        logger.warning("Job %s: completed via geometry-only fallback (per-object settings discarded)",
+                       job_id)
 
     if success:
         if export_3mf:
             target = os.path.join(output_dir, export_3mf)
             found = target if os.path.exists(target) else None
+            empty = _sliced_plate_gcode_error(target, slice_plate) if found else None
+            if empty:
+                logger.warning("Job %s: %s (requested plate %d, sliced plate %d)",
+                               job_id, empty, plate_id, slice_plate)
+                _fail(empty, "No G-code produced")
+                return
         else:
             gcodes = sorted(glob.glob(os.path.join(output_dir, "*.gcode")))
             found = gcodes[0] if gcodes else None
@@ -917,10 +1028,10 @@ async def start_slice(
     filament_uuids: str = Form(..., description='JSON array, e.g. ["uuid1"]'),
     plate: int = Form(...),
     export_3mf: Optional[str] = Form(None),
-    geometry_only_retry: Optional[str] = Form(None),
+    geometry_only_retry: Optional[str] = Form(None, description=GEOMETRY_ONLY_RETRY_DESC),
     extra_config: Optional[str] = Form(None, description='JSON object merged into project settings after resolution'),
 ):
-    geometry_only_retry = _form_default_true(geometry_only_retry)
+    geometry_only_retry = _form_default_false(geometry_only_retry)
     if catalog is None:
         raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
 
@@ -1066,9 +1177,14 @@ async def start_slice(
         "Use this endpoint when you already have a fully-configured 3MF and want to avoid "
         "the overhead of profile resolution. Typical callers: Themis queue engine dispatching "
         "pre-packed project 3MFs, or debugging with a known-good 3MF from the desktop app.\n\n"
-        "**Geometry-only retry** works the same as in `POST /api/v1/jobs`: when "
-        "`geometry_only_retry=true` (default) and the first slice fails, the API retries "
-        "with `Metadata/model_settings.config` stripped from the 3MF.\n\n"
+        "**Plate selection:** the requested plate is extracted into its own single-plate "
+        "project (moved to plate-1 coordinates, with its own custom layer G-code) and sliced "
+        "with `--arrange 0`, so parts are never re-packed across plates. A missing or empty "
+        "plate fails the job.\n\n"
+        "**Geometry-only retry** is opt-in (`geometry_only_retry=true`, default `false`), as in "
+        "`POST /api/v1/jobs`: if the first slice fails, retry once with "
+        "`Metadata/model_settings.config` removed, which discards per-object settings. The job "
+        "log flags it whenever it is used.\n\n"
         "**`export_3mf`:** when set, OrcaSlicer embeds the sliced GCode into a `.3mf` and "
         "the download endpoint returns that file instead of a standalone `.gcode`.\n\n"
         "The response and job lifecycle are identical to `POST /api/v1/jobs`."
@@ -1089,9 +1205,9 @@ async def slice_prepared(
     file: UploadFile = File(...),
     plate: int = Form(...),
     export_3mf: Optional[str] = Form(None),
-    geometry_only_retry: Optional[str] = Form(None),
+    geometry_only_retry: Optional[str] = Form(None, description=GEOMETRY_ONLY_RETRY_DESC),
 ):
-    geometry_only_retry = _form_default_true(geometry_only_retry)
+    geometry_only_retry = _form_default_false(geometry_only_retry)
     if plate < 1:
         raise HTTPException(status_code=422, detail="plate must be >= 1.")
 

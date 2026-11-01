@@ -289,7 +289,7 @@
           "slice"
         ],
         "summary": "Slice a pre-configured 3MF (no profile resolution)",
-        "description": "Accepts a `.3mf` that already contains `Metadata/project_settings.config` (e.g., exported from OrcaSlicer desktop or produced by `POST /api/v1/jobs` with `export_3mf` set). No catalog lookup or profile merging is performed \u2014 OrcaSlicer uses the embedded settings verbatim.\n\nUse this endpoint when you already have a fully-configured 3MF and want to avoid the overhead of profile resolution. Typical callers: Themis queue engine dispatching pre-packed project 3MFs, or debugging with a known-good 3MF from the desktop app.\n\n**Geometry-only retry** works the same as in `POST /api/v1/jobs`: when `geometry_only_retry=true` (default) and the first slice fails, the API retries with `Metadata/model_settings.config` stripped from the 3MF.\n\n**`export_3mf`:** when set, OrcaSlicer embeds the sliced GCode into a `.3mf` and the download endpoint returns that file instead of a standalone `.gcode`.\n\nThe response and job lifecycle are identical to `POST /api/v1/jobs`.",
+        "description": "Accepts a `.3mf` that already contains `Metadata/project_settings.config` (e.g., exported from OrcaSlicer desktop or produced by `POST /api/v1/jobs` with `export_3mf` set). No catalog lookup or profile merging is performed \u2014 OrcaSlicer uses the embedded settings verbatim.\n\nUse this endpoint when you already have a fully-configured 3MF and want to avoid the overhead of profile resolution. Typical callers: Themis queue engine dispatching pre-packed project 3MFs, or debugging with a known-good 3MF from the desktop app.\n\n**Plate selection:** the requested plate is extracted into its own single-plate project (moved to plate-1 coordinates, with its own custom layer G-code) and sliced with `--arrange 0`, so parts are never re-packed across plates. A missing or empty plate fails the job.\n\n**Geometry-only retry** is opt-in (`geometry_only_retry=true`, default `false`), as in `POST /api/v1/jobs`: if the first slice fails, retry once with `Metadata/model_settings.config` removed, which discards per-object settings. The job log flags it whenever it is used.\n\n**`export_3mf`:** when set, OrcaSlicer embeds the sliced GCode into a `.3mf` and the download endpoint returns that file instead of a standalone `.gcode`.\n\nThe response and job lifecycle are identical to `POST /api/v1/jobs`.",
         "operationId": "v1_slice_prepared",
         "requestBody": {
           "content": {
@@ -1278,7 +1278,8 @@
                 "type": "null"
               }
             ],
-            "title": "Geometry Only Retry"
+            "title": "Geometry Only Retry",
+            "description": "Opt-in fallback, default `false`. When `true` and the first slice fails, retry once with `Metadata/model_settings.config` removed. The retry DISCARDS every per-object and per-part override (walls, infill, supports, brim, modifiers, layer ranges, extruder assignment) and the plate settings, so the result can differ from the project; the job log says so when it happens."
           },
           "extra_config": {
             "anyOf": [
@@ -1648,7 +1649,8 @@
                 "type": "null"
               }
             ],
-            "title": "Geometry Only Retry"
+            "title": "Geometry Only Retry",
+            "description": "Opt-in fallback, default `false`. When `true` and the first slice fails, retry once with `Metadata/model_settings.config` removed. The retry DISCARDS every per-object and per-part override (walls, infill, supports, brim, modifiers, layer ranges, extruder assignment) and the plate settings, so the result can differ from the project; the job log says so when it happens."
           }
         },
         "type": "object",

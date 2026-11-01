@@ -36,10 +36,20 @@ List jobs with `GET /api/v1/jobs?limit=50&cursor=...&status=completed`.
 original job; different bodies return 422 and in-flight duplicates return 409.
 Keys live 24 hours in memory and do not survive restart.
 
+Slicing always extracts the requested `plate` into its own single-plate project
+(moved to plate-1 coordinates; that plate's custom layer G-code kept) and runs
+Orca with `--arrange 0`, so parts never move between plates. A missing or empty
+plate, or a run that produces no G-code, fails the job. `geometry_only_retry` is
+opt-in (default `false`): when `true`, a failed slice is retried once without
+`model_settings.config`, which drops per-object settings; the job log warns.
+
 For an already-configured 3MF use `POST /api/v1/slice/prepared` with multipart
 `file` and `plate`. This endpoint returns 200 `{job_id}`; use the same v1 job
 status/events/artifact URLs afterwards. Optional `export_3mf` must be a plain
-filename ending in `.3mf`, never an absolute or relative path.
+filename ending in `.3mf`, never an absolute or relative path. Every slice input has
+its `filament_ids` repaired on the way in (a stray preset-level `filament_id` is
+moved or dropped, and a missing or empty list is filled with `""` per filament):
+OrcaSlicer 2.4.2 segfaults in `--export-3mf` without it.
 
 ## Profiles
 

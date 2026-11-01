@@ -283,7 +283,7 @@ async def slice_prepared(
     file: UploadFile = File(...),
     plate: int = Form(...),
     export_3mf: Optional[str] = Form(None),
-    geometry_only_retry: bool = Form(True),
+    geometry_only_retry: bool = Form(False),
 ):
     if plate < 1:
         raise HTTPException(422, "plate must be >= 1.")

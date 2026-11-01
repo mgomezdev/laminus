@@ -10,6 +10,7 @@ Supported invocations:
   orcaslicer --datadir DIR --export-3mf PATH [--arrange N] [--orient N] INPUT
 """
 import os
+import re
 import sys
 import time
 import zipfile
@@ -61,9 +62,13 @@ def main():
 
     if "--slice" in args:
         plate = int(_get(args, "--slice") or 1)
-        # e2e hooks, keyed on plate (the input is always a server-side prepared.3mf, so
-        # the plate is the only knob a client controls): slicing MOCK_ORCA_SLOW_PLATE
-        # takes MOCK_ORCA_SLICE_DELAY seconds, slicing MOCK_ORCA_FAIL_PLATE fails.
+        # e2e hooks, keyed on the plate the client requested (the plate is the only knob a
+        # client controls): slicing MOCK_ORCA_SLOW_PLATE takes MOCK_ORCA_SLICE_DELAY
+        # seconds, slicing MOCK_ORCA_FAIL_PLATE fails. Laminus extracts the requested plate
+        # into "<input>_plate<N>.3mf" and always slices it as plate 1, so read N from there.
+        m = re.search(r"_plate(\d+)\.3mf$", args[-1]) if args else None
+        if m:
+            plate = int(m.group(1))
         delay = float(os.environ.get("MOCK_ORCA_SLICE_DELAY", "0"))
         if delay and os.environ.get("MOCK_ORCA_SLOW_PLATE") == str(plate):
             for step in range(1, 4):
