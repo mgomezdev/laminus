@@ -6,6 +6,8 @@ import re
 import struct
 import zipfile
 
+from app.project_config_builder import normalize_filament_ids
+
 _NS_CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 _NS_PROD = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
 _NS_BAMBU = "http://schemas.bambulab.com/package/2021"
@@ -243,6 +245,8 @@ def strip_application_version(src_path: str, dst_path: str, fix_settings: bool =
        empty ``layer_gcode``, override to ``"0"`` so OrcaSlicer generates M82 +
        absolute E values — correct for machines whose start-gcode uses M83 only
        for purge lines before handing off to the slicer's generated print body.
+       Also repairs ``filament_ids`` (see ``normalize_filament_ids``), whose absence
+       segfaults ``--export-3mf``.
        Skipped when *fix_settings* is False (e.g. arrange, whose output keeps its settings).
     """
     import json as _json
@@ -269,11 +273,14 @@ def strip_application_version(src_path: str, dst_path: str, fix_settings: bool =
                 elif fix_settings and item.filename == "Metadata/project_settings.config":
                     try:
                         cfg = _json.loads(data.decode("utf-8"))
+                        changed = normalize_filament_ids(cfg)
                         if cfg.get("use_relative_e_distances") == "1":
                             lg = cfg.get("layer_gcode", "")
                             if not lg or "G92" not in str(lg):
                                 cfg["use_relative_e_distances"] = "0"
-                                data = _json.dumps(cfg, ensure_ascii=False, indent=2).encode("utf-8")
+                                changed = True
+                        if changed:
+                            data = _json.dumps(cfg, ensure_ascii=False, indent=2).encode("utf-8")
                     except Exception:
                         pass
                 dst.writestr(item, data)

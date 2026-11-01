@@ -46,7 +46,10 @@ opt-in (default `false`): when `true`, a failed slice is retried once without
 For an already-configured 3MF use `POST /api/v1/slice/prepared` with multipart
 `file` and `plate`. This endpoint returns 200 `{job_id}`; use the same v1 job
 status/events/artifact URLs afterwards. Optional `export_3mf` must be a plain
-filename ending in `.3mf`, never an absolute or relative path.
+filename ending in `.3mf`, never an absolute or relative path. Every slice input has
+its `filament_ids` repaired on the way in (a stray preset-level `filament_id` is
+moved or dropped, and a missing or empty list is filled with `""` per filament):
+OrcaSlicer 2.4.2 segfaults in `--export-3mf` without it.
 
 ## Profiles
 
