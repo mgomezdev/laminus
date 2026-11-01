@@ -6,7 +6,7 @@ import re
 import struct
 import zipfile
 
-from app.project_config_builder import normalize_filament_ids
+from app.project_config_builder import ensure_extruder_reset_per_layer, normalize_filament_ids
 
 _NS_CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 _NS_PROD = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
@@ -241,10 +241,8 @@ def strip_application_version(src_path: str, dst_path: str, fix_settings: bool =
     1. Remove version-bearing metadata tags from .model files to avoid segfaults
        (triggered by Application/OrcaSlicer metadata in both v2.3.x and v2.4.x).
 
-    2. If project_settings.config has ``use_relative_e_distances = "1"`` but an
-       empty ``layer_gcode``, override to ``"0"`` so OrcaSlicer generates M82 +
-       absolute E values — correct for machines whose start-gcode uses M83 only
-       for purge lines before handing off to the slicer's generated print body.
+    2. Add the per-layer ``G92 E0`` OrcaSlicer requires for relative extrusion when
+       project_settings.config lacks it (see ``ensure_extruder_reset_per_layer``).
        Also repairs ``filament_ids`` (see ``normalize_filament_ids``), whose absence
        segfaults ``--export-3mf``.
        Skipped when *fix_settings* is False (e.g. arrange, whose output keeps its settings).
@@ -274,11 +272,7 @@ def strip_application_version(src_path: str, dst_path: str, fix_settings: bool =
                     try:
                         cfg = _json.loads(data.decode("utf-8"))
                         changed = normalize_filament_ids(cfg)
-                        if cfg.get("use_relative_e_distances") == "1":
-                            lg = cfg.get("layer_gcode", "")
-                            if not lg or "G92" not in str(lg):
-                                cfg["use_relative_e_distances"] = "0"
-                                changed = True
+                        changed = ensure_extruder_reset_per_layer(cfg) or changed
                         if changed:
                             data = _json.dumps(cfg, ensure_ascii=False, indent=2).encode("utf-8")
                     except Exception:

@@ -305,16 +305,37 @@ def test_strip_application_version_fix_settings_flag(tmp_path):
     from app.stl_to_3mf import strip_application_version
 
     src = tmp_path / "s.3mf"
-    cfg = json.dumps({"use_relative_e_distances": "1", "layer_gcode": ""})
+    cfg = json.dumps({"use_relative_e_distances": "1", "gcode_flavor": "marlin", "before_layer_change_gcode": ""})
     with zipfile.ZipFile(src, "w") as z:
         z.writestr("3D/3dmodel.model", '<model><metadata name="Application">BambuStudio-2.3.2</metadata></model>')
         z.writestr("Metadata/project_settings.config", cfg)
-    for fix, expected in ((True, "0"), (False, "1")):
+    # BIZ-350: repaired with a per-layer reset, keeping relative extrusion - flipping to
+    # absolute broke projects that already had the reset in before_layer_change_gcode.
+    for fix, expected in ((True, "G92 E0\n"), (False, "")):
         dst = tmp_path / f"d{fix}.3mf"
         strip_application_version(str(src), str(dst), fix_settings=fix)
         with zipfile.ZipFile(dst) as z:
             assert b"Application" not in z.read("3D/3dmodel.model")
-            assert json.loads(z.read("Metadata/project_settings.config"))["use_relative_e_distances"] == expected
+            out = json.loads(z.read("Metadata/project_settings.config"))
+            assert out["use_relative_e_distances"] == "1"
+            assert out["before_layer_change_gcode"] == expected
+
+
+def test_strip_application_version_keeps_existing_reset(tmp_path):
+    # Bambu A1 project with the reset already present must stay relative (BIZ-350).
+    import json
+    import zipfile
+    from app.stl_to_3mf import strip_application_version
+
+    src, dst = tmp_path / "s.3mf", tmp_path / "d.3mf"
+    cfg = {"use_relative_e_distances": "1", "gcode_flavor": "marlin", "before_layer_change_gcode": "G92 E0\n"}
+    with zipfile.ZipFile(src, "w") as z:
+        z.writestr("3D/3dmodel.model", "<model/>")
+        z.writestr("Metadata/project_settings.config", json.dumps(cfg))
+    strip_application_version(str(src), str(dst))
+    with zipfile.ZipFile(dst) as z:
+        out = json.loads(z.read("Metadata/project_settings.config"))
+    assert out["use_relative_e_distances"] == "1" and out["before_layer_change_gcode"] == "G92 E0\n"
 
 
 @pytest.mark.parametrize("cfg, expected", [

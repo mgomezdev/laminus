@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import zipfile
 
 _STRIP_KEYS = {
@@ -40,11 +41,7 @@ def build_project_settings(machine: dict, process: dict, filaments: list[dict]) 
 
     config["from"] = "user"
     config.setdefault("version", process.get("version", machine.get("version", "1.0.0")))
-    # OrcaSlicer CLI -51: if machine_start_gcode uses M83 (relative extrusion),
-    # layer_gcode must contain G92 E0 or the slicer aborts. Docker AppImage profiles
-    # omit the key entirely; inject the minimal safe default when absent.
-    config.setdefault("layer_gcode", "G92 E0\n")
-    _ensure_extruder_reset_per_layer(config)
+    ensure_extruder_reset_per_layer(config)
     return config
 
 
@@ -66,20 +63,25 @@ def normalize_filament_ids(config: dict, filament_count: int | None = None) -> b
     return True
 
 
-def _ensure_extruder_reset_per_layer(config: dict) -> None:
-    """OrcaSlicer 2.4 refuses to slice with relative extruder addressing (-51) unless
-    ``before_layer_change_gcode`` contains ``G92 E0`` - the error text names the legacy
-    ``layer_gcode`` key, which the slicer no longer reads. Klipper presets (e.g. Elegoo
-    Centauri Carbon) are treated as relative even with ``use_relative_e_distances`` off, and
-    their vendor presets leave this key unset. A per-layer extruder reset is a no-op for
-    relative addressing, so add it whenever relative addressing applies."""
-    relative = (str(config.get("use_relative_e_distances", "")).lower() in ("1", "true")
-                or config.get("gcode_flavor") == "klipper")
-    if not relative:
-        return
-    current = config.get("before_layer_change_gcode") or ""
-    if "G92 E0" not in current:
-        config["before_layer_change_gcode"] = (current.rstrip("\n") + "\n" if current else "") + "G92 E0\n"
+_G92_E0 = re.compile(r"^[ \t]*G92[ \t]*E(0(\.0*)?|\.0+)[ \t]*(;.*)?$", re.MULTILINE)
+
+
+def ensure_extruder_reset_per_layer(config: dict) -> bool:
+    """Mirror OrcaSlicer 2.4.2's -51 check (Print::validate): relative extrusion
+    (``use_relative_e_distances``, default true) on a marlin/marlin2 flavor needs an exact
+    ``G92 E0`` in ``before_layer_change_gcode`` or ``layer_change_gcode`` - the error text
+    names the legacy ``layer_gcode``, which it does not read. Orca exempts BBL printers but
+    does not recognise one in a Laminus-built project, so Bambu gets the reset too. Klipper
+    needs none, and absolute extrusion rejects one, so both are left alone.
+    Fixes *config* in place and returns whether anything changed."""
+    relative = str(config.get("use_relative_e_distances", "1")).lower() not in ("0", "false")
+    if not relative or config.get("gcode_flavor", "marlin") not in ("marlin", "marlin2"):
+        return False
+    before = config.get("before_layer_change_gcode") or ""
+    if _G92_E0.search(before) or _G92_E0.search(config.get("layer_change_gcode") or ""):
+        return False
+    config["before_layer_change_gcode"] = (before.rstrip("\n") + "\n" if before else "") + "G92 E0\n"
+    return True
 
 
 def embed_project_settings(src_3mf: str, project_settings: dict, dst_3mf: str) -> None:

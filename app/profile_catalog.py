@@ -29,30 +29,64 @@ def _fs_safe_names(name: str) -> list[str]:
     return [name.replace("/", "-"), name.replace("/", " ")]
 
 
+# Shared system library other vendors' filaments inherit from (e.g. "Generic PLA @System").
+_SHARED_LIBRARY = "OrcaFilamentLibrary"
+# Index key prefixes. Plain stems are global (first root wins); scoped keys pin a name to
+# the vendor folder (top-level dir under a root) that ships it.
+_VENDOR_KEY = "\x00vendor\x00"
+_LIBRARY_KEY = "\x00library\x00"
+
+
 def _build_name_index(roots: list[str]) -> dict[str, str]:
-    """Single-pass index of all JSON profile names → absolute paths (first root wins)."""
+    """Single-pass index of all JSON profile names → absolute paths.
+
+    BIZ-350: base names (`fdm_machine_common`, `fdm_process_common`, ...) ship in dozens of
+    vendor folders, so a name alone is ambiguous. Each file is also indexed under its vendor
+    folder, and `_lookup_parent` tries the child's own vendor before the shared library and
+    the global, first-root-wins name."""
     index: dict[str, str] = {}
     for root in roots:
         if not os.path.isdir(root):
             continue
         for dirpath, _dirs, files in os.walk(root):
+            rel = os.path.relpath(dirpath, root)
+            vendor = rel.split(os.sep)[0] if rel != "." else None
+            vendor_dir = os.path.normpath(os.path.join(root, vendor)) if vendor else None
             for filename in files:
                 if filename.endswith(".json") and not filename.startswith("."):
                     stem = os.path.splitext(filename)[0]
-                    if stem not in index:
-                        index[stem] = os.path.join(dirpath, filename)
+                    path = os.path.join(dirpath, filename)
+                    index.setdefault(stem, path)
+                    if vendor_dir:
+                        index.setdefault(f"{_VENDOR_KEY}{vendor_dir}\x00{stem}", path)
+                        if vendor == _SHARED_LIBRARY:
+                            index.setdefault(f"{_LIBRARY_KEY}{stem}", path)
     return index
 
 
-def _lookup_parent(name_index: dict[str, str], parent_name: str) -> Optional[str]:
-    """Resolve an `inherits` value to a path, allowing for on-disk name escaping."""
-    path = name_index.get(parent_name)
-    if path is not None:
-        return path
-    for candidate in _fs_safe_names(parent_name):
-        path = name_index.get(candidate)
-        if path is not None:
-            return path
+def _lookup_parent(name_index: dict[str, str], parent_name: str, child_path: Optional[str] = None) -> Optional[str]:
+    """Resolve an `inherits` value to a path, allowing for on-disk name escaping.
+
+    Order: the child's own vendor folder, the shared filament library, then any root.
+    The child itself is never its own parent (see the self-named case in resolve_inheritance)."""
+    names = [parent_name, *_fs_safe_names(parent_name)]
+    prefixes: list[str] = []
+    if child_path:
+        # Only vendor folders carry scoped keys, so the first ancestor that matches is the vendor.
+        d = os.path.dirname(os.path.normpath(child_path))
+        while True:
+            prefixes.append(f"{_VENDOR_KEY}{d}\x00")
+            parent = os.path.dirname(d)
+            if parent == d:
+                break
+            d = parent
+    prefixes += [_LIBRARY_KEY, ""]
+    child_real = os.path.realpath(child_path) if child_path else None
+    for prefix in prefixes:
+        for name in names:
+            path = name_index.get(prefix + name)
+            if path is not None and (child_real is None or os.path.realpath(path) != child_real):
+                return path
     return None
 
 
@@ -136,12 +170,10 @@ def resolve_inheritance(
 
     parent_name: Optional[str] = data.get("inherits")
     if parent_name:
-        parent_path = _lookup_parent(_name_index, parent_name)
         # A self-named `inherits` (parent name equal to this profile's own name) means
-        # "the system profile of this name" - never treat the file itself as its own
-        # parent, or a legitimate system base gets misdiagnosed as circular inheritance.
-        if parent_path is not None and os.path.realpath(parent_path) == real:
-            parent_path = None
+        # "the system profile of this name" - _lookup_parent never returns the file itself,
+        # or a legitimate system base gets misdiagnosed as circular inheritance.
+        parent_path = _lookup_parent(_name_index, parent_name, filepath)
         if parent_path is None:
             raise ValueError(f"Parent profile '{parent_name}' not found")
         parent_data = resolve_inheritance(
@@ -161,7 +193,7 @@ def resolve_inheritance(
 
 # Bump when catalog entries gain/change fields, so a cache written by older code is rebuilt
 # rather than served without them (the cache key only tracks profile *files*).
-_CACHE_SCHEMA = 2
+_CACHE_SCHEMA = 3  # 3: vendor-scoped name index (BIZ-350)
 
 SYSTEM_PROFILE_TYPES = ("machine", "process", "filament")
 
