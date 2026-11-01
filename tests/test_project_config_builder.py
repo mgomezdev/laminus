@@ -66,6 +66,20 @@ def test_metadata_keys_stripped():
     assert "compatible_printers" not in cfg
 
 
+def test_filament_id_written_as_project_level_filament_ids():
+    # BIZ-351: Orca 2.4.2 segfaults in --export-3mf when a project carries the preset-level
+    # `filament_id` key or lacks a non-empty `filament_ids`; Orca-saved projects only have the latter.
+    cfg = build_project_settings(_machine(), _process(),
+                                 [{**_filament(), "filament_id": "GFA00"}, _filament()])
+    assert cfg["filament_ids"] == ["GFA00", ""]
+    assert "filament_id" not in cfg
+
+
+def test_filament_ids_present_when_no_filament_defines_an_id():
+    cfg = build_project_settings(_machine(), _process(), [_filament()])
+    assert cfg["filament_ids"] == [""]
+
+
 def test_embed_project_settings_creates_valid_zip(tmp_path):
     src = tmp_path / "src.3mf"
     with zipfile.ZipFile(str(src), "w") as zf:

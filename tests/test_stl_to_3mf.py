@@ -317,6 +317,29 @@ def test_strip_application_version_fix_settings_flag(tmp_path):
             assert json.loads(z.read("Metadata/project_settings.config"))["use_relative_e_distances"] == expected
 
 
+@pytest.mark.parametrize("cfg, expected", [
+    # BIZ-351: Orca 2.4.2 segfaults in --export-3mf on these; Laminus packs carry `[]`.
+    ({"filament_type": ["PLA", "PETG"], "filament_ids": []}, ["", ""]),
+    ({"filament_type": ["PLA"]}, [""]),
+    ({"filament_type": ["PLA"], "filament_id": ["GFL99"]}, ["GFL99"]),
+    ({"filament_type": ["PLA"], "filament_id": ["GFL99"], "filament_ids": ["GFA00"]}, ["GFA00"]),
+])
+def test_strip_application_version_repairs_filament_ids(tmp_path, cfg, expected):
+    import json
+    import zipfile
+    from app.stl_to_3mf import strip_application_version
+
+    src = tmp_path / "s.3mf"
+    with zipfile.ZipFile(src, "w") as z:
+        z.writestr("3D/3dmodel.model", "<model/>")
+        z.writestr("Metadata/project_settings.config", json.dumps(cfg))
+    strip_application_version(str(src), str(tmp_path / "d.3mf"))
+    with zipfile.ZipFile(tmp_path / "d.3mf") as z:
+        out = json.loads(z.read("Metadata/project_settings.config"))
+    assert out["filament_ids"] == expected
+    assert "filament_id" not in out
+
+
 def test_strip_application_version_rejects_oversized_archive(tmp_path, monkeypatch):
     import zipfile
     import app.stl_to_3mf as mod
