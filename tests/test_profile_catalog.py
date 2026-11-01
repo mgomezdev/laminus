@@ -59,6 +59,35 @@ def test_resolve_missing_parent_raises(tmp_path):
     with pytest.raises(ValueError, match="Ghost"):
         resolve_inheritance(str(child), _build_name_index([str(tmp_path)]))
 
+def test_parent_resolves_within_own_vendor_first(tmp_path):
+    """BIZ-350: base names like `fdm_machine_common` ship in dozens of vendor folders. A
+    first-found-wins lookup handed Bambu P1S Wanhao's base (klipper, wrong G92 E0)."""
+    write_json(f"{tmp_path}/Anker/machine/fdm_machine_common.json",
+               {"name": "fdm_machine_common", "gcode_flavor": "klipper"})
+    write_json(f"{tmp_path}/BBL/machine/fdm_machine_common.json",
+               {"name": "fdm_machine_common", "gcode_flavor": "marlin"})
+    write_json(f"{tmp_path}/BBL/machine/P1S.json", {"name": "P1S", "inherits": "fdm_machine_common"})
+    result = resolve_inheritance(f"{tmp_path}/BBL/machine/P1S.json", _build_name_index([str(tmp_path)]))
+    assert result["gcode_flavor"] == "marlin"
+
+
+def test_parent_outside_vendor_prefers_orca_filament_library(tmp_path):
+    write_json(f"{tmp_path}/Anker/filament/fdm_filament_tpu.json", {"name": "fdm_filament_tpu", "src": "anker"})
+    write_json(f"{tmp_path}/OrcaFilamentLibrary/filament/base/fdm_filament_tpu.json",
+               {"name": "fdm_filament_tpu", "src": "library"})
+    write_json(f"{tmp_path}/TwoTrees/filament/TPU.json", {"name": "TPU", "inherits": "fdm_filament_tpu"})
+    result = resolve_inheritance(f"{tmp_path}/TwoTrees/filament/TPU.json", _build_name_index([str(tmp_path)]))
+    assert result["src"] == "library"
+
+
+def test_user_profile_inheriting_its_own_name_still_reaches_system(tmp_path):
+    system, user = tmp_path / "system", tmp_path / "user"
+    write_json(f"{system}/Elegoo/machine/Carbon.json", {"name": "Carbon", "gcode_flavor": "klipper"})
+    write_json(f"{user}/default/machine/Carbon.json", {"name": "Carbon", "inherits": "Carbon", "x": 1})
+    result = resolve_inheritance(f"{user}/default/machine/Carbon.json", _build_name_index([str(system), str(user)]))
+    assert result == {"name": "Carbon", "gcode_flavor": "klipper", "x": 1}
+
+
 from app.profile_catalog import make_profile_uuid, make_machine_uuid, parse_machine_name
 
 def test_make_profile_uuid_is_stable():

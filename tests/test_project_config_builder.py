@@ -17,27 +17,44 @@ def _filament():
             "filament_colour": "#FFFFFF", "nozzle_temperature": 220, "bed_temperature": 35}
 
 
-def test_klipper_machine_gets_extruder_reset_before_layer_change():
-    # BIZ-336: Centauri Carbon is klipper with no before_layer_change_gcode; OrcaSlicer 2.4 -51s.
-    machine = {**_machine(), "gcode_flavor": "klipper", "layer_change_gcode": "SET_PRINT_STATS_INFO"}
-    cfg = build_project_settings(machine, _process(), [_filament()])
-    assert "G92 E0" in cfg["before_layer_change_gcode"]
+# BIZ-350: Orca 2.4.2 (Print.cpp) -51s when extrusion is relative - `use_relative_e_distances`,
+# default true - on a marlin/marlin2 flavor and neither before_layer_change_gcode nor
+# layer_change_gcode has an exact "G92 E0". It skips that for BBL printers, but never
+# recognises one in a Laminus-built project.
+
+@pytest.mark.parametrize("flavor", ["marlin", "marlin2"])
+def test_marlin_with_default_relative_gets_extruder_reset(flavor):
+    # Bambu P1S (marlin) and Creality Ender-3 V3 SE (marlin2) leave the key unset.
+    cfg = build_project_settings({**_machine(), "gcode_flavor": flavor}, _process(), [_filament()])
+    assert cfg["before_layer_change_gcode"] == "G92 E0\n"
 
 
 def test_explicit_relative_extrusion_gets_extruder_reset_and_keeps_existing_gcode():
-    machine = {**_machine(), "use_relative_e_distances": "1", "before_layer_change_gcode": "; mine\n"}
+    machine = {**_machine(), "gcode_flavor": "marlin", "use_relative_e_distances": "1",
+               "before_layer_change_gcode": "; mine\n"}
     gcode = build_project_settings(machine, _process(), [_filament()])["before_layer_change_gcode"]
-    assert gcode.startswith("; mine\n") and gcode.count("G92 E0") == 1
+    assert gcode == "; mine\nG92 E0\n"
 
 
-def test_extruder_reset_not_duplicated_when_already_present():
-    machine = {**_machine(), "gcode_flavor": "klipper", "before_layer_change_gcode": "G92 E0\n; x"}
-    assert build_project_settings(machine, _process(), [_filament()])["before_layer_change_gcode"] == "G92 E0\n; x"
+@pytest.mark.parametrize("key", ["before_layer_change_gcode", "layer_change_gcode"])
+def test_extruder_reset_not_added_when_either_hook_has_it(key):
+    machine = {**_machine(), "gcode_flavor": "marlin", key: ";x\nG92 E0 ; reset\n"}
+    cfg = build_project_settings(machine, _process(), [_filament()])
+    assert cfg.get("before_layer_change_gcode", "").count("G92 E0") == (key == "before_layer_change_gcode")
 
 
-def test_absolute_machine_is_left_alone():
-    cfg = build_project_settings({**_machine(), "gcode_flavor": "marlin2"}, _process(), [_filament()])
+@pytest.mark.parametrize("machine", [
+    {"gcode_flavor": "klipper"},  # Elegoo Centauri Carbon, Snapmaker U1: Orca needs no reset
+    {"gcode_flavor": "marlin2", "use_relative_e_distances": "0"},  # absolute: a reset is an error
+])
+def test_extruder_reset_left_alone_when_orca_does_not_need_it(machine):
+    cfg = build_project_settings({**_machine(), **machine}, _process(), [_filament()])
     assert "before_layer_change_gcode" not in cfg
+
+
+def test_no_legacy_layer_gcode_key():
+    # Orca reads layer_change_gcode; `layer_gcode` was a dead default.
+    assert "layer_gcode" not in build_project_settings(_machine(), _process(), [_filament()])
 
 
 def test_build_sets_from_user():
