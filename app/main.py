@@ -2552,6 +2552,10 @@ async def pack_next(
         if rule == "solo":
             raise HTTPException(status_code=422, detail=(
                 f"selection[{g}]: rule 'solo' is not packed with other parts; slice it as its own job."))
+        qty = item.get("qty", 1)
+        if isinstance(qty, bool) or not isinstance(qty, int) or not 1 <= qty <= PACK_MAX_INSTANCES:
+            raise HTTPException(status_code=422, detail=(
+                f"selection[{g}]: qty must be an integer from 1 to {PACK_MAX_INSTANCES}."))
         ref = item["file"]
         if isinstance(ref, int) and not isinstance(ref, bool):
             if not 0 <= ref < len(files):
@@ -2597,14 +2601,14 @@ async def pack_next(
                         k: target.printer_cfg[k] for k in ("printable_area", "printable_height")
                         if k in target.printer_cfg})
                     src = proj
-                want, origins = _pack_next.entry_origins(src, per_file[i], names[i], stl)
+                # cap checked inside, before any per-instance allocation (incl. bundle x qty)
+                want, origins = _pack_next.entry_origins(src, per_file[i], names[i], stl,
+                                                         PACK_MAX_INSTANCES - used)
+                used += sum(want.values())
                 dst = p(f"sub_{i}.3mf")
                 _subset.build_subset(src, dst, want, **target.kwargs)
                 subs.append(dst)
                 file_origins.append(origins)
-            total = sum(len(v) for o in file_origins for v in o.values())
-            if total > PACK_MAX_INSTANCES:
-                raise _subset.SubsetError(f"total instances {total} exceeds max {PACK_MAX_INSTANCES}")
             summary = _subset.merge_subsets(subs, p("merged.3mf"), labels=[names[i] for i in order])
             _pack_next.set_bed(p("merged.3mf"), target.printer_cfg)
             merged: _pack_next.Origins = {}

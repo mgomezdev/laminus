@@ -209,6 +209,8 @@ def test_nothing_fits_is_its_own_code(tmp_path):
     ([{"file": "zzz.3mf", "id": 2}], {}),
     ([{"file": "a.3mf", "id": 2, "qty": 0}], {}),
     (SEL, {"max_parts": "0"}),
+    ([{"file": "a.3mf", "id": 2, "qty": 10 ** 9}], {}),            # rejected before allocating
+    ([{"file": "a.3mf", "plate": 1, "qty": 300}], {}),             # 2-part bundle x 300 > cap
 ])
 def test_other_errors_never_use_nothing_fits(tmp_path, sel, data):
     r = _post(tmp_path, "m350", sel=sel, **data)

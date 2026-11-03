@@ -82,15 +82,17 @@ def stl_project(stl_path: str, dst: str, name: str, project_settings: dict) -> N
 
 
 def entry_origins(src: str, entries: list[tuple[int, dict]], source: str,
-                  stl: bool) -> tuple[dict[int, int], dict[int, list[dict]]]:
+                  stl: bool, limit: int) -> tuple[dict[int, int], dict[int, list[dict]]]:
     """({object id: qty}, {object id: [origin per instance]}) for one source file.
 
     *entries*: (global selection index, selector) pairs. A ``together`` copy of a plate
-    bundle is one unit; every other instance is its own unit.
+    bundle is one unit; every other instance is its own unit. Raises SubsetError before
+    allocating anything once the file's instances would exceed *limit*.
     """
     objects, plates = _subset.list_objects(src), _subset.plate_members(src)
     want: dict[int, int] = {}
     origins: dict[int, list[dict]] = {}
+    total = 0
     for g, sel in entries:
         rule = sel.get("rule", "split")
         selector = {k: v for k, v in sel.items() if k != "rule"}
@@ -100,6 +102,9 @@ def entry_origins(src: str, entries: list[tuple[int, dict]], source: str,
             got = _subset.resolve_selection(objects, [selector], plates)
         except _subset.SubsetError as e:
             raise _subset.SubsetError(f"selection[{g}] ({source}): {e}")
+        total += sum(got.values())
+        if total > limit:
+            raise _subset.SubsetError(f"selection[{g}] ({source}): more than {limit} instances in total")
         for oid, n in got.items():
             per_copy = plates[int(selector["plate"])][oid] if "plate" in selector else 1
             for j in range(n):
