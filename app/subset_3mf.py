@@ -760,6 +760,13 @@ def transplant_layout(subset: str, arranged: str, dst: str) -> int:
     """Write ``subset`` to ``dst`` with plate lists and instance transforms taken from
     the oracle output ``arranged``. Returns the plate count."""
     a_tf, a_plates = _arranged_layout(arranged)
+    return apply_layout(subset, a_tf, a_plates, dst)
+
+
+def apply_layout(subset: str, a_tf: dict[tuple[str, int], str],
+                 a_plates: list[list[tuple[str, int]]], dst: str) -> int:
+    """Write ``subset`` to ``dst`` with the given plate lists and instance transforms
+    ({(object id, instance index): transform}). Returns the plate count."""
     placed = sorted(x for p in a_plates for x in p)
     if placed != sorted(a_tf) or len(set(placed)) != len(placed):
         raise SubsetError("Arranged plates do not cover every instance exactly once")
