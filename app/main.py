@@ -2591,7 +2591,7 @@ async def pack_next(
         p = lambda n: os.path.join(job_dir, n)  # noqa: E731
 
         def _build():
-            subs, file_origins = [], []
+            subs, file_origins, used = [], [], 0
             for i in order:
                 stl = names[i].lower().endswith(".stl")
                 src = p(f"in_{i}.stl" if stl else f"in_{i}.3mf")
