@@ -143,6 +143,38 @@ presets. The OpenAPI document defines multipart field shapes and defaults.
   plate's instances. When two selection entries pick the same object, its instances
   are attributed in selection order.
 
+### Next plate (feature `pack.next`)
+
+`POST /api/v1/pack/next` returns the fullest single plate one machine can print
+from a remaining-parts selection. Multipart: repeated `files` (`.3mf` and/or
+`.stl`), `machine_uuid` (required), optional `max_parts`, and `selection` shaped
+like `/projects/merge`, plus an optional `rule` per entry:
+
+```json
+[{"file": "a.3mf", "plate": 2, "qty": 1, "rule": "together"},
+ {"file": "a.3mf", "id": 8, "qty": 3},
+ {"file": "b.stl", "qty": 6}]
+```
+
+- An STL entry is `{file, qty}` only.
+- `split` (default): instances are placed independently.
+- `together`: each copy of the entry (e.g. one plate bundle) is all-or-nothing on
+  the returned plate. Orca chooses the copy's layout; the authored layout is not kept.
+- `solo` is rejected with 422; send those as their own jobs.
+- Orca arranges the selection for the machine's bed and plate 1 is taken. Parts
+  larger than the bed are left out up front. A `together` copy Orca split is dropped;
+  over `max_parts`, whole units are dropped, last placed first. After any drop the
+  kept instances are arranged again.
+- **200**: a single-plate `.3mf` with the footprint centred on the bed, ready for
+  `POST /api/v1/jobs` `plate=1`. Its manifest (schema above) has
+  `items[].requested` (asked) and `items[].consumed` (on this plate). Header
+  `X-Consumed` is a JSON array of consumed instances indexed by selection entry,
+  e.g. `[4,3,2]`.
+- **422 with `error.code` `nothing_fits`**: nothing fits this machine's bed.
+  `error.details[].loc` is `["body", "selection", <entry>]` for each entry whose
+  parts are too big. No other failure uses this code; bad input (including `solo`)
+  is a 422 with code `unprocessable`.
+
 ## Errors and readiness
 
 V1 errors, including validation and unknown v1 routes, use:

@@ -273,12 +273,10 @@ def _printable_height(project_settings: dict) -> Optional[float]:
     return h if h > 0 else None
 
 
-def plate_footprint(z: zipfile.ZipFile) -> Optional[tuple[float, float, float, float, float]]:
-    """(x0, y0, x1, y1, height) of every build item's printed parts, or None without geometry.
+def item_boxes(z: zipfile.ZipFile) -> list[tuple[str, list[float], list[float]]]:
+    """Per build item with geometry, in build order: (object_id, [x0, y0, z0], [x1, y1, z1]).
 
-    Modifier / negative / blocker / enforcer parts are ignored. Height per item is its top
-    minus its bottom, the bottom clamped at the bed (Orca drops floating parts onto it and
-    cuts away what is sunk below it).
+    Printed parts only (modifier / negative / blocker / enforcer parts are ignored).
     """
     from app import preview_3mf as _pv  # numpy; only needed here
 
@@ -293,8 +291,7 @@ def plate_footprint(z: zipfile.ZipFile) -> Optional[tuple[float, float, float, f
     build = model.find(_subset._q("build"))
     src = _pv._Source(z)
     geos: dict[str, list] = {}
-    box: Optional[list[float]] = None
-    height = 0.0
+    out = []
     for it in (build.findall(_subset._q("item")) if build is not None else []):
         oid = it.get("objectid")
         if oid not in geos:
@@ -306,6 +303,19 @@ def plate_footprint(z: zipfile.ZipFile) -> Optional[tuple[float, float, float, f
         m, t = _pv._mats(it.get("transform"))
         lo = [min(float((v @ m[:, a]).min()) for v, _ in geos[oid]) + float(t[a]) for a in range(3)]
         hi = [max(float((v @ m[:, a]).max()) for v, _ in geos[oid]) + float(t[a]) for a in range(3)]
+        out.append((oid, lo, hi))
+    return out
+
+
+def plate_footprint(z: zipfile.ZipFile) -> Optional[tuple[float, float, float, float, float]]:
+    """(x0, y0, x1, y1, height) of every build item's printed parts, or None without geometry.
+
+    Height per item is its top minus its bottom, the bottom clamped at the bed (Orca drops
+    floating parts onto it and cuts away what is sunk below it).
+    """
+    box: Optional[list[float]] = None
+    height = 0.0
+    for _, lo, hi in item_boxes(z):
         height = max(height, hi[2] - max(lo[2], 0.0))
         box = ([lo[0], lo[1], hi[0], hi[1]] if box is None else
                [min(box[0], lo[0]), min(box[1], lo[1]), max(box[2], hi[0]), max(box[3], hi[1])])
@@ -317,7 +327,7 @@ def _mm(v: float) -> str:
 
 
 def retarget_plate(src: str, dst: str, plate: int, source_bed: Optional[list],
-                   target_settings: dict) -> dict:
+                   target_settings: dict, centre_footprint: bool = False) -> dict:
     """Write *dst*: single-plate *src* (from extract_plate) moved onto the target bed, with
     *target_settings* as its project_settings.
 
@@ -326,6 +336,7 @@ def retarget_plate(src: str, dst: str, plate: int, source_bed: Optional[list],
     bed but that placement would overflow it, the footprint bbox is centred instead.
     Raises PlateFitError when the printed footprint (X, Y, or height) exceeds the target bed.
     *source_bed* is ``extract_plate``'s ``source_bed`` (None: treat as the target bed).
+    *centre_footprint* always centres the footprint bbox on the target bed.
     """
     target = bed_rect(target_settings)
     if target is None:
@@ -346,7 +357,7 @@ def retarget_plate(src: str, dst: str, plate: int, source_bed: Optional[list],
                 raise PlateFitError(
                     f"Plate {plate} footprint {fw:.1f} × {fd:.1f} × {h:.1f} mm does not fit "
                     f"the target bed {bed_txt} mm")
-            if not (x0 + dx >= tx0 - eps and x1 + dx <= tx1 + eps
+            if centre_footprint or not (x0 + dx >= tx0 - eps and x1 + dx <= tx1 + eps
                     and y0 + dy >= ty0 - eps and y1 + dy <= ty1 + eps):
                 dx, dy = (tx0 + tx1 - x0 - x1) / 2, (ty0 + ty1 - y0 - y1) / 2
                 placement = "footprint_centre"

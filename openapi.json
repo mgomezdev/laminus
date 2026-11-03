@@ -612,6 +612,48 @@
         }
       }
     },
+    "/api/v1/pack/next": {
+      "post": {
+        "tags": [
+          "arrange"
+        ],
+        "summary": "The fullest single plate a machine can print from the remaining parts",
+        "description": "Upload the remaining parts' sources as repeated `files` (`.3mf` and/or `.stl`) and a `selection` JSON list shaped like `/api/v1/projects/merge`: each entry names its `file` (uploaded filename or 0-based upload index) plus, for a 3MF, one of `id` / `name` / `plate`, and a `qty` (default 1); an STL entry is just `{file, qty}`. Optional `rule` per entry: `split` (default: instances may land anywhere), `together` (each copy of the entry, e.g. a `plate` bundle, is all-or-nothing on the returned plate; Orca chooses its layout) or `solo` (rejected with 422: send those as their own jobs).\n\nThe selection is arranged by OrcaSlicer for `machine_uuid`'s bed and plate 1 is taken (no scoring of our own). A `together` copy Orca split across plates is dropped from the plate; if plate 1 holds more than `max_parts` instances, whole units are dropped, last placed first. Whenever anything is dropped, the kept instances are arranged again.\n\n**200:** a single-plate `.3mf`, footprint centred on the bed, ready for `POST /api/v1/jobs` with `plate=1`. It embeds `Metadata/laminus_manifest.json` (schema as for `/pack`, feature `pack.manifest`) whose `items` also carry `consumed`. Header `X-Consumed`: JSON array of instances taken per selection entry, by entry index.\n\n**422 `nothing_fits`** (`error.code`): nothing in the selection fits this bed; `error.details` lists the entries whose parts are too big. Every other failure uses another status or code. Blocking; each arrange is limited by `ARRANGE_TIMEOUT_SECONDS`.",
+        "operationId": "v1_pack_next",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_v1_pack_next"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Unreadable 3MF/STL or Orca arrange failed"
+          },
+          "408": {
+            "description": "Arrange timed out"
+          },
+          "422": {
+            "description": "`nothing_fits`, or bad selection / rule / max_parts / machine_uuid"
+          },
+          "503": {
+            "description": "Catalog not ready"
+          }
+        }
+      }
+    },
     "/api/v1/profiles/upload": {
       "post": {
         "tags": [
@@ -1475,6 +1517,46 @@
           "file"
         ],
         "title": "Body_v1_list_3mf_objects"
+      },
+      "Body_v1_pack_next": {
+        "properties": {
+          "files": {
+            "items": {
+              "type": "string",
+              "contentMediaType": "application/octet-stream"
+            },
+            "type": "array",
+            "title": "Files"
+          },
+          "selection": {
+            "type": "string",
+            "title": "Selection",
+            "description": "JSON: [{\"file\": \"a.3mf\", \"plate\": 2, \"qty\": 1, \"rule\": \"together\"}, {\"file\": \"b.stl\", \"qty\": 4}]"
+          },
+          "machine_uuid": {
+            "type": "string",
+            "title": "Machine Uuid"
+          },
+          "max_parts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Parts",
+            "description": "Most instances on the returned plate"
+          }
+        },
+        "type": "object",
+        "required": [
+          "files",
+          "selection",
+          "machine_uuid"
+        ],
+        "title": "Body_v1_pack_next"
       },
       "Body_v1_pack_stls": {
         "properties": {

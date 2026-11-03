@@ -158,7 +158,7 @@ def install(app: FastAPI, m) -> None:
                          "projects.previews", "pack", "arrange", "health", "slice.prepared",
                          "slice.thumbnail", "profiles.rescan", "profiles.broken", "profiles.upload",
                          "profiles.merged_config", "profiles.neutral", "cleanup",
-                         "slice.plate_isolation", "pack.manifest"],
+                         "slice.plate_isolation", "pack.manifest", "pack.next"],
             "limits": {"max_concurrent_jobs": m.MAX_CONCURRENT_JOBS,
                        "job_history_limit": m.JOB_HISTORY_LIMIT,
                        "max_page_size": _MAX_PAGE},
