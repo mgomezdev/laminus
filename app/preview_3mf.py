@@ -105,6 +105,9 @@ def _object_geometry(src: _Source, model_obj, res_by_id: dict, excluded_part_ids
         return out
     comps = model_obj.find(_q("components"))
     if comps is None:
+        if model_obj.find(_q("mesh")) is not None:  # mesh inline in the root model
+            geo = src.mesh(MODEL, int(model_obj.get("id")))
+            out.extend([geo] if geo else [])
         return out
     for comp in comps.findall(_q("component")):
         cid = int(comp.get("objectid"))

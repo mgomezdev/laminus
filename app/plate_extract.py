@@ -44,6 +44,10 @@ class PlateExtractError(ValueError):
     """The requested plate cannot be extracted (missing, empty, or unknown bed size)."""
 
 
+class PlateFitError(PlateExtractError):
+    """The extracted plate's printed footprint does not fit the target bed (BIZ-355)."""
+
+
 def _attr(tag: str, name: str) -> Optional[str]:
     m = re.search(_ATTR_RE.format(re.escape(name)), tag)
     return m.group(1) if m else None
@@ -55,8 +59,8 @@ def _set_transform(tag: str, transform: str) -> str:
     return tag.replace("<item", f'<item transform="{transform}"', 1)
 
 
-def bed_size(project_settings: dict) -> Optional[tuple[float, float]]:
-    """(W, D) of ``printable_area`` (list of "XxY" points), or None if absent/garbled."""
+def bed_rect(project_settings: dict) -> Optional[tuple[float, float, float, float]]:
+    """(x0, y0, x1, y1) bounding ``printable_area`` (list of "XxY" points), or None if absent/garbled."""
     area = project_settings.get("printable_area")
     if not isinstance(area, list) or not area:
         return None
@@ -65,8 +69,14 @@ def bed_size(project_settings: dict) -> Optional[tuple[float, float]]:
         xs, ys = [p[0] for p in pts], [p[1] for p in pts]
     except (ValueError, IndexError):
         return None
-    w, d = max(xs) - min(xs), max(ys) - min(ys)
-    return (w, d) if w > 0 and d > 0 else None
+    rect = (min(xs), min(ys), max(xs), max(ys))
+    return rect if rect[2] > rect[0] and rect[3] > rect[1] else None
+
+
+def bed_size(project_settings: dict) -> Optional[tuple[float, float]]:
+    """(W, D) of ``printable_area``, or None if absent/garbled."""
+    rect = bed_rect(project_settings)
+    return (rect[2] - rect[0], rect[3] - rect[1]) if rect else None
 
 
 def plate_origin(index0: int, n_plates: int, w: float, d: float) -> tuple[float, float]:
@@ -103,8 +113,12 @@ def _custom_gcode_for_plate(data: bytes, plate: int) -> tuple[bytes, int, list[i
             kept, dropped)
 
 
-def extract_plate(src: str, plate: int, dst: str) -> dict:
+def extract_plate(src: str, plate: int, dst: str, fallback_settings: Optional[dict] = None) -> dict:
     """Write *dst*: *src* reduced to plate *plate*, renumbered to plate 1 at plate-1 coordinates.
+
+    The plate grid is the one *src* was laid out on, so the stride comes from *src*'s own
+    ``printable_area``; *fallback_settings* (the target machine) is only consulted when *src*
+    has none. ``source_bed`` in the result is the bed rect used (None if neither had one).
 
     Returns a summary for logging. ``has_plate_data`` is False (and *dst* is a plain copy)
     when *src* declares no plates at all (e.g. an STL-derived 3MF); that is only valid for
@@ -145,14 +159,16 @@ def extract_plate(src: str, plate: int, dst: str) -> dict:
 
         n_plates = len(by_id)
         index0 = sorted(by_id).index(plate)
+        try:
+            cfg = json.loads(z.read(PROJECT_SETTINGS)) if PROJECT_SETTINGS in names else {}
+        except ValueError:
+            cfg = {}
+        rect = bed_rect(cfg if isinstance(cfg, dict) else {})
+        if rect is None and fallback_settings:
+            rect = bed_rect(fallback_settings)
+        bed = (rect[2] - rect[0], rect[3] - rect[1]) if rect else None
         dx = dy = 0.0
-        bed = None
         if index0:
-            try:
-                cfg = json.loads(z.read(PROJECT_SETTINGS)) if PROJECT_SETTINGS in names else {}
-            except ValueError:
-                cfg = {}
-            bed = bed_size(cfg)
             if bed is None:
                 raise PlateExtractError(
                     f"cannot locate plate {plate}: project_settings has no usable printable_area")
@@ -230,6 +246,7 @@ def extract_plate(src: str, plate: int, dst: str) -> dict:
         "source_plates": n_plates,
         "plate_index0": index0,
         "bed_mm": list(bed) if bed else None,
+        "source_bed": list(rect) if rect else None,
         "origin_shift": [round(dx, 3), round(dy, 3)],
         "kept_items": len(kept),
         "dropped_items": dropped,
@@ -237,4 +254,129 @@ def extract_plate(src: str, plate: int, dst: str) -> dict:
         "objects": sorted(set(kept), key=lambda s: int(s) if s.isdigit() else 0),
         "positions": moved,
         "custom_gcode": custom_gcode,
+    }
+
+
+# ------------------------------------------------------------------ retarget (BIZ-355)
+
+FIT_TOLERANCE_MM = 0.05
+
+
+def _printable_height(project_settings: dict) -> Optional[float]:
+    v = project_settings.get("printable_height")
+    if isinstance(v, list):
+        v = v[0] if v else None
+    try:
+        h = float(v)
+    except (TypeError, ValueError):
+        return None
+    return h if h > 0 else None
+
+
+def plate_footprint(z: zipfile.ZipFile) -> Optional[tuple[float, float, float, float, float]]:
+    """(x0, y0, x1, y1, height) of every build item's printed parts, or None without geometry.
+
+    Modifier / negative / blocker / enforcer parts are ignored. Height per item is its top
+    minus its bottom, the bottom clamped at the bed (Orca drops floating parts onto it and
+    cuts away what is sunk below it).
+    """
+    from app import preview_3mf as _pv  # numpy; only needed here
+
+    model = _subset._parse(z.read(MODEL))
+    excluded: dict[str, set[int]] = {}
+    if MODEL_SETTINGS in z.namelist():
+        for o in _subset._parse(z.read(MODEL_SETTINGS)).findall("object"):
+            excluded[o.get("id")] = {int(p.get("id")) for p in o.findall("part")
+                                     if p.get("subtype") in _pv._NON_PRINTED_PARTS}
+    res = model.find(_subset._q("resources"))
+    res_by_id = {o.get("id"): o for o in res.findall(_subset._q("object"))} if res is not None else {}
+    build = model.find(_subset._q("build"))
+    src = _pv._Source(z)
+    geos: dict[str, list] = {}
+    box: Optional[list[float]] = None
+    height = 0.0
+    for it in (build.findall(_subset._q("item")) if build is not None else []):
+        oid = it.get("objectid")
+        if oid not in geos:
+            obj = res_by_id.get(oid)
+            geos[oid] = (_pv._object_geometry(src, obj, res_by_id, excluded.get(oid, set()))
+                         if obj is not None else [])
+        if not geos[oid]:
+            continue
+        m, t = _pv._mats(it.get("transform"))
+        lo = [min(float((v @ m[:, a]).min()) for v, _ in geos[oid]) + float(t[a]) for a in range(3)]
+        hi = [max(float((v @ m[:, a]).max()) for v, _ in geos[oid]) + float(t[a]) for a in range(3)]
+        height = max(height, hi[2] - max(lo[2], 0.0))
+        box = ([lo[0], lo[1], hi[0], hi[1]] if box is None else
+               [min(box[0], lo[0]), min(box[1], lo[1]), max(box[2], hi[0]), max(box[3], hi[1])])
+    return (*box, height) if box else None
+
+
+def _mm(v: float) -> str:
+    return f"{v:g}" if abs(v - round(v)) < 1e-6 else f"{v:.1f}"
+
+
+def retarget_plate(src: str, dst: str, plate: int, source_bed: Optional[list],
+                   target_settings: dict) -> dict:
+    """Write *dst*: single-plate *src* (from extract_plate) moved onto the target bed, with
+    *target_settings* as its project_settings.
+
+    The plate is shifted from the source bed's centre to the target bed's centre, which
+    keeps the authored layout (pairwise offsets) intact. If the footprint fits the target
+    bed but that placement would overflow it, the footprint bbox is centred instead.
+    Raises PlateFitError when the printed footprint (X, Y, or height) exceeds the target bed.
+    *source_bed* is ``extract_plate``'s ``source_bed`` (None: treat as the target bed).
+    """
+    target = bed_rect(target_settings)
+    if target is None:
+        raise PlateExtractError("target machine has no usable printable_area")
+    tx0, ty0, tx1, ty1 = target
+    tw, td, th = tx1 - tx0, ty1 - ty0, _printable_height(target_settings)
+    sx0, sy0, sx1, sy1 = source_bed or target
+    dx, dy = (tx0 + tx1 - sx0 - sx1) / 2, (ty0 + ty1 - sy0 - sy1) / 2
+    placement = "bed_centre"
+    eps = FIT_TOLERANCE_MM
+    with _subset.open_zip(src) as z:
+        fp = plate_footprint(z)
+        if fp:
+            x0, y0, x1, y1, h = fp
+            fw, fd = x1 - x0, y1 - y0
+            if fw > tw + eps or fd > td + eps or (th is not None and h > th + eps):
+                bed_txt = " × ".join(_mm(v) for v in (tw, td) + ((th,) if th is not None else ()))
+                raise PlateFitError(
+                    f"Plate {plate} footprint {fw:.1f} × {fd:.1f} × {h:.1f} mm does not fit "
+                    f"the target bed {bed_txt} mm")
+            if not (x0 + dx >= tx0 - eps and x1 + dx <= tx1 + eps
+                    and y0 + dy >= ty0 - eps and y1 + dy <= ty1 + eps):
+                dx, dy = (tx0 + tx1 - x0 - x1) / 2, (ty0 + ty1 - y0 - y1) / 2
+                placement = "footprint_centre"
+
+        model = z.read(MODEL).decode("utf-8")
+        bm = _BUILD_RE.search(model)
+        if bm is None:
+            raise PlateExtractError("3D/3dmodel.model has no <build> section")
+
+        def _shift(m: re.Match) -> str:
+            tag = m.group(0)
+            tf = [float(v) for v in (_attr(tag, "transform") or "1 0 0 0 1 0 0 0 1 0 0 0").split()]
+            tf[9] += dx
+            tf[10] += dy
+            return _set_transform(tag, " ".join(f"{v:.9g}" for v in tf))
+
+        model = model[:bm.start(2)] + _ITEM_RE.sub(_shift, bm.group(2)) + model[bm.end(2):]
+        payload = json.dumps(target_settings, ensure_ascii=False, indent=2).encode("utf-8")
+        with zipfile.ZipFile(dst, "w", compression=zipfile.ZIP_DEFLATED) as out:
+            for info in z.infolist():
+                if info.filename == PROJECT_SETTINGS:
+                    continue
+                out.writestr(info, model.encode("utf-8") if info.filename == MODEL
+                             else z.read(info.filename))
+            out.writestr(PROJECT_SETTINGS, payload)
+
+    return {
+        "placement": placement,
+        "shift": [round(dx, 3), round(dy, 3)],
+        "footprint_mm": ([round(fp[2] - fp[0], 3), round(fp[3] - fp[1], 3), round(fp[4], 3)]
+                         if fp else None),
+        "target_bed_mm": [round(tw, 3), round(td, 3), th],
     }
