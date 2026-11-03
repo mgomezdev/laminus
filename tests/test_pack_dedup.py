@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
+from tests.conftest import fake_pack_export
 
 
 def _stl() -> bytes:
@@ -35,7 +36,7 @@ def test_pack_dedupes_duplicate_stl_filenames():
         args_list = list(args)
         out_path = args_list[args_list.index("--export-3mf") + 1]
         with open(out_path, "wb") as fh:
-            fh.write(b"not-a-real-3mf")
+            fh.write(fake_pack_export(2))
         proc = AsyncMock()
         proc.returncode = 0
         proc.communicate = AsyncMock(return_value=(b"Done\n", None))

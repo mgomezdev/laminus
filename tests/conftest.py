@@ -32,3 +32,37 @@ def profile_tree(tmp_path):
         {"name": "My Custom Printer", "bed_size_x": 220, "bed_size_y": 220, "extruder_count": 1},
     )
     return {"system_dir": f"{base}/system", "user_dir": f"{base}/user"}
+
+
+def fake_pack_export(n_instances: int, plates: "list[list[int]] | None" = None) -> bytes:
+    """Minimal stand-in for OrcaSlicer's `/pack` --export-3mf output.
+
+    One object per input copy (ids 2, 4, ...), whose part records its input position as
+    `source_object_id`, as Orca does. *plates*: input positions per plate (default: one
+    plate holding every copy in input order).
+    """
+    import io
+    import zipfile
+    plates = plates if plates is not None else [list(range(n_instances))]
+    oid = {k: str(2 * (k + 1)) for k in range(n_instances)}
+    model = ('<?xml version="1.0" encoding="UTF-8"?>\n<model xmlns='
+             '"http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources>'
+             + "".join(f'<object id="{oid[k]}" type="model"/>' for k in range(n_instances))
+             + "</resources><build>"
+             + "".join(f'<item objectid="{oid[k]}" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
+                       for k in range(n_instances))
+             + "</build></model>")
+    ms = ('<?xml version="1.0" encoding="UTF-8"?>\n<config>'
+          + "".join(f'<object id="{oid[k]}"><metadata key="name" value="obj{k}"/>'
+                    f'<part id="1"><metadata key="source_object_id" value="{k}"/></part></object>'
+                    for k in range(n_instances))
+          + "".join(f'<plate><metadata key="plater_id" value="{p + 1}"/>'
+                    + "".join(f'<model_instance><metadata key="object_id" value="{oid[k]}"/>'
+                              f'<metadata key="instance_id" value="0"/></model_instance>' for k in ks)
+                    + "</plate>" for p, ks in enumerate(plates))
+          + "</config>")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("3D/3dmodel.model", model)
+        z.writestr("Metadata/model_settings.config", ms)
+    return buf.getvalue()

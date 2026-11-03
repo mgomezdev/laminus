@@ -231,17 +231,29 @@ def plate_members(src: str) -> dict[int, dict[int, int]]:
 
 
 def resolve_selection(objects: list[dict], selection: list[dict],
-                      plates: Optional[dict[int, dict[int, int]]] = None) -> dict[int, int]:
+                      plates: Optional[dict[int, dict[int, int]]] = None,
+                      origins: Optional[dict[int, list[int]]] = None,
+                      item_ids: Optional[list[int]] = None) -> dict[int, int]:
     """Map selector list to {object_id: qty}.
 
     Selectors: ``{"id"|"name": ..., "qty": n}`` for one object, or ``{"plate": p, "qty": n}``
     for everything on source plate ``p`` (each object x its count on that plate x ``qty``).
     A name matching several objects is ambiguous (e.g. four distinct "Platte 1.stl") and
     is rejected with the candidate ids rather than guessed at.
+
+    *origins*, when given, is filled with {object_id: [selector index per instance]} in the
+    order ``build_subset`` creates the instances (instance k of an object came from
+    ``origins[oid][k]``); *item_ids* renames selector indices (e.g. to global positions).
     """
     by_id = {o["id"]: o for o in objects}
     want: dict[int, int] = {}
-    for sel in selection:
+
+    def _add(oid: int, n: int, idx: int) -> None:
+        want[oid] = want.get(oid, 0) + n
+        if origins is not None:
+            origins.setdefault(oid, []).extend([item_ids[idx] if item_ids else idx] * n)
+
+    for idx, sel in enumerate(selection):
         qty = int(sel.get("qty", 1))
         if qty < 1:
             raise SubsetError(f"qty must be >= 1 for {sel!r}")
@@ -250,7 +262,7 @@ def resolve_selection(objects: list[dict], selection: list[dict],
             if not (plates or {}).get(pl):
                 raise SubsetError(f"No plate {pl} (or it is empty)")
             for oid, cnt in plates[pl].items():
-                want[oid] = want.get(oid, 0) + cnt * qty
+                _add(oid, cnt * qty, idx)
             continue
         if "id" in sel:
             oid = int(sel["id"])
@@ -265,7 +277,7 @@ def resolve_selection(objects: list[dict], selection: list[dict],
             oid = hits[0]
         else:
             raise SubsetError(f"Selector needs 'id', 'name' or 'plate': {sel!r}")
-        want[oid] = want.get(oid, 0) + qty
+        _add(oid, qty, idx)
     if not want:
         raise SubsetError("Selection is empty")
     return want
@@ -481,6 +493,8 @@ def merge_subsets(parts: list[str], dst: str, labels: Optional[list[str]] = None
     model = _parse(zb.read(MODEL))
     ms = _parse(zb.read(MODEL_SETTINGS))
     resources = model.find(_q("resources"))
+    # {old object id: merged object id} per part; instance numbering per object is kept
+    id_maps: list[dict[str, str]] = [{o.get("id"): o.get("id") for o in resources.findall(_q("object"))}]
     build = model.find(_q("build"))
     asm = ms.find("assemble")
     base_cfg = json.loads(zb.read(PROJECT_SETTINGS)) if PROJECT_SETTINGS in base_names else {}
@@ -523,6 +537,7 @@ def merge_subsets(parts: list[str], dst: str, labels: Optional[list[str]] = None
             for o in pmodel.find(_q("resources")).findall(_q("object")):
                 remap[o.get("id")] = str(max(used_ids | {0}) + 1)
                 used_ids.add(int(remap[o.get("id")]))
+            id_maps.append(dict(remap))
 
             # Inner ids (the <object id> inside a mesh file == component objectid == model_settings
             # <part id>) must be unique across the *whole* merged project: OrcaSlicer resolves
@@ -643,7 +658,7 @@ def merge_subsets(parts: list[str], dst: str, labels: Optional[list[str]] = None
             zout.writestr(n, data, zipfile.ZIP_DEFLATED)
     zb.close()
     return {"objects": len(resources.findall(_q("object"))), "instances": len(instances),
-            "warnings": warnings}
+            "warnings": warnings, "id_maps": id_maps}
 
 
 # ----------------------------------------------------------- layout via oracle

@@ -120,6 +120,29 @@ Subset/merge support `process_uuid` and `filament_uuids` overrides; inspect
 `X-Remap-Warnings` for dropped/remapped filament slots and incompatible embedded
 presets. The OpenAPI document defines multipart field shapes and defaults.
 
+### Plate manifest (feature `pack.manifest`)
+
+`/pack`, `/projects/subset` and `/projects/merge` embed
+`Metadata/laminus_manifest.json` in the returned 3MF:
+
+```json
+{"version": 1,
+ "items": [{"item": 0, "source": "c.stl", "requested": 7}],
+ "plates": [{"plate": 1, "instances": [
+   {"item": 0, "source": "c.stl", "object_id": "16", "object_name": "c", "part": "c.stl"}]}]}
+```
+
+- `item`: 0-based index of the `/pack` `items` entry (upload order when `items` is
+  omitted) or of the subset/merge `selection` entry.
+- `source`: uploaded filename. `object_id`/`object_name`: the object in the returned 3MF.
+- `part`: stable key within the item: the STL filename (pack) or the source 3MF's
+  object id as a string (subset/merge; a `plate` selector yields several parts).
+- `requested` = qty × parts; per item, instances summed over plates always equal it
+  (otherwise the request fails with 500 instead of returning a wrong manifest).
+- `plate` is the plater_id: `POST /api/v1/jobs` with `plate=N` slices exactly that
+  plate's instances. When two selection entries pick the same object, its instances
+  are attributed in selection order.
+
 ## Errors and readiness
 
 V1 errors, including validation and unknown v1 routes, use:
