@@ -136,8 +136,9 @@ def test_same_plate_identical_layout_on_256_and_350_beds(tmp_path, plate):
     # centred on each bed: the layout sits where it sat relative to the source bed centre
     for name, target in beds.items():
         cx, cy = _centre(target)
-        rel = {o: (x - cx, y - cy) for o, (x, y) in handed[name].items()}
-        assert rel == pytest.approx({o: (x - 128, y - 128) for o, _, x, y in PLATE2})
+        for o, _, x, y in PLATE2:
+            px, py = handed[name][o]
+            assert (px - cx, py - cy) == pytest.approx((x - 128, y - 128))
 
 
 def test_plate_located_with_source_bed_not_target(tmp_path):
