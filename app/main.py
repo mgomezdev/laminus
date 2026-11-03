@@ -21,7 +21,10 @@ from app.profile_catalog import ProfileCatalog
 from app.project_config_builder import build_project_settings, embed_project_settings
 from app import preview_3mf as _preview
 from app import subset_3mf as _subset
-from app.plate_extract import extract_plate as _extract_plate, PlateExtractError as _PlateExtractError
+from app.plate_extract import (
+    extract_plate as _extract_plate, retarget_plate as _retarget_plate,
+    PlateExtractError as _PlateExtractError, PlateFitError as _PlateFitError,
+)
 from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf, inject_stls_into_3mf as _inject_stls_into_3mf, stl_min_z as _stl_min_z, restore_build_item_z as _restore_build_item_z, restore_z_from_source as _restore_z_from_source, strip_application_version as _strip_app_version
 
 logging.basicConfig(level=logging.INFO)
@@ -851,7 +854,11 @@ async def run_orcaslicer_task(
     plate_id: int = 1,
     export_3mf: Optional[str] = None,
     geometry_only_retry: bool = False,
+    target_settings: Optional[dict] = None,
 ):
+    """*target_settings*: the resolved machine/process/filament project config, embedded only
+    after the plate is extracted from the source project (BIZ-355). None (``/slice/prepared``)
+    slices the input's own embedded settings."""
     job = jobs.get(job_id)
     if job is None:
         return
@@ -918,10 +925,27 @@ async def run_orcaslicer_task(
     # from the job) and `--arrange 0` checks plate bounds against a stride that does not
     # always match the project's. Pull the requested plate - plate 1 included - into its own
     # single-plate project at plate-1 coordinates and slice that with `--arrange 0`.
+    #
+    # BIZ-355: with target settings, the plate is located with the SOURCE project's bed (the
+    # grid it was laid out on), then moved from the source bed centre to the target's,
+    # checked against the target bed, and only then given the target settings.
     if input_file_path.lower().endswith(".3mf") and plate_id >= 1:
         single_path = input_file_path[:-4] + f"_plate{plate_id}.3mf"
+        extracted = single_path if target_settings is None else single_path[:-4] + "_src.3mf"
+        placed = None
         try:
-            info = await asyncio.to_thread(_extract_plate, input_file_path, plate_id, single_path)
+            info = await asyncio.to_thread(
+                _extract_plate, input_file_path, plate_id, extracted, target_settings)
+            if target_settings is not None and info["has_plate_data"]:
+                placed = await asyncio.to_thread(
+                    _retarget_plate, extracted, single_path, plate_id, info["source_bed"],
+                    target_settings)
+            elif target_settings is not None:
+                await asyncio.to_thread(embed_project_settings, extracted, target_settings, single_path)
+        except _PlateFitError as exc:
+            logger.warning("Job %s: %s", job_id, exc)
+            _fail(str(exc), "Plate does not fit the target bed")
+            return
         except _PlateExtractError as exc:
             logger.warning("Job %s: plate extraction rejected plate %d: %s", job_id, plate_id, exc)
             _fail(f"Cannot slice plate {plate_id}: {exc}", "Plate extraction failed")
@@ -946,6 +970,12 @@ async def run_orcaslicer_task(
                                f"{plate_id} have no build item and were skipped")
             for p in info["positions"]:
                 job_logger.log(f"  object {p['object_id']}#{p['instance']} at x={p['x']} y={p['y']}")
+            if placed:
+                logger.info("Job %s plate placement: %s", job_id, json.dumps(placed))
+                job_logger.log(
+                    f"Plate placement: source bed {info['source_bed']} -> target bed "
+                    f"{placed['target_bed_mm']} mm; footprint {placed['footprint_mm']} mm; "
+                    f"{placed['placement']} shift {placed['shift']} mm")
             arrange = "0"
         else:
             # No plate layout (bare STL-derived 3MF): nothing to collapse, but parts still
@@ -1137,11 +1167,26 @@ async def start_slice(
             project_cfg.update(overrides)
         except (ValueError, TypeError):
             raise HTTPException(status_code=422, detail="extra_config must be a JSON object.")
-    prepared_3mf = os.path.join(input_dir, "prepared.3mf")
-    try:
-        await asyncio.to_thread(embed_project_settings, base_3mf, project_cfg, prepared_3mf)
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Uploaded file is not a valid 3MF archive: {e}")
+    # STL: no plate layout to preserve, embed now. 3MF: the slice task extracts the plate with
+    # the upload's own bed before embedding project_cfg (BIZ-355), so only validate it here.
+    target_settings = None
+    if base_3mf == raw_path and raw_path.lower().endswith(".3mf"):
+        prepared_3mf, target_settings = raw_path, project_cfg
+        try:
+            def _check_zip(path: str) -> None:
+                with zipfile.ZipFile(path) as zf:
+                    bad = zf.testzip()
+                if bad:
+                    raise ValueError(f"corrupt member {bad}")
+            await asyncio.to_thread(_check_zip, raw_path)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Uploaded file is not a valid 3MF archive: {e}")
+    else:
+        prepared_3mf = os.path.join(input_dir, "prepared.3mf")
+        try:
+            await asyncio.to_thread(embed_project_settings, base_3mf, project_cfg, prepared_3mf)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Uploaded file is not a valid 3MF archive: {e}")
 
     job_logger = JobLogger(job_id)
     _wall_now = time.time()
@@ -1161,6 +1206,7 @@ async def start_slice(
         run_orcaslicer_task,
         job_id=job_id, input_file_path=prepared_3mf, output_dir=output_dir,
         plate_id=plate, export_3mf=export_3mf, geometry_only_retry=geometry_only_retry,
+        target_settings=target_settings,
     )
     return {"job_id": job_id, "status": "pending", "message": "Slicing job started."}
 

@@ -274,7 +274,7 @@ The machine is resolved from the `(manufacturer, model, nozzle)` tuple, not a UU
 5. Build `project_settings.config` by merging the flattened presets (machine → process → per-filament)
 6. If the source file is an STL, wrap it into a minimal 3MF
 7. Embed the generated `project_settings.config` into the 3MF; preserve any existing `model_settings.config`
-8. Extract the requested plate (plate 1 included) into a single-plate project: keep only that plate's build items, shift them to plate-1 coordinates, keep its own `custom_gcode_per_layer.xml` block, and renumber it to plate 1. A missing or empty plate fails the job before OrcaSlicer runs (BIZ-349).
+8. Extract the requested plate (plate 1 included) into a single-plate project: keep only that plate's build items, shift them to plate-1 coordinates, keep its own `custom_gcode_per_layer.xml` block, and renumber it to plate 1. A missing or empty plate fails the job before OrcaSlicer runs (BIZ-349). For `POST /api/v1/jobs`, the plate is located with the uploaded project's own bed, re-centred from the source bed centre to the target bed centre, and fit-checked against the target bed (X, Y, height) before the target settings are embedded; a misfit fails the job with a `Plate N footprint … does not fit the target bed …` error (BIZ-355, feature `slice.plate_isolation`).
 9. Run OrcaSlicer on the extracted project (`--arrange 1` only for inputs with no plate layout, e.g. bare STL):
    ```
    xvfb-run orcaslicer --slice 1 --outputdir <dir> --arrange 0 [--export-3mf <val>] <prepared_plateN.3mf>

@@ -39,7 +39,20 @@ Keys live 24 hours in memory and do not survive restart.
 Slicing always extracts the requested `plate` into its own single-plate project
 (moved to plate-1 coordinates; that plate's custom layer G-code kept) and runs
 Orca with `--arrange 0`, so parts never move between plates. A missing or empty
-plate, or a run that produces no G-code, fails the job. `geometry_only_retry` is
+plate, or a run that produces no G-code, fails the job.
+
+Plate isolation across beds (`POST /api/v1/jobs` with a 3MF; feature
+`slice.plate_isolation`): the plate is located using the uploaded project's own
+`printable_area` (the bed it was laid out/packed for; the target machine's bed is
+used only if the project has none), then moved from the source bed centre to the
+target bed centre, so the same plate N yields the same objects and the same
+relative layout on any printer. If the footprint fits but that placement would
+overflow, the footprint itself is centred. The printed footprint (build items ×
+transforms; modifier/negative/blocker/enforcer parts ignored) is checked against
+the target `printable_area` and `printable_height`; a misfit fails the job before
+Orca runs with `error` like `Plate 2 footprint 300.0 × 210.0 × 120.0 mm does not
+fit the target bed 256 × 256 × 256 mm`. STL uploads and `/slice/prepared` are
+unaffected (prepared projects already carry their target bed). `geometry_only_retry` is
 opt-in (default `false`): when `true`, a failed slice is retried once without
 `model_settings.config`, which drops per-object settings; the job log warns.
 
