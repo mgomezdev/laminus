@@ -21,6 +21,7 @@ from app.profile_catalog import ProfileCatalog
 from app.project_config_builder import build_project_settings, embed_project_settings
 from app import preview_3mf as _preview
 from app import subset_3mf as _subset
+from app import manifest as _manifest
 from app.plate_extract import (
     extract_plate as _extract_plate, retarget_plate as _retarget_plate,
     PlateExtractError as _PlateExtractError, PlateFitError as _PlateFitError,
@@ -1610,7 +1611,9 @@ def _parse_pack_items(raw: str, filenames: list[str]) -> list[int]:
         "below the plate stay there); the arranger may rotate about Z.\n"
         "- The packed `.3mf` preserves `Metadata/project_settings.config` from the template "
         "but discards any geometry or model_settings from it.\n"
-        "- All temporary files are cleaned up after the response is sent."
+        "- All temporary files are cleaned up after the response is sent.\n"
+        "- Embeds `Metadata/laminus_manifest.json`: per plate, which `items` entry each "
+        "instance came from (feature `pack.manifest`; see docs/laminus-api-for-agents.md)."
     ),
     responses={
         400: {
@@ -1872,6 +1875,15 @@ async def pack_stls(
                 per_instance = [z for z, q in zip(min_zs, qty_list or [1] * len(min_zs)) for _ in range(q)]
                 await asyncio.to_thread(_restore_build_item_z, out_file, per_instance)
 
+            # BIZ-359: per-plate manifest. `item` = index in `items` (upload order without it).
+            item_of = {e["file"]: i for i, e in enumerate(json.loads(items))} if items is not None else {}
+            per_input = [{"item": item_of.get(f.filename or "", u), "source": f.filename or name,
+                          "part": f.filename or name}
+                         for u, (f, name, q) in enumerate(zip(files, safe_names, qty_list or [1] * len(files)))
+                         for _ in range(q)]
+            await _embed_manifest(out_file, {"pack": per_input},
+                                  await asyncio.to_thread(_manifest.pack_origin, out_file, per_input))
+
             stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_packed.3mf")
             shutil.copy2(out_file, stable_out)
             background_tasks.add_task(cleanup_directory, job_dir)
@@ -2068,6 +2080,20 @@ async def list_3mf_objects(file: UploadFile = File(...)):
         shutil.rmtree(job_dir, ignore_errors=True)
 
 
+async def _embed_manifest(path: str, origins: dict[str, list[dict]],
+                          origin: Optional[_manifest.Origin] = None) -> None:
+    """Embed the BIZ-359 manifest; *origins* = {output object id: [origin per instance]}."""
+    def _do():
+        m = _manifest.build_manifest(path, origin or _manifest.keyed_origin(origins),
+                                     _manifest.requested_from(origins))
+        _manifest.embed_manifest(path, m)
+    try:
+        await asyncio.to_thread(_do)
+    except Exception as e:
+        logger.exception("Plate manifest failed for %s", path)
+        raise HTTPException(status_code=500, detail=f"Could not build the plate manifest: {e}")
+
+
 async def _oracle_arrange_and_transplant(sub_file: str, oracle_in: str, out_file: str,
                                          final_file: str, allow_rotations: bool) -> int:
     """Run OrcaSlicer --arrange on the expanded oracle copy and transplant the layout into
@@ -2174,6 +2200,8 @@ async def preview_3mf_objects(
         "`X-Plate-Count` reports the result; `X-Warnings` lists any object not resting on "
         "the bed (empty when fine). Selector names matching several objects are "
         "rejected (422) — use `id`.\n\n"
+        "**Manifest:** embeds `Metadata/laminus_manifest.json`: per plate, which `selection` "
+        "entry and source object each instance came from (feature `pack.manifest`).\n\n"
         "Blocking; limited by `ARRANGE_TIMEOUT_SECONDS`."
     ),
     responses={
@@ -2220,9 +2248,11 @@ async def arrange_subset(
         with open(in_file, "wb") as buf:
             await asyncio.to_thread(shutil.copyfileobj, file.file, buf)
 
+        origins: dict[int, list[int]] = {}
+
         def _build():
             want = _subset.resolve_selection(_subset.list_objects(in_file), sel,
-                                             _subset.plate_members(in_file))
+                                             _subset.plate_members(in_file), origins)
             summary = _subset.build_subset(in_file, sub_file, want, **target.kwargs)
             summary["remap"] += target.compat_warnings(sub_file)
             _subset.expand_instances(sub_file, oracle_in)
@@ -2237,6 +2267,9 @@ async def arrange_subset(
 
         plates = await _oracle_arrange_and_transplant(
             sub_file, oracle_in, out_file, final_file, allow_rotations)
+        await _embed_manifest(final_file, {
+            str(oid): [{"item": i, "source": safe_name, "part": str(oid)} for i in items]
+            for oid, items in origins.items()})
         stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_subset.3mf")
         shutil.copy2(final_file, stable_out)
         background_tasks.add_task(cleanup_file, stable_out)
@@ -2326,6 +2359,8 @@ async def _resolve_retarget(machine_uuid, process_uuid, filament_uuids) -> _Reta
         "the first uploaded file** (the base); differences in the other sources are listed in "
         "the `X-Merge-Warnings` header, which also reports any object that ends up not resting on the bed (floating/sunk). A non-base object using a filament slot the base does not "
         "have is rejected (422). `machine_uuid` retargets the bed/printer as in `/api/v1/projects/subset`.\n\n"
+        "Embeds `Metadata/laminus_manifest.json`: per plate, which `selection` entry and source "
+        "object each instance came from (feature `pack.manifest`).\n\n"
         "Headers: `X-Plate-Count`, `X-Instance-Count`, `X-Merge-Warnings`. Blocking; limited by "
         "`ARRANGE_TIMEOUT_SECONDS`."
     ),
@@ -2362,7 +2397,8 @@ async def arrange_merge(
         names.append(n)
     # group selectors per source file
     per_file: dict[int, list[dict]] = {}
-    for item in sel:
+    per_file_idx: dict[int, list[int]] = {}    # global selection index of each per-file entry
+    for sel_idx, item in enumerate(sel):
         ref = item["file"]
         if isinstance(ref, int):
             if not 0 <= ref < len(files):
@@ -2375,6 +2411,7 @@ async def arrange_merge(
                     f"selection file {ref!r} matches {len(hits)} uploads; use the 0-based index."))
             idx = hits[0]
         per_file.setdefault(idx, []).append({k: v for k, v in item.items() if k != "file"})
+        per_file_idx.setdefault(idx, []).append(sel_idx)
     order = sorted(per_file, key=lambda i: (i != 0, i))  # base (first upload) first if selected
     if 0 not in per_file:
         raise HTTPException(status_code=422, detail=(
@@ -2396,21 +2433,29 @@ async def arrange_merge(
         final_file = os.path.join(job_dir, "final.3mf")
 
         remap: list[str] = []
+        merged_origins: dict[str, list[dict]] = {}
 
         def _build():
-            subs = []
+            subs, file_origins = [], []
             for i in order:
                 src = os.path.join(job_dir, f"in_{i}.3mf")
+                origins: dict[int, list[int]] = {}
                 try:
                     want = _subset.resolve_selection(_subset.list_objects(src), per_file[i],
-                                                     _subset.plate_members(src))
+                                                     _subset.plate_members(src), origins,
+                                                     per_file_idx[i])
                 except _subset.SubsetError as e:
                     raise _subset.SubsetError(f"{names[i]}: {e}")
                 dst = os.path.join(job_dir, f"sub_{i}.3mf")
                 r = _subset.build_subset(src, dst, want, **target.kwargs)
                 remap.extend(f"{names[i]}: {w}" for w in r["remap"] + target.compat_warnings(dst))
                 subs.append(dst)
+                file_origins.append(origins)
             summary = _subset.merge_subsets(subs, merged, labels=[names[i] for i in order])
+            for i, origins, id_map in zip(order, file_origins, summary["id_maps"]):
+                for oid, items in origins.items():
+                    merged_origins[id_map[str(oid)]] = [
+                        {"item": s, "source": names[i], "part": str(oid)} for s in items]
             _subset.expand_instances(merged, oracle_in)
             return summary
 
@@ -2423,6 +2468,7 @@ async def arrange_merge(
 
         plates = await _oracle_arrange_and_transplant(
             merged, oracle_in, out_file, final_file, allow_rotations)
+        await _embed_manifest(final_file, merged_origins)
         stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_merge.3mf")
         shutil.copy2(final_file, stable_out)
         background_tasks.add_task(cleanup_file, stable_out)

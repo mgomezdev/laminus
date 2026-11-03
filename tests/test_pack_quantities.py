@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app, PACK_MAX_INSTANCES
+from tests.conftest import fake_pack_export
 
 
 def _stl() -> bytes:
@@ -106,7 +107,7 @@ def _run(items, names=("a.stl", "b.stl")):
     async def _mock_slicer_ok(*args, **kwargs):
         out_path = list(args)[list(args).index("--export-3mf") + 1]
         with open(out_path, "wb") as fh:
-            fh.write(b"x")
+            fh.write(fake_pack_export(sum(captured["quantities"] or [1] * len(names))))
         proc = AsyncMock()
         proc.returncode = 0
         proc.communicate = AsyncMock(return_value=(b"Done\n", None))
