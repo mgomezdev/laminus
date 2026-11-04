@@ -6,9 +6,13 @@ import os
 import re
 import zipfile
 
+# Preset bookkeeping, not settings. `name` in particular: OrcaSlicer 2.4.2 discards the whole
+# project config when it is present as a list (which the filament merge made it) and slices
+# with its defaults - 200 x 200 bed, default speeds and temperatures.
 _STRIP_KEYS = {
     "inherits", "compatible_printers", "compatible_printers_condition",
     "is_custom_defined", "from", "instantiation",
+    "name", "type", "setting_id", "base_id", "description", "renamed_from",
 }
 
 def build_project_settings(machine: dict, process: dict, filaments: list[dict]) -> dict:

@@ -110,3 +110,31 @@ def test_prepared_export_3mf_repairs_filament_ids():
                    files={"file": ("pack.3mf", buf.getvalue(), "application/octet-stream")}, timeout=60)
     assert r.status_code == 200, r.text
     _assert_exported(r.json()["job_id"])
+
+
+@pytest.mark.parametrize("printer", sorted(PRINTERS))
+def test_slice_uses_the_machine_settings_not_orca_defaults(printer):
+    # A list-valued preset `name` in project_settings made Orca slice with its defaults
+    # (200 x 200 bed, empty printer_model): big plates failed -52, everything else printed
+    # with default speeds/temperatures.
+    machine, process, filament, extra = PRINTERS[printer]
+    cfg = httpx.post(f"{BASE}/api/v1/profiles/merged-config", timeout=60,
+                     json={"machine_uuid": machine, "process_uuid": process, "filament_uuids": [filament]}).json()
+    data = {"machine_uuid": machine, "process_uuid": process,
+            "filament_uuids": json.dumps([filament]), "plate": "1", "export_3mf": "out.gcode.3mf"}
+    if extra:
+        data["extra_config"] = json.dumps(extra)
+    r = httpx.post(f"{BASE}/api/v1/jobs", data=data,
+                   files={"file": ("cube.stl", _cube_stl(), "application/octet-stream")}, timeout=60)
+    assert r.status_code == 202, r.text
+    job_id = r.json()["id"]
+    deadline = time.monotonic() + 300
+    while httpx.get(f"{BASE}/api/v1/jobs/{job_id}", timeout=30).json()["status"] not in ("completed", "failed"):
+        assert time.monotonic() < deadline
+        time.sleep(2)
+    art = httpx.get(f"{BASE}/api/v1/jobs/{job_id}/artifact", timeout=60)   # one download per job
+    assert art.status_code == 200, art.text
+    with zipfile.ZipFile(io.BytesIO(art.content)) as z:
+        gcode = z.read("Metadata/plate_1.gcode").decode("utf-8", "replace")
+    assert f"; printable_area = {','.join(cfg['printable_area'])}\n" in gcode
+    assert f"; printer_model = {cfg['printer_model']}\n" in gcode

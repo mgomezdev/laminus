@@ -83,6 +83,17 @@ def test_metadata_keys_stripped():
     assert "compatible_printers" not in cfg
 
 
+def test_preset_identity_keys_stripped():
+    # A list-valued `name` (the filament loop made every filament key a list) made Orca 2.4.2
+    # discard the whole project config and slice with its defaults (200 x 200 bed -> -52).
+    fil = {**_filament(), "type": "filament", "setting_id": "GFSA00", "description": "x",
+           "renamed_from": "old", "instantiation": "true", "version": "2.0.0.1"}
+    cfg = build_project_settings({**_machine(), "type": "machine"}, _process(), [fil])
+    for k in ("name", "type", "setting_id", "description", "renamed_from", "instantiation"):
+        assert k not in cfg, k
+    assert cfg["filament_type"] == ["PLA"] and cfg["from"] == "user"
+
+
 def test_filament_id_written_as_project_level_filament_ids():
     # BIZ-351: Orca 2.4.2 segfaults in --export-3mf when a project carries the preset-level
     # `filament_id` key or lacks a non-empty `filament_ids`; Orca-saved projects only have the latter.
