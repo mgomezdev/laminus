@@ -678,6 +678,11 @@ def expand_instances(subset: str, dst: str) -> None:
     with open_zip(subset) as zin:
         model = _parse(zin.read(MODEL))
         ms = _parse(zin.read(MODEL_SETTINGS))
+        # OrcaSlicer 2.4.2 segfaults in `--arrange 1 --export-3mf` on a model carrying its own
+        # generator tag (<metadata name="OrcaSlicer">), i.e. any Orca-saved project. The oracle
+        # is only read for its layout, so the model-level metadata goes.
+        for m in model.findall(_q("metadata")):
+            model.remove(m)
         resources = model.find(_q("resources"))
         build = model.find(_q("build"))
         res_by_id = {o.get("id"): o for o in resources.findall(_q("object"))}
@@ -760,6 +765,13 @@ def transplant_layout(subset: str, arranged: str, dst: str) -> int:
     """Write ``subset`` to ``dst`` with plate lists and instance transforms taken from
     the oracle output ``arranged``. Returns the plate count."""
     a_tf, a_plates = _arranged_layout(arranged)
+    return apply_layout(subset, a_tf, a_plates, dst)
+
+
+def apply_layout(subset: str, a_tf: dict[tuple[str, int], str],
+                 a_plates: list[list[tuple[str, int]]], dst: str) -> int:
+    """Write ``subset`` to ``dst`` with the given plate lists and instance transforms
+    ({(object id, instance index): transform}). Returns the plate count."""
     placed = sorted(x for p in a_plates for x in p)
     if placed != sorted(a_tf) or len(set(placed)) != len(placed):
         raise SubsetError("Arranged plates do not cover every instance exactly once")

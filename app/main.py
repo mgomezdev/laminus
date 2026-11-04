@@ -22,6 +22,7 @@ from app.project_config_builder import build_project_settings, embed_project_set
 from app import preview_3mf as _preview
 from app import subset_3mf as _subset
 from app import manifest as _manifest
+from app import pack_mixed as _pack_mixed
 from app import pack_next as _pack_next
 from app import plate_extract as _plate_extract
 from app.plate_extract import (
@@ -2489,6 +2490,106 @@ async def arrange_merge(
                             media_type="application/octet-stream", headers=headers)
 
 
+def _mixed_selection(files: List[UploadFile], selection: str, solo_ok: bool
+                     ) -> tuple[list[dict], list[str], dict[int, list[tuple[int, dict]]]]:
+    """Validate a ``/pack/next``-shaped selection over .3mf/.stl uploads.
+
+    Returns (entries, upload names, {upload index: [(entry index, selector without file)]}).
+    """
+    try:
+        sel = json.loads(selection)
+        if not isinstance(sel, list) or not sel or not all(isinstance(x, dict) and "file" in x for x in sel):
+            raise ValueError
+    except ValueError:
+        raise HTTPException(status_code=422, detail='selection must be a non-empty JSON list of objects, each with a "file".')
+    names: list[str] = []
+    for f in files:
+        try:
+            n = _safe_filename(f.filename)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if not n.lower().endswith((".3mf", ".stl")):
+            raise HTTPException(status_code=400, detail="Only .3mf and .stl files are supported.")
+        names.append(n)
+    per_file: dict[int, list[tuple[int, dict]]] = {}
+    for g, item in enumerate(sel):
+        rule = item.get("rule", "split")
+        if rule not in _pack_next.RULES:
+            raise HTTPException(status_code=422, detail=f"selection[{g}]: rule must be one of {list(_pack_next.RULES)}.")
+        if rule == "solo" and not solo_ok:
+            raise HTTPException(status_code=422, detail=(
+                f"selection[{g}]: rule 'solo' is not packed with other parts; slice it as its own job."))
+        qty = item.get("qty", 1)
+        if isinstance(qty, bool) or not isinstance(qty, int) or not 1 <= qty <= PACK_MAX_INSTANCES:
+            raise HTTPException(status_code=422, detail=(
+                f"selection[{g}]: qty must be an integer from 1 to {PACK_MAX_INSTANCES}."))
+        ref = item["file"]
+        if isinstance(ref, int) and not isinstance(ref, bool):
+            if not 0 <= ref < len(files):
+                raise HTTPException(status_code=422, detail=f"selection[{g}]: file index {ref} out of range.")
+            idx = ref
+        else:
+            hits = [i for i, n in enumerate(names) if n == os.path.basename(str(ref))]
+            if len(hits) != 1:
+                raise HTTPException(status_code=422, detail=(
+                    f"selection[{g}]: file {ref!r} matches {len(hits)} uploads; use the 0-based index."))
+            idx = hits[0]
+        if names[idx].lower().endswith(".stl") and any(k in item for k in ("id", "name", "plate")):
+            raise HTTPException(status_code=422, detail=f"selection[{g}]: an STL entry takes only file and qty.")
+        per_file.setdefault(idx, []).append((g, {k: v for k, v in item.items() if k != "file"}))
+    return sel, names, per_file
+
+
+async def _mixed_project(job_dir: str, files: List[UploadFile], names: list[str],
+                         per_file: dict[int, list[tuple[int, dict]]], bed_cfg: dict,
+                         target: "_Retarget") -> tuple[str, _pack_next.Origins, dict]:
+    """Save the uploads into *job_dir* and merge the selection into one project on
+    *bed_cfg*'s bed (``printable_area`` / ``printable_height``).
+
+    Returns (merged path, {object id: [origin per instance]}, merge_subsets summary).
+    """
+    # 3MFs first so a project (with its filament slots) is the merge base, then STLs
+    order = sorted(per_file, key=lambda i: (names[i].lower().endswith(".stl"), i))
+    p = lambda n: os.path.join(job_dir, n)  # noqa: E731
+    for i in order:
+        with open(p(f"in_{i}{os.path.splitext(names[i])[1].lower()}"), "wb") as buf:
+            await asyncio.to_thread(shutil.copyfileobj, files[i].file, buf)
+
+    def _build():
+        subs, file_origins, used = [], [], 0
+        for i in order:
+            stl = names[i].lower().endswith(".stl")
+            src = p(f"in_{i}.stl" if stl else f"in_{i}.3mf")
+            if stl:
+                proj = p(f"stl_{i}.3mf")
+                _pack_next.stl_project(src, proj, names[i], {
+                    k: bed_cfg[k] for k in ("printable_area", "printable_height") if k in bed_cfg})
+                src = proj
+            # cap checked inside, before any per-instance allocation (incl. bundle x qty)
+            want, origins = _pack_next.entry_origins(src, per_file[i], names[i], stl,
+                                                     PACK_MAX_INSTANCES - used)
+            used += sum(want.values())
+            dst = p(f"sub_{i}.3mf")
+            _subset.build_subset(src, dst, want, **target.kwargs)
+            subs.append(dst)
+            file_origins.append(origins)
+        summary = _subset.merge_subsets(subs, p("merged.3mf"), labels=[names[i] for i in order])
+        _pack_next.set_bed(p("merged.3mf"), bed_cfg)
+        merged: _pack_next.Origins = {}
+        for origins, id_map in zip(file_origins, summary["id_maps"]):
+            for oid, lst in origins.items():
+                merged[id_map[str(oid)]] = lst
+        return merged, summary
+
+    try:
+        origins, summary = await asyncio.to_thread(_build)
+    except _subset.SubsetError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot process input: {e}")
+    return p("merged.3mf"), origins, summary
+
+
 @app.post(
     "/api/v1/pack/next",
     tags=["arrange"],
@@ -2527,49 +2628,9 @@ async def pack_next(
     machine_uuid: str = Form(...),
     max_parts: Optional[int] = Form(None, description="Most instances on the returned plate"),
 ):
-    try:
-        sel = json.loads(selection)
-        if not isinstance(sel, list) or not sel or not all(isinstance(x, dict) and "file" in x for x in sel):
-            raise ValueError
-    except ValueError:
-        raise HTTPException(status_code=422, detail='selection must be a non-empty JSON list of objects, each with a "file".')
     if max_parts is not None and max_parts < 1:
         raise HTTPException(status_code=422, detail="max_parts must be >= 1.")
-    names: list[str] = []
-    for f in files:
-        try:
-            n = _safe_filename(f.filename)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        if not n.lower().endswith((".3mf", ".stl")):
-            raise HTTPException(status_code=400, detail="Only .3mf and .stl files are supported.")
-        names.append(n)
-    per_file: dict[int, list[tuple[int, dict]]] = {}
-    for g, item in enumerate(sel):
-        rule = item.get("rule", "split")
-        if rule not in _pack_next.RULES:
-            raise HTTPException(status_code=422, detail=f"selection[{g}]: rule must be one of {list(_pack_next.RULES)}.")
-        if rule == "solo":
-            raise HTTPException(status_code=422, detail=(
-                f"selection[{g}]: rule 'solo' is not packed with other parts; slice it as its own job."))
-        qty = item.get("qty", 1)
-        if isinstance(qty, bool) or not isinstance(qty, int) or not 1 <= qty <= PACK_MAX_INSTANCES:
-            raise HTTPException(status_code=422, detail=(
-                f"selection[{g}]: qty must be an integer from 1 to {PACK_MAX_INSTANCES}."))
-        ref = item["file"]
-        if isinstance(ref, int) and not isinstance(ref, bool):
-            if not 0 <= ref < len(files):
-                raise HTTPException(status_code=422, detail=f"selection[{g}]: file index {ref} out of range.")
-            idx = ref
-        else:
-            hits = [i for i, n in enumerate(names) if n == os.path.basename(str(ref))]
-            if len(hits) != 1:
-                raise HTTPException(status_code=422, detail=(
-                    f"selection[{g}]: file {ref!r} matches {len(hits)} uploads; use the 0-based index."))
-            idx = hits[0]
-        if names[idx].lower().endswith(".stl") and any(k in item for k in ("id", "name", "plate")):
-            raise HTTPException(status_code=422, detail=f"selection[{g}]: an STL entry takes only file and qty.")
-        per_file.setdefault(idx, []).append((g, {k: v for k, v in item.items() if k != "file"}))
+    sel, names, per_file = _mixed_selection(files, selection, solo_ok=False)
 
     target = await _resolve_retarget(machine_uuid, None, None)
     bed_rect = _plate_extract.bed_rect(target.printer_cfg)
@@ -2577,59 +2638,20 @@ async def pack_next(
         raise HTTPException(status_code=422, detail=f"Machine UUID '{machine_uuid}' has no usable printable_area.")
     bed = (bed_rect[2] - bed_rect[0], bed_rect[3] - bed_rect[1],
            _plate_extract._printable_height(target.printer_cfg))
-    # 3MFs first so a project (with its filament slots) is the merge base, then STLs
-    order = sorted(per_file, key=lambda i: (names[i].lower().endswith(".stl"), i))
 
     job_id = str(uuid.uuid4())
     with _track_inflight_arrange(job_id):
         job_dir = os.path.join(ARRANGE_DIR, f"next_{job_id}")
         os.makedirs(job_dir, exist_ok=True)
         background_tasks.add_task(cleanup_directory, job_dir)
-        for i in order:
-            with open(os.path.join(job_dir, f"in_{i}{os.path.splitext(names[i])[1].lower()}"), "wb") as buf:
-                await asyncio.to_thread(shutil.copyfileobj, files[i].file, buf)
         p = lambda n: os.path.join(job_dir, n)  # noqa: E731
-
-        def _build():
-            subs, file_origins, used = [], [], 0
-            for i in order:
-                stl = names[i].lower().endswith(".stl")
-                src = p(f"in_{i}.stl" if stl else f"in_{i}.3mf")
-                if stl:
-                    proj = p(f"stl_{i}.3mf")
-                    _pack_next.stl_project(src, proj, names[i], {
-                        k: target.printer_cfg[k] for k in ("printable_area", "printable_height")
-                        if k in target.printer_cfg})
-                    src = proj
-                # cap checked inside, before any per-instance allocation (incl. bundle x qty)
-                want, origins = _pack_next.entry_origins(src, per_file[i], names[i], stl,
-                                                         PACK_MAX_INSTANCES - used)
-                used += sum(want.values())
-                dst = p(f"sub_{i}.3mf")
-                _subset.build_subset(src, dst, want, **target.kwargs)
-                subs.append(dst)
-                file_origins.append(origins)
-            summary = _subset.merge_subsets(subs, p("merged.3mf"), labels=[names[i] for i in order])
-            _pack_next.set_bed(p("merged.3mf"), target.printer_cfg)
-            merged: _pack_next.Origins = {}
-            for origins, id_map in zip(file_origins, summary["id_maps"]):
-                for oid, lst in origins.items():
-                    merged[id_map[str(oid)]] = lst
-            return merged
-
-        try:
-            origins = await asyncio.to_thread(_build)
-        except _subset.SubsetError as e:
-            raise HTTPException(status_code=422, detail=str(e))
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Cannot process input: {e}")
+        cur, origins, _ = await _mixed_project(job_dir, files, names, per_file, target.printer_cfg, target)
         requested = _pack_next.consumed(origins, len(sel))
 
         def _nothing_fits(msg: str, details: list[dict]):
             return _api_v1.DetailedHTTPException(422, msg, "nothing_fits", details)
 
         # parts that can never fit this bed (and the together copies they belong to) are left out
-        cur = p("merged.3mf")
         big = await asyncio.to_thread(_pack_next.oversize, cur, bed)
         if big:
             dropped_units = {o["unit"] for oid in big for o in origins.get(oid, [])}
@@ -2702,6 +2724,171 @@ async def pack_next(
         headers = {"X-Consumed": json.dumps(taken, separators=(",", ":")),
                    "X-Instance-Count": str(sum(taken))}
         return FileResponse(path=stable_out, filename="next_plate.3mf",
+                            media_type="application/octet-stream", headers=headers)
+
+
+@app.post(
+    "/api/v1/pack/mixed",
+    tags=["arrange"],
+    summary="Arrange a mixed STL / 3MF selection on the fewest plates of one bed",
+    description=(
+        "Same `files` and `selection` as `/api/v1/pack/next` (`.3mf` entries `{file, id|name|plate, "
+        "qty, rule}`, `.stl` entries `{file, qty, rule}`), for a bed given either as `bed_x` + "
+        "`bed_y` + `bed_z` (mm; the projects' printer settings are kept, only the bed is replaced) "
+        "or as `machine_uuid` (bed and printer retargeted as in `/api/v1/projects/subset`), not "
+        "both.\n\n"
+        "Rules: `split` (default) instances go wherever OrcaSlicer's arrange puts them; "
+        "`together`: each copy of the entry (one `plate` bundle) lands on a single plate, Orca "
+        "choosing its layout (a copy Orca split is taken off and arranged again with the other "
+        "split copies); `solo`: every instance gets a plate of its own, footprint centred, after "
+        "the arranged plates.\n\n"
+        "**200:** one multi-plate `.3mf`; each plate slices with `POST /api/v1/jobs` `plate=N`. "
+        "Per-object overrides, modifiers and paint of 3MF objects are kept (as for "
+        "`/projects/merge`, whose base-project rules apply). Embeds `Metadata/laminus_manifest.json` "
+        "(feature `pack.manifest`): `item` = selection index, `part` = source object id (3MF) or "
+        "filename (STL), `requested` = qty x parts. Headers `X-Plate-Count`, `X-Instance-Count`, "
+        "`X-Merge-Warnings`.\n\n"
+        "**422 `part_too_large`** (`error.code`): a part larger than the bed, or a `together` copy "
+        "that does not fit one plate; `error.details[].loc` is `[\"body\", \"selection\", <entry>]` "
+        "per offending entry. Other input errors are 422 `unprocessable`. Blocking; each arrange "
+        "is limited by `ARRANGE_TIMEOUT_SECONDS`."
+    ),
+    responses={
+        400: {"description": "Unreadable 3MF/STL or Orca arrange failed"},
+        408: {"description": "Arrange timed out"},
+        422: {"description": "`part_too_large`, or bad selection / rule / bed / machine_uuid"},
+        503: {"description": "machine_uuid given but catalog not ready"},
+    },
+    operation_id="v1_pack_mixed")
+async def pack_mixed(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    selection: str = Form(..., description='JSON: [{"file": "a.3mf", "plate": 2, "qty": 2, "rule": "together"}, {"file": "b.stl", "qty": 4, "rule": "solo"}]'),
+    machine_uuid: Optional[str] = Form(None),
+    bed_x: Optional[float] = Form(None, description="Bed X in mm (with bed_y, bed_z; instead of machine_uuid)"),
+    bed_y: Optional[float] = Form(None, description="Bed Y in mm"),
+    bed_z: Optional[float] = Form(None, description="Printable height in mm"),
+):
+    sel, names, per_file = _mixed_selection(files, selection, solo_ok=True)
+    dims = (bed_x, bed_y, bed_z)
+    if machine_uuid and any(v is not None for v in dims):
+        raise HTTPException(status_code=422, detail="Give machine_uuid or bed_x/bed_y/bed_z, not both.")
+    if machine_uuid:
+        target = await _resolve_retarget(machine_uuid, None, None)
+        bed_cfg = target.printer_cfg
+    elif all(v is not None for v in dims):
+        if not all(v > 0 for v in dims):
+            raise HTTPException(status_code=422, detail="bed_x, bed_y and bed_z must all be positive.")
+        target = _Retarget()
+        bed_cfg = {"printable_area": ["0x0", f"{bed_x:g}x0", f"{bed_x:g}x{bed_y:g}", f"0x{bed_y:g}"],
+                   "printable_height": bed_z}
+    else:
+        raise HTTPException(status_code=422, detail="Give machine_uuid or all of bed_x, bed_y, bed_z.")
+    rect = _plate_extract.bed_rect(bed_cfg)
+    if rect is None:
+        raise HTTPException(status_code=422, detail=f"Machine UUID '{machine_uuid}' has no usable printable_area.")
+    w, d = rect[2] - rect[0], rect[3] - rect[1]
+    bed = (w, d, _plate_extract._printable_height(bed_cfg))
+    bed_txt = " × ".join(f"{v:g}" for v in bed if v is not None)
+    solo_items = {g for g, item in enumerate(sel) if item.get("rule") == "solo"}
+
+    def _too_large(details: list[dict]):
+        return _api_v1.DetailedHTTPException(
+            422, f"Some of the selection does not fit one {bed_txt} mm plate", "part_too_large", details)
+
+    job_id = str(uuid.uuid4())
+    with _track_inflight_arrange(job_id):
+        job_dir = os.path.join(ARRANGE_DIR, f"mixed_{job_id}")
+        os.makedirs(job_dir, exist_ok=True)
+        background_tasks.add_task(cleanup_directory, job_dir)
+        p = lambda n: os.path.join(job_dir, n)  # noqa: E731
+        merged, origins, summary = await _mixed_project(job_dir, files, names, per_file, bed_cfg, target)
+
+        big = await asyncio.to_thread(_pack_next.oversize, merged, bed)
+        if big:
+            raise _too_large([
+                {"loc": ["body", "selection", it], "type": "part_too_large",
+                 "msg": f"{src} part {part} is {' × '.join(f'{v:g}' for v in size)} mm"}
+                for it, src, part, size in sorted({(o["item"], o["source"], o["part"], tuple(big[oid]))
+                                                   for oid in big for o in origins.get(oid, [])})])
+
+        unit_of = lambda i: origins[i[0]][i[1]]["unit"]  # noqa: E731
+        n_arranges = 0
+
+        async def _arrange(pool: set) -> list[_pack_mixed.Placed]:
+            """Orca's plates for just the *pool* instances of the merged project, plate-1 coordinates."""
+            nonlocal n_arranges
+            n_arranges += 1
+            sub, oracle, arranged = (p(f"{s}_{n_arranges}.3mf") for s in ("pool", "oracle", "arranged"))
+            back = _pack_mixed.renumber(pool)
+            await asyncio.to_thread(_pack_next.subset_instances, merged, sub, origins, pool)
+            await asyncio.to_thread(_subset.expand_instances, sub, oracle)
+            await _orca_arrange(oracle, arranged, False)
+            try:
+                tfs, plates = await asyncio.to_thread(_subset._arranged_layout, arranged)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Could not read the arranged layout: {e}")
+            return _pack_mixed.to_local({back[i]: t for i, t in tfs.items()},
+                                        [[back[i] for i in pl] for pl in plates], w, d)
+
+        done: list[_pack_mixed.Placed] = []
+        pool = {i for i in _pack_next.all_instances(origins) if origins[i[0]][i[1]]["item"] not in solo_items}
+        for _ in range(_pack_next.MAX_ROUNDS):
+            if not pool:
+                break
+            plates = await _arrange(pool)
+            split = _pack_mixed.split_units(plates, origins)
+            done += [kept for pl in plates if (kept := [x for x in pl if unit_of(x[0]) not in split])]
+            left = {i for pl in plates for i, _ in pl if unit_of(i) in split}
+            if left == pool:
+                break                   # nothing settled: arrange those copies one by one below
+            pool = left
+        # still split: arrange one copy per entry on its own and reuse its layout for the
+        # entry's other copies (identical), so the arrange count is bounded by entries
+        copies: dict[int, list[set]] = {}
+        for members in _pack_next.units(origins).values():
+            if members & pool:
+                copies.setdefault(origins[min(members)[0]][min(members)[1]]["item"], []).append(members)
+        if len(copies) > _pack_mixed.MAX_COPY_ARRANGES:
+            raise HTTPException(status_code=422, detail=(
+                f"{len(copies)} together entries do not settle on single plates; "
+                f"at most {_pack_mixed.MAX_COPY_ARRANGES} are re-arranged per request."))
+        too_large: set[tuple[int, str]] = set()
+        for item, units_ in sorted(copies.items()):
+            plates = await _arrange(units_[0])
+            if len(plates) != 1:
+                too_large.add((item, origins[min(units_[0])[0]][min(units_[0])[1]]["source"]))
+                continue
+            done += [_pack_mixed.relabel(plates[0], units_[0], u) for u in units_]
+        if too_large:
+            raise _too_large([{"loc": ["body", "selection", it], "type": "part_too_large",
+                               "msg": f"a together copy from {src} does not fit one plate"}
+                              for it, src in sorted(too_large)])
+
+        solo = sorted((i for i in _pack_next.all_instances(origins)
+                       if origins[i[0]][i[1]]["item"] in solo_items),
+                      key=lambda i: (origins[i[0]][i[1]]["item"], i))
+        final = p("final.3mf")
+
+        def _finish():
+            plates = done + _pack_mixed.solo_plates(merged, solo, rect)
+            tfs, lists = _pack_mixed.compose(plates, w, d)
+            return _subset.apply_layout(merged, tfs, lists, final)
+
+        try:
+            n_plates = await asyncio.to_thread(_finish)
+        except Exception as e:
+            logger.exception("pack/mixed layout failed")
+            raise HTTPException(status_code=500, detail=f"Could not apply the arranged layout: {e}")
+        await _embed_manifest(final, origins)
+        stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_mixed.3mf")
+        shutil.copy2(final, stable_out)
+        background_tasks.add_task(cleanup_file, stable_out)
+        warnings = summary["warnings"] + await asyncio.to_thread(_preview.bed_clearance_warnings, final)
+        headers = {"X-Plate-Count": str(n_plates),
+                   "X-Instance-Count": str(len(_pack_next.all_instances(origins))),
+                   "X-Merge-Warnings": " | ".join(warnings).encode("ascii", "replace").decode()}
+        return FileResponse(path=stable_out, filename="mixed.3mf",
                             media_type="application/octet-stream", headers=headers)
 
 

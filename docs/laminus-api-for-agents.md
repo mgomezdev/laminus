@@ -175,6 +175,32 @@ like `/projects/merge`, plus an optional `rule` per entry:
   parts are too big. No other failure uses this code; bad input (including `solo`)
   is a 422 with code `unprocessable`.
 
+### Mixed multi-plate pack (feature `pack.mixed`)
+
+`POST /api/v1/pack/mixed` arranges a mixed selection on the fewest plates of one
+bed. Same `files` and `selection` as `/pack/next` (`rule` per entry), plus the bed:
+either `bed_x` + `bed_y` + `bed_z` (mm; printer-less, only the projects' bed is
+replaced) or `machine_uuid` (bed and printer retargeted), never both.
+
+- `split` (default): instances go where OrcaSlicer's arrange puts them.
+- `together`: each copy (one `plate` bundle) lands whole on one plate; Orca chooses
+  its layout. Copies Orca split are taken off and arranged again; one that still
+  splits on its own is `part_too_large`.
+- `solo`: each instance alone on its own plate, footprint centred, placed after the
+  arranged plates.
+- **200**: one multi-plate `.3mf`; slice each plate with `POST /api/v1/jobs`
+  `plate=N`. 3MF objects keep per-object overrides, modifiers and paint; project
+  settings come from the first selected `.3mf` (as `/projects/merge`). Manifest
+  (schema above): `item` = selection index, `part` = source object id or STL
+  filename, `requested` = qty × parts, always fully placed. Headers
+  `X-Plate-Count`, `X-Instance-Count`, `X-Merge-Warnings`.
+- Fewest plates is Orca's arrange plus the together repair, not a global optimum:
+  a re-arranged copy goes on a new plate rather than into gaps it left.
+- **422 with `error.code` `part_too_large`**: a part bigger than the bed, or a
+  `together` copy bigger than one plate. `error.details[].loc` is
+  `["body", "selection", <entry>]` per offending entry. Other input errors are 422
+  `unprocessable`.
+
 ## Errors and readiness
 
 V1 errors, including validation and unknown v1 routes, use:

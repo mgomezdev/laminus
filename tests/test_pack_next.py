@@ -81,12 +81,11 @@ def fake_arrange(oracle_path, out_path):
     if cur:
         plates.append(cur)
     plate_of = {oid: n for n, ps in enumerate(plates) for oid in ps}
-    cols = 1 if len(plates) == 1 else 2
     for it in items:
         oid = it.get("objectid")
         _, px, py, lo = placed[oid]
         n = plate_of[oid]
-        ox, oy = (n % cols) * W * 1.2, -(n // cols) * D * 1.2
+        ox, oy = pe.plate_origin(n, len(plates), W, D)
         t = it.get("transform").split()
         t[9] = str(float(t[9]) - lo[0] + x0 + ox + px)
         t[10] = str(float(t[10]) - lo[1] + y0 + oy + py)

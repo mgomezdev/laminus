@@ -49,6 +49,14 @@ def stl_project(stl_path: str, dst: str, name: str, project_settings: dict) -> N
     tris = parse_stl_triangles(stl_path)
     if not tris:
         raise _subset.SubsetError(f"{name}: no triangles (empty or unparseable STL)")
+    # Orca keeps every object's mesh centred on its own origin and positions it with the
+    # build item transform; its arrange transforms assume that, so the mesh is centred here
+    # (an uncentred mesh comes back floating and shifted by its offset).
+    lo = [min(v[a] for t in tris for v in t) for a in range(3)]
+    hi = [max(v[a] for t in tris for v in t) for a in range(3)]
+    c = [(lo[a] + hi[a]) / 2 for a in range(3)]
+    tris = [tuple(tuple(v[a] - c[a] for a in range(3)) for v in t) for t in tris]
+    place = f"1 0 0 0 1 0 0 0 1 {c[0]:.9g} {c[1]:.9g} {c[2]:.9g}"
     mesh_path = "3D/Objects/stl_mesh.model"
     model = (
         '<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" '
@@ -58,7 +66,7 @@ def stl_project(stl_path: str, dst: str, name: str, project_settings: dict) -> N
         f'<object id="{STL_OBJECT_ID}" type="model"><components>'
         f'<component p:path="/{mesh_path}" objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
         '</components></object></resources><build>'
-        f'<item objectid="{STL_OBJECT_ID}" transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="1"/>'
+        f'<item objectid="{STL_OBJECT_ID}" transform="{place}" printable="1"/>'
         '</build></model>')
     label = os.path.splitext(name)[0].replace('"', "'").replace("<", "(").replace(">", ")").replace("&", "+")
     settings = (
