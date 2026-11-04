@@ -63,10 +63,6 @@ def test_acceptance_selection_packs(tmp_path):
     _pack(tmp_path)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Existing subset/merge bug, not pack/mixed: a plate holding several Orca-project objects "
-    "with several instances each fails /jobs with Orca -52 (objects partly outside) although "
-    "every part is inside the bed; /projects/subset plate=1 qty=2 of the same project fails too"))
 def test_acceptance_every_plate_slices(tmp_path):
     r, m = _pack(tmp_path)
     machine, process, filament, _ = PRINTERS["bambu_p1s"]          # 256 x 256 bed

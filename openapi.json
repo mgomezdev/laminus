@@ -654,6 +654,48 @@
         }
       }
     },
+    "/api/v1/pack/mixed": {
+      "post": {
+        "tags": [
+          "arrange"
+        ],
+        "summary": "Arrange a mixed STL / 3MF selection on the fewest plates of one bed",
+        "description": "Same `files` and `selection` as `/api/v1/pack/next` (`.3mf` entries `{file, id|name|plate, qty, rule}`, `.stl` entries `{file, qty, rule}`), for a bed given either as `bed_x` + `bed_y` + `bed_z` (mm; the projects' printer settings are kept, only the bed is replaced) or as `machine_uuid` (bed and printer retargeted as in `/api/v1/projects/subset`), not both.\n\nRules: `split` (default) instances go wherever OrcaSlicer's arrange puts them; `together`: each copy of the entry (one `plate` bundle) lands on a single plate, Orca choosing its layout (a copy Orca split is taken off and arranged again with the other split copies); `solo`: every instance gets a plate of its own, footprint centred, after the arranged plates.\n\n**200:** one multi-plate `.3mf`; each plate slices with `POST /api/v1/jobs` `plate=N`. Per-object overrides, modifiers and paint of 3MF objects are kept (as for `/projects/merge`, whose base-project rules apply). Embeds `Metadata/laminus_manifest.json` (feature `pack.manifest`): `item` = selection index, `part` = source object id (3MF) or filename (STL), `requested` = qty x parts. Headers `X-Plate-Count`, `X-Instance-Count`, `X-Merge-Warnings`.\n\n**422 `part_too_large`** (`error.code`): a part larger than the bed, or a `together` copy that does not fit one plate; `error.details[].loc` is `[\"body\", \"selection\", <entry>]` per offending entry. Other input errors are 422 `unprocessable`. Blocking; each arrange is limited by `ARRANGE_TIMEOUT_SECONDS`.",
+        "operationId": "v1_pack_mixed",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_v1_pack_mixed"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Unreadable 3MF/STL or Orca arrange failed"
+          },
+          "408": {
+            "description": "Arrange timed out"
+          },
+          "422": {
+            "description": "`part_too_large`, or bad selection / rule / bed / machine_uuid"
+          },
+          "503": {
+            "description": "machine_uuid given but catalog not ready"
+          }
+        }
+      }
+    },
     "/api/v1/profiles/upload": {
       "post": {
         "tags": [
@@ -1517,6 +1559,76 @@
           "file"
         ],
         "title": "Body_v1_list_3mf_objects"
+      },
+      "Body_v1_pack_mixed": {
+        "properties": {
+          "files": {
+            "items": {
+              "type": "string",
+              "contentMediaType": "application/octet-stream"
+            },
+            "type": "array",
+            "title": "Files"
+          },
+          "selection": {
+            "type": "string",
+            "title": "Selection",
+            "description": "JSON: [{\"file\": \"a.3mf\", \"plate\": 2, \"qty\": 2, \"rule\": \"together\"}, {\"file\": \"b.stl\", \"qty\": 4, \"rule\": \"solo\"}]"
+          },
+          "machine_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Machine Uuid"
+          },
+          "bed_x": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed X",
+            "description": "Bed X in mm (with bed_y, bed_z; instead of machine_uuid)"
+          },
+          "bed_y": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Y",
+            "description": "Bed Y in mm"
+          },
+          "bed_z": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Z",
+            "description": "Printable height in mm"
+          }
+        },
+        "type": "object",
+        "required": [
+          "files",
+          "selection"
+        ],
+        "title": "Body_v1_pack_mixed"
       },
       "Body_v1_pack_next": {
         "properties": {
