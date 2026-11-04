@@ -193,7 +193,7 @@ def resolve_inheritance(
 
 # Bump when catalog entries gain/change fields, so a cache written by older code is rebuilt
 # rather than served without them (the cache key only tracks profile *files*).
-_CACHE_SCHEMA = 3  # 3: vendor-scoped name index (BIZ-350)
+_CACHE_SCHEMA = 4  # 3: vendor-scoped name index (BIZ-350); 4: machine bed_size_z (BIZ-363)
 
 SYSTEM_PROFILE_TYPES = ("machine", "process", "filament")
 
@@ -219,6 +219,16 @@ def _bed_size(resolved: dict) -> tuple:
         return max(p[0] for p in pts), max(p[1] for p in pts)
     except (ValueError, AttributeError, IndexError):
         return x, y
+
+
+def _bed_height(resolved: dict) -> Optional[float]:
+    """Printable height in mm (`printable_height`, the Z a part may reach), or None."""
+    v = _first_or_default(resolved.get("printable_height"), None)
+    try:
+        h = float(v)
+    except (TypeError, ValueError):
+        return None
+    return h if h > 0 else None
 
 
 def _first_or_default(raw, default):
@@ -321,7 +331,7 @@ class ProfileCatalog:
                 "uuid": entry_uuid, "type": "machine", "name": name, "source": source,
                 "rel_path": rel_path, "manufacturer": manufacturer, "model": model, "nozzle": nozzle,
                 "nozzle_diameter": resolved.get("nozzle_diameter"),
-                "bed_size_x": bed_x, "bed_size_y": bed_y,
+                "bed_size_x": bed_x, "bed_size_y": bed_y, "bed_size_z": _bed_height(resolved),
                 "extruder_count": resolved.get("extruder_count", 1),
                 "instantiation": resolved.get("instantiation"),
             }

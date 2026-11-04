@@ -201,6 +201,30 @@ replaced) or `machine_uuid` (bed and printer retargeted), never both.
   `["body", "selection", <entry>]` per offending entry. Other input errors are 422
   `unprocessable`.
 
+### Measure (feature `projects.measure`)
+
+`POST /api/v1/projects/measure` returns bounding-box sizes for fit checks. Multipart
+`file` (`.3mf` or `.stl`) and optional `selection`, a JSON list of `{"id": n}` /
+`{"name": s}` (one object) or `{"plate": n}` (one plate); omitted or `[]` measures
+the whole file.
+
+```json
+{"items": [{"size_mm": [70.0, 60.0, 10.0]}, {"size_mm": [150.0, 60.0, 30.0]}]}
+```
+
+- One item per selection entry, in order (one for the whole file).
+- Axis-aligned box of printed parts (modifier / negative / blocker / enforcer parts
+  ignored), after the build transform. An object is its first instance as placed,
+  so a rotated object reports its placed size. A plate is every instance on it as
+  authored. A whole 3MF is every build item; a multi-plate project needs `plate`
+  selectors. An STL is its mesh extents and takes no selection.
+- 422 `unprocessable`: unreadable file, bad selection, unknown or ambiguous object,
+  missing or empty plate.
+
+Machine catalog entries (`GET /api/v1/profiles?type=machine`, `/profiles/{uuid}`) carry
+`bed_size_z`: the machine's `printable_height` in mm (`null` when the preset does not
+declare one), alongside `bed_size_x` / `bed_size_y`.
+
 ## Errors and readiness
 
 V1 errors, including validation and unknown v1 routes, use:

@@ -22,6 +22,7 @@ from app.project_config_builder import build_project_settings, embed_project_set
 from app import preview_3mf as _preview
 from app import subset_3mf as _subset
 from app import manifest as _manifest
+from app import measure as _measure
 from app import pack_mixed as _pack_mixed
 from app import pack_next as _pack_next
 from app import plate_extract as _plate_extract
@@ -2890,6 +2891,62 @@ async def pack_mixed(
                    "X-Merge-Warnings": " | ".join(warnings).encode("ascii", "replace").decode()}
         return FileResponse(path=stable_out, filename="mixed.3mf",
                             media_type="application/octet-stream", headers=headers)
+
+
+@app.post(
+    "/api/v1/projects/measure",
+    tags=["arrange"],
+    summary="Bounding-box sizes of 3MF objects / plates, or of an STL",
+    description=(
+        "Multipart `file` (`.3mf` or `.stl`) and optional `selection`, a JSON list of "
+        "`{\"id\": n}` / `{\"name\": s}` (one object) or `{\"plate\": n}` (one plate); `[]` or "
+        "omitted measures the whole file.\n\n"
+        "**200:** `{\"items\": [{\"size_mm\": [x, y, z]}, ...]}`, one per selection entry in order "
+        "(one for the whole file). Sizes are the axis-aligned bounding box of printed parts "
+        "(modifier/negative/blocker/enforcer parts ignored), after the build transform:\n"
+        "- object: its first instance as placed (a rotated object reports its placed size);\n"
+        "- plate: every instance on that plate as authored;\n"
+        "- whole 3MF: every build item; a multi-plate project needs `plate` selectors;\n"
+        "- STL: mesh extents (no selection).\n\n"
+        "**422** (`unprocessable`): unreadable file, bad selection, unknown/ambiguous object, "
+        "missing or empty plate."
+    ),
+    responses={422: {"description": "Unreadable file or bad selection"}},
+    operation_id="v1_measure")
+async def measure_project(
+    file: UploadFile = File(...),
+    selection: Optional[str] = Form(None, description='JSON: [{"id": 8}, {"plate": 2}]; omit for the whole file'),
+):
+    sel = None
+    if selection not in (None, ""):
+        try:
+            sel = json.loads(selection)
+            if not isinstance(sel, list) or not all(isinstance(x, dict) for x in sel):
+                raise ValueError
+        except ValueError:
+            raise HTTPException(status_code=422, detail="selection must be a JSON list of objects.")
+    try:
+        safe_name = _safe_filename(file.filename)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    stl = safe_name.lower().endswith(".stl")
+    if not stl and not safe_name.lower().endswith(".3mf"):
+        raise HTTPException(status_code=422, detail="Only .3mf and .stl files are supported.")
+    job_dir = os.path.join(ARRANGE_DIR, f"measure_{uuid.uuid4()}")
+    os.makedirs(job_dir, exist_ok=True)
+    try:
+        path = os.path.join(job_dir, "in.stl" if stl else "in.3mf")
+        with open(path, "wb") as buf:
+            await asyncio.to_thread(shutil.copyfileobj, file.file, buf)
+        try:
+            sizes = await asyncio.to_thread(_measure.measure, path, stl, sel)
+        except _measure.MeasureError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Cannot read {'STL' if stl else '3MF'}: {e}")
+        return {"items": [{"size_mm": s} for s in sizes]}
+    finally:
+        shutil.rmtree(job_dir, ignore_errors=True)
 
 
 @app.post(
