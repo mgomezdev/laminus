@@ -34,6 +34,7 @@ _MACHINE = {
     "nozzle_diameter": 0.4,
     "bed_size_x": 256.0,
     "bed_size_y": 256.0,
+    "bed_size_z": 256.0,
     "extruder_count": 1,
     "source": "mock",
     "rel_path": "mock/machine.json",

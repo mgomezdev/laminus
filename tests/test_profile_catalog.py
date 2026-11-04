@@ -165,6 +165,18 @@ def test_get_machine_by_tuple(profile_tree):
     m = cat.get_machine("Bambu Lab", "P1S", "0.4")
     assert m is not None and m["bed_size_x"] == 256
 
+def test_machine_entry_carries_printable_height(profile_tree):
+    from tests.conftest import write_json
+    write_json(f"{profile_tree['user_dir']}/default/machine/Tall.json",
+               {"name": "Tall", "printable_area": ["0x0", "300x0", "300x300", "0x300"],
+                "printable_height": "400", "extruder_count": 1})
+    cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
+    cat.build()
+    by_name = {m["name"]: m for m in cat.as_dict()["machine"]}
+    assert (by_name["Tall"]["bed_size_x"], by_name["Tall"]["bed_size_z"]) == (300, 400.0)
+    assert by_name["My Custom Printer"]["bed_size_z"] is None     # not declared
+
+
 def test_filter_by_machine_tuple(profile_tree):
     cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
     cat.build()

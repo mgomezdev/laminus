@@ -696,6 +696,39 @@
         }
       }
     },
+    "/api/v1/projects/measure": {
+      "post": {
+        "tags": [
+          "arrange"
+        ],
+        "summary": "Bounding-box sizes of 3MF objects / plates, or of an STL",
+        "description": "Multipart `file` (`.3mf` or `.stl`) and optional `selection`, a JSON list of `{\"id\": n}` / `{\"name\": s}` (one object) or `{\"plate\": n}` (one plate); `[]` or omitted measures the whole file.\n\n**200:** `{\"items\": [{\"size_mm\": [x, y, z]}, ...]}`, one per selection entry in order (one for the whole file). Sizes are the axis-aligned bounding box of printed parts (modifier/negative/blocker/enforcer parts ignored), after the build transform:\n- object: its first instance as placed (a rotated object reports its placed size);\n- plate: every instance on that plate as authored;\n- whole 3MF: every build item; a multi-plate project needs `plate` selectors;\n- STL: mesh extents (no selection).\n\n**422** (`unprocessable`): unreadable file, bad selection, unknown/ambiguous object, missing or empty plate.",
+        "operationId": "v1_measure",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_v1_measure"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Unreadable file or bad selection"
+          }
+        }
+      }
+    },
     "/api/v1/profiles/upload": {
       "post": {
         "tags": [
@@ -1559,6 +1592,32 @@
           "file"
         ],
         "title": "Body_v1_list_3mf_objects"
+      },
+      "Body_v1_measure": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "selection": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selection",
+            "description": "JSON: [{\"id\": 8}, {\"plate\": 2}]; omit for the whole file"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_v1_measure"
       },
       "Body_v1_pack_mixed": {
         "properties": {
