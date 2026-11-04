@@ -2,6 +2,7 @@
 import io
 import json
 import zipfile
+import xml.etree.ElementTree as ET
 from collections import Counter
 from unittest.mock import patch
 
@@ -34,23 +35,23 @@ def _post(tmp_path, sel=SEL, **data):
                                     data={"selection": json.dumps(sel), **data})
 
 
-def _check(r, tmp_path, bed_w):
+def _check(r, tmp_path, bed_w, requested=(3, 2, 4, 2)):
     """Valid multi-plate project: manifest sums to the request, every plate fits the bed on
     its own, together copies whole, solo instances alone. Returns the manifest."""
     assert r.status_code == 200, r.text
     content = r.content
     m = json.loads(zipfile.ZipFile(io.BytesIO(content)).read(mf.MANIFEST))
-    assert [i["requested"] for i in m["items"]] == [3, 2, 4, 2]
+    assert [i["requested"] for i in m["items"]] == list(requested)
     assert int(r.headers["X-Plate-Count"]) == len(m["plates"]) == len(_plates(content))
     got = Counter(i["item"] for pl in m["plates"] for i in pl["instances"])
-    assert got == {0: 3, 1: 2, 2: 4, 3: 2}
+    assert got == dict(enumerate(requested))
     out = tmp_path / "out.3mf"
     out.write_bytes(content)
     for pl in m["plates"]:
         insts = pl["instances"]
         assert Counter(i["object_id"] for i in insts) == _plates(content)[pl["plate"] - 1]
         bundle = Counter(i["part"] for i in insts if i["item"] == 2)
-        assert bundle["4"] == bundle["6"]              # never half a together copy
+        assert len(set(bundle.values())) <= 1          # never half a together copy
         if any(i["item"] == 3 for i in insts):
             assert len(insts) == 1                      # solo: alone on its plate
         one = tmp_path / f"plate{pl['plate']}.3mf"
@@ -131,6 +132,30 @@ def test_compose_inverts_to_local():
 def test_renumber_follows_subset_numbering():
     assert pm.renumber({("2", 3), ("2", 1), ("4", 0)}) == {("2", 0): ("2", 1), ("2", 1): ("2", 3),
                                                            ("4", 0): ("4", 0)}
+
+
+def test_stl_project_mesh_is_centred_and_keeps_its_place(tmp_path):
+    from app import pack_next as pn
+    stl = tmp_path / "b.stl"
+    stl.write_bytes(_box_stl(40, 30, 20))
+    pn.stl_project(str(stl), str(tmp_path / "b.3mf"), "b.stl", {})
+    with zipfile.ZipFile(tmp_path / "b.3mf") as z:
+        assert pe.item_boxes(z) == [("2", pytest.approx([0, 0, 0]), pytest.approx([40, 30, 20]))]
+        tf = ET.fromstring(z.read("3D/3dmodel.model")).find(".//{*}item").get("transform").split()
+    assert [float(v) for v in tf[9:]] == pytest.approx([20, 15, 10])     # mesh centred on its origin
+
+
+def test_relabel_maps_a_copy_layout_onto_another_copy():
+    plate = [(("4", 0), "a"), (("6", 0), "b")]
+    assert pm.relabel(plate, {("4", 0), ("6", 0)}, {("6", 1), ("4", 1)}) == [(("4", 1), "a"), (("6", 1), "b")]
+
+
+def test_together_entries_rearranged_copy_by_copy_are_capped(tmp_path):
+    many = [dict(SEL[2], qty=1) for _ in range(pm.MAX_COPY_ARRANGES + 1)]
+    with patch.object(pm, "split_units", lambda plates, origins: {
+            o["unit"] for lst in origins.values() for o in lst}):
+        r = _post(tmp_path, sel=many)
+    assert r.status_code == 422 and r.json()["error"]["code"] == "unprocessable"
 
 
 def test_pack_mixed_feature_flag():

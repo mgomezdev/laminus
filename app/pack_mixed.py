@@ -19,6 +19,18 @@ from app import subset_3mf as _subset
 from app.pack_next import Instance, Origins
 
 Placed = list[tuple[Instance, str]]   # one plate: (instance, transform in plate-1 coordinates)
+MAX_COPY_ARRANGES = 8                 # together entries re-arranged one copy at a time, per request
+
+
+def relabel(plate: Placed, rep: set[Instance], copy: set[Instance]) -> Placed:
+    """*plate* (a layout of copy *rep*) for another copy of the same entry: the n-th instance
+    of each object in *rep* becomes the n-th instance of that object in *copy*."""
+    def ranked(insts):
+        return {i: (i[0], n) for oid in {o for o, _ in insts}
+                for n, i in enumerate(sorted(x for x in insts if x[0] == oid))}
+    to = {v: k for k, v in ranked(copy).items()}
+    rank = ranked(rep)
+    return [(to[rank[i]], tf) for i, tf in plate]
 
 
 def shift(tf: str, dx: float, dy: float) -> str:

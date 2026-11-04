@@ -678,6 +678,11 @@ def expand_instances(subset: str, dst: str) -> None:
     with open_zip(subset) as zin:
         model = _parse(zin.read(MODEL))
         ms = _parse(zin.read(MODEL_SETTINGS))
+        # OrcaSlicer 2.4.2 segfaults in `--arrange 1 --export-3mf` on a model carrying its own
+        # generator tag (<metadata name="OrcaSlicer">), i.e. any Orca-saved project. The oracle
+        # is only read for its layout, so the model-level metadata goes.
+        for m in model.findall(_q("metadata")):
+            model.remove(m)
         resources = model.find(_q("resources"))
         build = model.find(_q("build"))
         res_by_id = {o.get("id"): o for o in resources.findall(_q("object"))}

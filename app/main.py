@@ -2843,15 +2843,23 @@ async def pack_mixed(
             if left == pool:
                 break                   # nothing settled: arrange those copies one by one below
             pool = left
-        too_large: set[tuple[int, str]] = set()
+        # still split: arrange one copy per entry on its own and reuse its layout for the
+        # entry's other copies (identical), so the arrange count is bounded by entries
+        copies: dict[int, list[set]] = {}
         for members in _pack_next.units(origins).values():
-            if members & pool:          # still split: arrange each copy on its own
-                plates = await _arrange(members)
-                if len(plates) == 1:
-                    done += plates
-                else:
-                    o = origins[min(members)[0]][min(members)[1]]
-                    too_large.add((o["item"], o["source"]))
+            if members & pool:
+                copies.setdefault(origins[min(members)[0]][min(members)[1]]["item"], []).append(members)
+        if len(copies) > _pack_mixed.MAX_COPY_ARRANGES:
+            raise HTTPException(status_code=422, detail=(
+                f"{len(copies)} together entries do not settle on single plates; "
+                f"at most {_pack_mixed.MAX_COPY_ARRANGES} are re-arranged per request."))
+        too_large: set[tuple[int, str]] = set()
+        for item, units_ in sorted(copies.items()):
+            plates = await _arrange(units_[0])
+            if len(plates) != 1:
+                too_large.add((item, origins[min(units_[0])[0]][min(units_[0])[1]]["source"]))
+                continue
+            done += [_pack_mixed.relabel(plates[0], units_[0], u) for u in units_]
         if too_large:
             raise _too_large([{"loc": ["body", "selection", it], "type": "part_too_large",
                                "msg": f"a together copy from {src} does not fit one plate"}
