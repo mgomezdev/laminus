@@ -920,7 +920,8 @@ async def run_orcaslicer_task(
     if input_file_path.lower().endswith(".3mf"):
         fixed_path = input_file_path[:-4] + "_fixed.3mf"
         try:
-            await asyncio.to_thread(_strip_app_version, input_file_path, fixed_path)
+            for note in await asyncio.to_thread(_strip_app_version, input_file_path, fixed_path):
+                job_logger.log(f"Rewrote project setting {note}")
             input_file_path = fixed_path
         except Exception as exc:
             job_logger.log(f"WARNING: could not strip Application version: {exc}")

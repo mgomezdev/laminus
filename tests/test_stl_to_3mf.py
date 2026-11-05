@@ -373,6 +373,41 @@ def test_strip_application_version_repairs_filament_ids(tmp_path, cfg, expected)
     assert "filament_id" not in out
 
 
+_BAMBU_FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "bambu_3plate_multicolor.3mf")
+
+
+def test_strip_application_version_replaces_bambu_auto_sentinels(tmp_path):
+    # BIZ-352: Bambu Studio writes -1 for "auto"; Orca 2.4.2 range-checks these and fails -18.
+    import json
+    import zipfile
+    from app.stl_to_3mf import strip_application_version
+
+    dst = tmp_path / "d.3mf"
+    notes = strip_application_version(_BAMBU_FIXTURE, str(dst))
+    with zipfile.ZipFile(dst) as z:
+        out = json.loads(z.read("Metadata/project_settings.config"))
+    assert out["raft_first_layer_expansion"] == "2"
+    assert out["tree_support_wall_count"] == "0"
+    assert out["prime_tower_lift_height"] == "-1"  # Orca accepts this -1
+    assert sorted(notes) == [
+        "raft_first_layer_expansion: -1 (Bambu auto) -> 2",
+        "tree_support_wall_count: -1 (Bambu auto) -> 0",
+    ]
+
+
+def test_strip_application_version_reports_no_notes_for_clean_config(tmp_path):
+    import json
+    import zipfile
+    from app.stl_to_3mf import strip_application_version
+
+    src = tmp_path / "s.3mf"
+    with zipfile.ZipFile(src, "w") as z:
+        z.writestr("3D/3dmodel.model", "<model/>")
+        z.writestr("Metadata/project_settings.config",
+                   json.dumps({"tree_support_wall_count": "1", "filament_ids": ["x"]}))
+    assert strip_application_version(str(src), str(tmp_path / "d.3mf")) == []
+
+
 def test_strip_application_version_rejects_oversized_archive(tmp_path, monkeypatch):
     import zipfile
     import app.stl_to_3mf as mod

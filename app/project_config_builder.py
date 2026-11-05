@@ -88,6 +88,32 @@ def ensure_extruder_reset_per_layer(config: dict) -> bool:
     return True
 
 
+# BIZ-352: Bambu Studio 2.x writes -1 for "auto" on these; OrcaSlicer 2.4.2 range-checks them
+# (min 0) and fails the slice -18. Each maps to Orca's own default. Other -1 values Bambu
+# writes (prime_tower_lift_height, ironing_fan_speed, filament_ramming_volumetric_speed, ...)
+# are accepted by Orca and left alone.
+_BAMBU_AUTO_DEFAULTS = {
+    "raft_first_layer_expansion": "2",
+    "tree_support_wall_count": "0",
+}
+
+
+def replace_bambu_auto_sentinels(config: dict) -> list[str]:
+    """Replace Bambu's "-1 = auto" values Orca rejects with Orca's defaults, in place.
+    Returns one note per rewritten key, for the job log."""
+    notes = []
+    for key, default in _BAMBU_AUTO_DEFAULTS.items():
+        val = config.get(key)
+        if isinstance(val, list):
+            new = [default if str(v).strip() == "-1" else v for v in val]
+        else:
+            new = default if val is not None and str(val).strip() == "-1" else val
+        if new != val:
+            config[key] = new
+            notes.append(f"{key}: -1 (Bambu auto) -> {default}")
+    return notes
+
+
 def embed_project_settings(src_3mf: str, project_settings: dict, dst_3mf: str) -> None:
     """Write dst_3mf as a copy of src_3mf with Metadata/project_settings.config replaced."""
     if os.path.realpath(src_3mf) == os.path.realpath(dst_3mf):

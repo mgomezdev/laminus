@@ -149,3 +149,13 @@ def test_filament_key_present_when_at_least_one_filament_defines_it():
     fil_with_density = {**_filament(), "filament_density": 1.24}
     cfg = build_project_settings(_machine(), _process(), [_filament(), fil_with_density])
     assert cfg["filament_density"] == ["", 1.24]
+
+
+@pytest.mark.parametrize("value, expected", [("-1", "2"), (["-1"], ["2"]), ("1.5", "1.5"), ("0", "0")])
+def test_bambu_auto_sentinel_replaced_with_orca_default(value, expected):
+    # BIZ-352: Orca range-checks raft_first_layer_expansion >= 0; Bambu's -1 means "auto".
+    from app.project_config_builder import replace_bambu_auto_sentinels
+    cfg = {"raft_first_layer_expansion": value}
+    notes = replace_bambu_auto_sentinels(cfg)
+    assert cfg["raft_first_layer_expansion"] == expected
+    assert bool(notes) == (value != expected)

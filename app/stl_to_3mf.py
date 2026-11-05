@@ -6,7 +6,9 @@ import re
 import struct
 import zipfile
 
-from app.project_config_builder import ensure_extruder_reset_per_layer, normalize_filament_ids
+from app.project_config_builder import (
+    ensure_extruder_reset_per_layer, normalize_filament_ids, replace_bambu_auto_sentinels,
+)
 
 _NS_CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 _NS_PROD = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
@@ -235,7 +237,7 @@ _VERSION_META_RE = re.compile(
 MAX_3MF_UNCOMPRESSED_BYTES = int(os.environ.get("MAX_3MF_UNCOMPRESSED_BYTES", 2 * 1024**3))
 
 
-def strip_application_version(src_path: str, dst_path: str, fix_settings: bool = True) -> None:
+def strip_application_version(src_path: str, dst_path: str, fix_settings: bool = True) -> list[str]:
     """Copy *src_path* to *dst_path* with two fixes for OrcaSlicer Linux slice bugs:
 
     1. Remove version-bearing metadata tags from .model files to avoid segfaults
@@ -244,11 +246,15 @@ def strip_application_version(src_path: str, dst_path: str, fix_settings: bool =
     2. Add the per-layer ``G92 E0`` OrcaSlicer requires for relative extrusion when
        project_settings.config lacks it (see ``ensure_extruder_reset_per_layer``).
        Also repairs ``filament_ids`` (see ``normalize_filament_ids``), whose absence
-       segfaults ``--export-3mf``.
+       segfaults ``--export-3mf``, and replaces Bambu "-1 = auto" values Orca rejects
+       (see ``replace_bambu_auto_sentinels``).
        Skipped when *fix_settings* is False (e.g. arrange, whose output keeps its settings).
+
+    Returns a note per rewritten setting value, for the job log.
     """
     import json as _json
 
+    notes: list[str] = []
     with zipfile.ZipFile(src_path, "r") as src:
         infos = src.infolist()
         if len({i.filename for i in infos}) != len(infos):
@@ -273,11 +279,14 @@ def strip_application_version(src_path: str, dst_path: str, fix_settings: bool =
                         cfg = _json.loads(data.decode("utf-8"))
                         changed = normalize_filament_ids(cfg)
                         changed = ensure_extruder_reset_per_layer(cfg) or changed
-                        if changed:
+                        sentinel_notes = replace_bambu_auto_sentinels(cfg)
+                        if changed or sentinel_notes:
                             data = _json.dumps(cfg, ensure_ascii=False, indent=2).encode("utf-8")
+                            notes.extend(sentinel_notes)
                     except Exception:
                         pass
                 dst.writestr(item, data)
+    return notes
 
 
 def stl_min_z(stl_path: str) -> float:
