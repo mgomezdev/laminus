@@ -62,7 +62,10 @@ status/events/artifact URLs afterwards. Optional `export_3mf` must be a plain
 filename ending in `.3mf`, never an absolute or relative path. Every slice input has
 its `filament_ids` repaired on the way in (a stray preset-level `filament_id` is
 moved or dropped, and a missing or empty list is filled with `""` per filament):
-OrcaSlicer 2.4.2 segfaults in `--export-3mf` without it.
+OrcaSlicer 2.4.2 segfaults in `--export-3mf` without it. Bambu Studio's `-1` ("auto")
+for `raft_first_layer_expansion` and `tree_support_wall_count`, which Orca rejects
+(`-18`), is replaced with Orca's defaults (`2` and `0`), and each rewrite is logged in
+the job log.
 
 ## Profiles
 

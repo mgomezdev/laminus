@@ -138,3 +138,15 @@ def test_slice_uses_the_machine_settings_not_orca_defaults(printer):
         gcode = z.read("Metadata/plate_1.gcode").decode("utf-8", "replace")
     assert f"; printable_area = {','.join(cfg['printable_area'])}\n" in gcode
     assert f"; printer_model = {cfg['printer_model']}\n" in gcode
+
+
+@pytest.mark.parametrize("plate", [1, 2, 3])
+def test_prepared_bambu_project_with_auto_sentinels_slices(plate):
+    # BIZ-352: a real Bambu Studio 2.x project carries -1 ("auto") for
+    # raft_first_layer_expansion / tree_support_wall_count; Orca failed every plate -18.
+    path = os.path.join(os.path.dirname(__file__), "fixtures", "bambu_3plate_multicolor.3mf")
+    with open(path, "rb") as f:
+        r = httpx.post(f"{BASE}/api/v1/slice/prepared", data={"plate": str(plate), "export_3mf": "out.gcode.3mf"},
+                       files={"file": ("bambu.3mf", f.read(), "application/octet-stream")}, timeout=60)
+    assert r.status_code == 200, r.text
+    _assert_exported(r.json()["job_id"])
