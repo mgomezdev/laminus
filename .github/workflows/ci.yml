@@ -16,7 +16,37 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # A pull request into develop that touches only documentation (docs/**, any *.md) sets code=false and every job
+  # below is skipped: no mock image, no cross-service e2e. Pushes, tags, release pull requests into main and any pull
+  # request with one other file run everything; so does a diff that cannot be computed. No test reads a docs file
+  # (if one ever does, exclude that path here). Branch rulesets should require the `gate` job at the bottom: a check
+  # created inside a called workflow ("e2e-core / e2e") does not exist when its caller is skipped.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          code=true
+          if [ "$EVENT" = "pull_request" ] && [ "$BASE_REF" != "main" ] && files="$(git diff --name-only "$BASE_SHA"...HEAD)" && [ -n "$files" ]; then
+            # Any path that is neither under docs/ nor a Markdown file is code.
+            if ! printf '%s\n' "$files" | grep -qvE '^docs/|\.md$'; then code=false; fi
+          fi
+          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+
   spec:
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -33,6 +63,8 @@ jobs:
         run: git diff --exit-code openapi.json openapi-v1.json
 
   test:
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -82,6 +114,8 @@ jobs:
   # Browser e2e for the dashboard: the real app (uvicorn) against mock/orca_cli.py,
   # driven through Chromium. e2e/conftest.py shims orcaslicer + xvfb-run itself.
   e2e-ui:
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -108,6 +142,8 @@ jobs:
   # it breaks Themis -- that has to surface on the Laminus pull request, not
   # later on an unrelated Themis one.
   mock-image:
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -237,3 +273,26 @@ jobs:
           files: |
             openapi.json
             openapi-v1.json
+
+  # The one check a branch ruleset should require (see `changes`). Always runs; green only when every job it needs
+  # succeeded or was skipped.
+  gate:
+    needs: [changes, spec, test, e2e-ui, mock-image, e2e-core]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every required job succeeded or was skipped
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS"
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["RESULTS"])
+          bad = {job: n["result"] for job, n in needs.items() if n["result"] not in ("success", "skipped")}
+          if needs["changes"]["result"] != "success":
+              bad["changes"] = needs["changes"]["result"]     # the filter itself may never be skipped
+          print("failed:", bad or "none")
+          sys.exit(1 if bad else 0)
+          PY
