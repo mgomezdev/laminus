@@ -31,3 +31,16 @@ def test_cleanup_directory_noop_on_missing_path(tmp_path, caplog):
         cleanup_directory(str(tmp_path / "does-not-exist"))  # must not raise
     rmtree.assert_not_called()
     assert caplog.text == ""                                        # nothing to do is not worth a log line
+
+
+def test_the_dashboard_page_is_served_from_the_templates_folder():
+    """`GET /` reads app/templates/index.html; the path is anchored on app/, not on whichever module holds the handler."""
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    import app.main as main
+
+    r = TestClient(main.app).get("/")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
+    assert r.text == (Path(main.__file__).parent / "templates" / "index.html").read_text(encoding="utf-8")

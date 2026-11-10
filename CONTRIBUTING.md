@@ -29,7 +29,8 @@ Laminus (and its sibling services Themis and Ordinus) is being built as an exerc
 ```
 orca/                              # service name: Laminus
 ├── app/
-│   ├── main.py                    # FastAPI app, process state (jobs, catalog) and every route handler
+│   ├── main.py                    # FastAPI app, config, process state (jobs, catalog), shared helpers
+│   ├── routes/                    # Route handlers by area (profiles, slicing, projects, packing, system); see its README
 │   ├── api_v1.py                  # /api/v1 surface: error envelope, cursors, idempotency; mounts main's handlers
 │   ├── profile_catalog.py         # ProfileCatalog class (build, cache, lookup)
 │   ├── neutral_profiles.py        # Model / nozzle-variant lookups over the catalog (no engine)

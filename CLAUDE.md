@@ -8,7 +8,7 @@ When reporting information, be extremely concise and sacrifice grammar for the s
 
 ## What this project is
 
-A Dockerized REST API that wraps the OrcaSlicer CLI to perform headless 3D model slicing and plate arrangement. OrcaSlicer is a GUI application run headlessly inside the container via `xvfb-run`. `app/main.py` holds the FastAPI app, the process state (job table, catalog) and every route handler; the pure 3MF/profile logic lives in the sibling modules (map below). A single-page HTML frontend is `app/templates/index.html`.
+A Dockerized REST API that wraps the OrcaSlicer CLI to perform headless 3D model slicing and plate arrangement. OrcaSlicer is a GUI application run headlessly inside the container via `xvfb-run`. `app/main.py` holds the FastAPI app and the process state (job table, catalog); route handlers are in `app/routes/`, one module per area; the pure 3MF/profile logic lives in the sibling modules (map below). A single-page HTML frontend is `app/templates/index.html`.
 
 ## Commands
 
@@ -59,7 +59,8 @@ the four directory variables is unset, or `SYSTEM_PROFILES_DIR` holds no machine
 ### Module map (`app/`)
 | Module | Owns |
 |---|---|
-| `main.py` | FastAPI app + lifespan, process state (`jobs`, `job_history`, `catalog`), every route handler, the slicer subprocess calls |
+| `main.py` | FastAPI app + lifespan, config, process state (`jobs`, `job_history`, `catalog`), catalog build, job persistence, shared helpers. Imports `routes/*` at the bottom and re-exports their names |
+| `routes/{profiles,slicing,projects,packing,system}.py` | The route handlers and the slicer subprocess calls. They read everything in `main.py` as `main.<name>` at call time (never `from app.main import x`), so state is live and a test patching `app.main.<name>` takes effect. Rule and how to add a route: `app/routes/README.md` |
 | `api_v1.py` | The `/api/v1` surface: error envelope, keyset cursors, `Idempotency-Key`; `install(app, main_module)` mounts main's handlers |
 | `profile_catalog.py`, `neutral_profiles.py` | Preset discovery / inheritance / cache; model + nozzle-variant lookups |
 | `project_config_builder.py` | Merged presets → `project_settings.config` embedded in a 3MF |
@@ -80,7 +81,7 @@ the four directory variables is unset, or `SYSTEM_PROFILES_DIR` holds no machine
 - `/opt/orcaslicer/` — extracted OrcaSlicer AppImage, on its own cache volume (`laminus-slicer`); wiped and re-extracted when `ORCA_VERSION` changes, not backed up
 
 ### Request flow for slicing
-1. `POST /api/v1/jobs` saves the uploaded file to `/tmp/jobs/{uuid}/input/`, returns 202 with an `id`, creates an in-memory job entry in the global `jobs` dict, and dispatches `run_orcaslicer_task` as a FastAPI `BackgroundTask`.
+1. `POST /api/v1/jobs` saves the uploaded file to `/tmp/jobs/{uuid}/input/`, returns 202 with an `id`, creates an in-memory job entry in the global `jobs` dict (`main.jobs`), and dispatches `run_orcaslicer_task` (`app/routes/slicing.py`) as a FastAPI `BackgroundTask`.
 2. `run_orcaslicer_task` resolves profile paths via the `ProfileCatalog` singleton, builds a `xvfb-run orcaslicer --slice ...` subprocess, and streams stdout line-by-line into a per-job `JobLogger` (an `asyncio.Queue` wrapper).
 3. `GET /api/v1/jobs/{job_id}/events` streams those logs as SSE using `StreamingResponse`. The API converts internal logger sentinels into typed `log`, `dropped`, `completed`, and `failed` SSE events.
 4. `GET /api/v1/jobs/{job_id}/artifact` returns the first `.gcode` or `.3mf` found in the job's output dir.
