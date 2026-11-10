@@ -73,6 +73,13 @@ def _real_client():
     ``TestClient(app)`` (no ``with``) never has one and every real-side test used to skip."""
     if _real_app is None:
         _real_unavailable(f"Real Laminus app not importable: {_real_import_error}")
+    # Decide before starting the app: its lifespan creates CONFIG_DIR / DATA_DIR (default /config and /data), and a
+    # missing profiles tree still "loads" an empty catalog, which would fail every test instead of skipping.
+    unset = [v for v in ("SYSTEM_PROFILES_DIR", "USER_CONFIG_DIR", "CONFIG_DIR", "DATA_DIR") if not os.environ.get(v)]
+    if unset:
+        _real_unavailable(f"Real Laminus not configured for tests: {', '.join(unset)} unset (see CONTRIBUTING.md, Running Tests)")
+    if not any(Path(os.environ["SYSTEM_PROFILES_DIR"]).glob("*/machine/*.json")):
+        _real_unavailable(f"No machine profiles under SYSTEM_PROFILES_DIR={os.environ['SYSTEM_PROFILES_DIR']}")
     with TestClient(_real_app, raise_server_exceptions=True) as tc:
         deadline = time.monotonic() + 30
         health: dict = {}
@@ -82,7 +89,7 @@ def _real_client():
                 break
             time.sleep(0.05)
         if not health.get("catalog_loaded"):
-            _real_unavailable(f"Real Laminus catalog not loaded (no profiles tree here?): {health}")
+            pytest.fail(f"Real Laminus catalog did not load from a profiles tree that has machines: {health}")
         yield tc
 
 

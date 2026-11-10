@@ -103,8 +103,9 @@ LAMINUS_CONTRACT_REQUIRE_REAL=1 pytest tests/ -ra
 ```
 
 That is what CI runs. `tests/test_mock_contract.py` runs every contract test twice, against the HTTP mock and against the
-real app. Without the environment above the real app has no catalog and its half **skips**; `LAMINUS_CONTRACT_REQUIRE_REAL=1`
-turns that skip into a failure, so check the skip count if you leave it off. The `*_live.py` suites need a running Laminus
+real app. If any of the four directory variables is unset, or `SYSTEM_PROFILES_DIR` holds no machine profiles, the real half **skips**
+(it would otherwise start the app against `/config` and `/data`); `LAMINUS_CONTRACT_REQUIRE_REAL=1` turns that skip into a
+failure, so check the skip count if you leave it off. The `*_live.py` suites need a running Laminus
 with real OrcaSlicer (`LAMINUS_URL=...`) and always skip otherwise.
 
 In CI, the mock binary (`mock/orca_cli.py`) is symlinked to `/usr/local/bin/orcaslicer` and `SYSTEM_PROFILES_DIR` is set to `tests/fixtures/profiles/` so all tests including real-client contract tests run without the full AppImage.

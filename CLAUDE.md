@@ -50,8 +50,9 @@ python scripts/export_openapi.py   # after a route/param change; CI fails on a s
 ```
 
 `tests/test_mock_contract.py` runs each contract test against both the HTTP mock (`mock/server.py`) and the real app. A change to
-either side, or to what the real app expects from the slicer CLI (`mock/orca_cli.py`), must keep both halves green. Without
-`LAMINUS_CONTRACT_REQUIRE_REAL=1` and the environment above the real half silently skips.
+either side, or to what the real app expects from the slicer CLI (`mock/orca_cli.py`), must keep both halves green. If any of
+the four directory variables is unset, or `SYSTEM_PROFILES_DIR` holds no machine profiles, the real half skips; with
+`LAMINUS_CONTRACT_REQUIRE_REAL=1` (CI) that is a failure instead.
 
 ## Architecture
 
