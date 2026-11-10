@@ -11,8 +11,10 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import struct
 import sys
+import time
 import zipfile
 from pathlib import Path
 from typing import Callable
@@ -41,35 +43,53 @@ _mock_mod = _load_mock()
 
 # Try to import the real app; skip if unavailable (e.g. OrcaSlicer not installed in CI)
 _real_app = None
+_real_import_error: Exception | None = None
 try:
     sys.path.insert(0, str(_ROOT))
     from app.main import app as _real_app_obj  # noqa: E402
     _real_app = _real_app_obj
 except Exception as e:
-    pass  # real app unavailable; only mock tests run
+    _real_import_error = e  # real app unavailable; only mock tests run
 
 
 # ---------------------------------------------------------------------------
 # Fixtures — parametrize the test suite over both clients
 # ---------------------------------------------------------------------------
 
+# CI sets this (see .github/workflows/ci.yml): there the real half MUST run, so a catalog that fails to
+# load is a failure, not a skip. Without it (a laptop with no profiles tree) the real half skips.
+_REQUIRE_REAL = os.environ.get("LAMINUS_CONTRACT_REQUIRE_REAL") == "1"
+
+
+def _real_unavailable(reason: str):
+    if _REQUIRE_REAL:
+        pytest.fail(f"{reason} (LAMINUS_CONTRACT_REQUIRE_REAL=1: the real half of the contract must run)")
+    pytest.skip(reason)
+
+
+@pytest.fixture(scope="module")
+def _real_client():
+    """The real app with its lifespan running: the catalog is built by a startup task, so a bare
+    ``TestClient(app)`` (no ``with``) never has one and every real-side test used to skip."""
+    if _real_app is None:
+        _real_unavailable(f"Real Laminus app not importable: {_real_import_error}")
+    with TestClient(_real_app, raise_server_exceptions=True) as tc:
+        deadline = time.monotonic() + 30
+        health: dict = {}
+        while time.monotonic() < deadline:
+            health = tc.get("/api/v1/health").json()
+            if health.get("catalog_loaded") or not health.get("catalog_building"):
+                break
+            time.sleep(0.05)
+        if not health.get("catalog_loaded"):
+            _real_unavailable(f"Real Laminus catalog not loaded (no profiles tree here?): {health}")
+        yield tc
+
+
 @pytest.fixture(params=["mock", "real"])
 def client(request):
     if request.param == "real":
-        if _real_app is None:
-            pytest.skip("Real Laminus app not importable")
-        tc = TestClient(_real_app, raise_server_exceptions=False)
-        # Catalog builds in the background; poll until ready (or give up quickly).
-        for _ in range(20):
-            health = tc.get("/api/v1/health").json()
-            if health.get("catalog_loaded"):
-                break
-            if not health.get("catalog_building"):
-                break
-            import time; time.sleep(0.1)
-        if not health.get("catalog_loaded"):
-            pytest.skip("Real Laminus catalog not loaded (OrcaSlicer not installed in this environment)")
-        return TestClient(_real_app, raise_server_exceptions=True)
+        return request.getfixturevalue("_real_client")
     return TestClient(_mock_mod.app, raise_server_exceptions=True)
 
 

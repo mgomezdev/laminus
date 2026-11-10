@@ -8,7 +8,7 @@ When reporting information, be extremely concise and sacrifice grammar for the s
 
 ## What this project is
 
-A Dockerized REST API that wraps the OrcaSlicer CLI to perform headless 3D model slicing and plate arrangement. OrcaSlicer is a GUI application run headlessly inside the container via `xvfb-run`. The API is implemented in a single FastAPI file (`app/main.py`) with a single-page HTML frontend (`app/templates/index.html`).
+A Dockerized REST API that wraps the OrcaSlicer CLI to perform headless 3D model slicing and plate arrangement. OrcaSlicer is a GUI application run headlessly inside the container via `xvfb-run`. `app/main.py` holds the FastAPI app, the process state (job table, catalog) and every route handler; the pure 3MF/profile logic lives in the sibling modules (map below). A single-page HTML frontend is `app/templates/index.html`.
 
 ## Commands
 
@@ -39,7 +39,34 @@ docker exec laminus python3 /workspace/flatten_profiles.py \
 curl http://localhost:5000/api/v1/health
 ```
 
+## Commands (tests)
+
+```bash
+pip install -r requirements-dev.txt
+# mock/orca_cli.py must be on PATH as `orcaslicer` (and `xvfb-run` installed); then, as CI does:
+SYSTEM_PROFILES_DIR=$PWD/tests/fixtures/profiles USER_CONFIG_DIR=/tmp/laminus-test-user CONFIG_DIR=/tmp/laminus-test-config \
+DATA_DIR=/tmp/laminus-test-data LAMINUS_CONTRACT_REQUIRE_REAL=1 pytest tests/ -ra
+python scripts/export_openapi.py   # after a route/param change; CI fails on a stale openapi.json / openapi-v1.json
+```
+
+`tests/test_mock_contract.py` runs each contract test against both the HTTP mock (`mock/server.py`) and the real app. A change to
+either side, or to what the real app expects from the slicer CLI (`mock/orca_cli.py`), must keep both halves green. Without
+`LAMINUS_CONTRACT_REQUIRE_REAL=1` and the environment above the real half silently skips.
+
 ## Architecture
+
+### Module map (`app/`)
+| Module | Owns |
+|---|---|
+| `main.py` | FastAPI app + lifespan, process state (`jobs`, `job_history`, `catalog`), every route handler, the slicer subprocess calls |
+| `api_v1.py` | The `/api/v1` surface: error envelope, keyset cursors, `Idempotency-Key`; `install(app, main_module)` mounts main's handlers |
+| `profile_catalog.py`, `neutral_profiles.py` | Preset discovery / inheritance / cache; model + nozzle-variant lookups |
+| `project_config_builder.py` | Merged presets → `project_settings.config` embedded in a 3MF |
+| `stl_to_3mf.py`, `subset_3mf.py`, `plate_extract.py`, `preview_3mf.py` | 3MF surgery: STL injection, object subsets, single-plate extraction, thumbnails (zip + XML, no slicer) |
+| `manifest.py`, `measure.py` | Per-plate manifest embedded in returned 3MFs; bounding-box sizes |
+| `pack_mixed.py`, `pack_next.py` | Selection logic behind `/pack/mixed` and `/pack/next` |
+
+`mock/server.py` is the HTTP mock Themis's CI runs against; `mock/orca_cli.py` is the fake `orcaslicer` binary this repo's own tests run the real app against.
 
 ### Runtime paths (inside container)
 - `/config/user/default/{machine,process,filament}/` — user-supplied OrcaSlicer preset JSON files. Durable volume — this is the whole reason `/config` is mounted.

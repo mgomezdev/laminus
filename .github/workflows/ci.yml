@@ -41,7 +41,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: requirements-dev.txt
 
       # xvfb-run must exist on PATH even with the fake slicer, because every
       # OrcaSlicer invocation is wrapped in it unconditionally.
@@ -49,7 +49,7 @@ jobs:
         run: sudo apt-get install -y xvfb
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt pytest pytest-asyncio httpx
+        run: pip install -r requirements-dev.txt
 
       - uses: actions/setup-node@v4
         with:
@@ -61,6 +61,10 @@ jobs:
       # never downloads it. tests/test_mock_contract.py separately asserts the
       # HTTP mock and the real app satisfy identical contracts -- which is what
       # lets Themis gate against mock-laminus instead of real OrcaSlicer.
+      # LAMINUS_CONTRACT_REQUIRE_REAL=1 below makes that suite's real half fail
+      # rather than skip when the real app has no catalog. It used to skip on
+      # every run (the fixture never started the app's lifespan), so the
+      # "identical contracts" claim was only being checked against the mock.
       - name: Install mock OrcaSlicer
         run: |
           chmod +x mock/orca_cli.py
@@ -72,6 +76,7 @@ jobs:
           USER_CONFIG_DIR: /tmp/laminus-test-user
           CONFIG_DIR: /tmp/laminus-test-config
           DATA_DIR: /tmp/laminus-test-data
+          LAMINUS_CONTRACT_REQUIRE_REAL: "1"
         run: pytest tests/ -v -ra
 
   # Browser e2e for the dashboard: the real app (uvicorn) against mock/orca_cli.py,
