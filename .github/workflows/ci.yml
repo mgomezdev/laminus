@@ -38,15 +38,19 @@ jobs:
         run: |
           set -euo pipefail
           code=true
-          if [ "$EVENT" = "pull_request" ] && [ "$BASE_REF" != "main" ] && files="$(git diff --name-only "$BASE_SHA"...HEAD)" && [ -n "$files" ]; then
-            # Any path that is neither under docs/ nor a Markdown file is code.
-            if ! printf '%s\n' "$files" | grep -qvE '^docs/|\.md$'; then code=false; fi
+          # --no-renames: a code file renamed into docs/ is listed under its old path too.
+          if [ "$EVENT" = "pull_request" ] && [ "$BASE_REF" != "main" ] && files="$(git diff --name-only --no-renames "$BASE_SHA"...HEAD)" && [ -n "$files" ]; then
+            # Count the paths that are neither under docs/ nor a Markdown file. Counted from a here-string, not
+            # `printf | grep -q`: with pipefail, grep -q exiting early kills printf on a long list and the pipeline
+            # reads as "no match", i.e. docs-only.
+            other="$(grep -cvE '^docs/|\.md$' <<<"$files" || true)"
+            if [ "$other" = "0" ]; then code=false; fi
           fi
           echo "code=$code" | tee -a "$GITHUB_OUTPUT"
 
   spec:
     needs: [changes]
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code != 'false'      # anything but an explicit docs-only verdict runs the job
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -64,7 +68,7 @@ jobs:
 
   test:
     needs: [changes]
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code != 'false'      # anything but an explicit docs-only verdict runs the job
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -115,7 +119,7 @@ jobs:
   # driven through Chromium. e2e/conftest.py shims orcaslicer + xvfb-run itself.
   e2e-ui:
     needs: [changes]
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code != 'false'      # anything but an explicit docs-only verdict runs the job
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -143,7 +147,7 @@ jobs:
   # later on an unrelated Themis one.
   mock-image:
     needs: [changes]
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code != 'false'      # anything but an explicit docs-only verdict runs the job
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
