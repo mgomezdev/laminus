@@ -504,8 +504,9 @@ async def v1_capabilities():
         "ready": {"catalog": True},
         "features": ["jobs", "jobs.idempotency", "pagination.cursor", "profiles", "pack", "arrange", "health",
                      "slice.prepared", "profiles.rescan", "profiles.broken", "profiles.merged_config",
-                     "profiles.neutral"],
-        "limits": {"max_concurrent_jobs": 1, "job_history_limit": 200, "max_page_size": _MAX_PAGE},
+                     "profiles.neutral", "pack.counts", "pack.names"],
+        "limits": {"max_concurrent_jobs": 1, "job_history_limit": 200, "max_page_size": _MAX_PAGE,
+                   "max_pack_instances": 500},
     }
 
 

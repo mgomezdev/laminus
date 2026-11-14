@@ -5,6 +5,8 @@ import os
 import re
 import struct
 import zipfile
+from typing import Optional
+from xml.sax.saxutils import quoteattr
 
 _NS_CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 _NS_PROD = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
@@ -130,18 +132,29 @@ def _object_model_xml(tris: list[tuple]) -> str:
     )
 
 
-def inject_stls_into_3mf(template_path: str, stl_paths: list[str], out_path: str) -> None:
+def inject_stls_into_3mf(
+    template_path: str,
+    stl_paths: list[str],
+    out_path: str,
+    names: Optional[list[str]] = None,
+) -> None:
     """Build a 3MF that carries settings from *template_path* and geometry from *stl_paths*.
 
     The template's Metadata/project_settings.config (with all printer fields) is preserved
     verbatim. All geometry in the template is discarded and replaced with fresh objects
     built from the supplied STL files. The result is ready for OrcaSlicer --arrange.
 
+    Each wrapper object gets a ``name`` attribute from *names* (same length as
+    *stl_paths*; default: the stem of each path's basename). A path repeated in
+    *stl_paths* is parsed once; each instance still gets its own object entry.
+
     Raises ValueError if the template lacks Metadata/project_settings.config.
     """
+    if names is not None and len(names) != len(stl_paths):
+        raise ValueError("names must have the same length as stl_paths")
     with zipfile.ZipFile(template_path, "r") as src:
-        names = src.namelist()
-        if "Metadata/project_settings.config" not in names:
+        member_names = src.namelist()
+        if "Metadata/project_settings.config" not in member_names:
             raise ValueError("Template 3MF is missing Metadata/project_settings.config")
         project_settings = src.read("Metadata/project_settings.config")
 
@@ -150,18 +163,25 @@ def inject_stls_into_3mf(template_path: str, stl_paths: list[str], out_path: str
     build_parts: list[str] = []
     rels_parts: list[str] = []
 
+    parsed: dict[str, bytes] = {}  # stl path -> object-model XML bytes (parse once)
+
     for i, stl_path in enumerate(stl_paths, start=1):
         stem = os.path.splitext(os.path.basename(stl_path))[0]
+        obj_name = names[i - 1] if names is not None else stem
         obj_path = f"3D/Objects/{stem}_{i}.model"
         wrapper_id = i * 2  # 2, 4, 6, … — matches OrcaSlicer component/wrapper pattern
 
-        tris = parse_stl_triangles(stl_path)
-        if not tris:
-            raise ValueError(f"No triangles found in '{os.path.basename(stl_path)}' (empty or unparseable STL)")
-        object_files[obj_path] = _object_model_xml(tris).encode("utf-8")
+        model_bytes = parsed.get(stl_path)
+        if model_bytes is None:
+            tris = parse_stl_triangles(stl_path)
+            if not tris:
+                raise ValueError(f"No triangles found in '{os.path.basename(stl_path)}' (empty or unparseable STL)")
+            model_bytes = _object_model_xml(tris).encode("utf-8")
+            parsed[stl_path] = model_bytes
+        object_files[obj_path] = model_bytes
 
         resources_parts.append(
-            f'  <object id="{wrapper_id}" type="model">\n'
+            f'  <object id="{wrapper_id}" type="model" name={quoteattr(obj_name)}>\n'
             f'   <components>\n'
             f'    <component p:path="/{obj_path}" objectid="1"'
             f' transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n'

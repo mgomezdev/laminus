@@ -330,6 +330,27 @@ curl -X POST http://localhost:5000/api/arrange \
 
 ---
 
+## Pack STLs (synchronous)
+
+```
+POST /api/pack        # alias: POST /api/v1/pack; multipart/form-data
+```
+
+Fields: `files` (1-50 `.stl`), `counts` (optional), plus one bed source (`template` | `machine_uuid`+`process_uuid`+`filament_uuids` | `bed_x`+`bed_y`+`bed_z`). Returns the packed multi-plate `.3mf`.
+
+- `counts`: JSON array of ints >= 1, same length/order as `files`; `counts[i]` copies of `files[i]`. Omitted = 1 each. Invalid shape or total over limit = 422.
+- Limit: total parts (sum of counts) <= `limits.max_pack_instances` (env `PACK_MAX_INSTANCES`, default 500). Distinct uploads still max 50.
+- Object names: each object in the output 3MF has `name` = uploaded filename stem (`bracket.stl` -> `bracket`), same for every copy and for duplicate filenames. Use it to map parts to plates.
+- Feature flags in `GET /api/v1`: `pack.counts`, `pack.names`.
+
+```bash
+curl -X POST http://localhost:5000/api/pack \
+  -F "files=@a.stl" -F "files=@b.stl" -F 'counts=[3,2]' \
+  -F bed_x=256 -F bed_y=256 -F bed_z=256 -o packed.3mf
+```
+
+---
+
 ## List objects with plate names and previews
 
 ```

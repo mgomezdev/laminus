@@ -52,6 +52,7 @@ ARRANGE_DIR = "/tmp/arrange"
 JOB_TTL = int(os.environ.get("JOB_TTL_SECONDS", "3600"))
 JOB_SWEEP_INTERVAL = int(os.environ.get("JOB_SWEEP_INTERVAL_SECONDS", "300"))
 MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "4"))
+PACK_MAX_INSTANCES = int(os.getenv("PACK_MAX_INSTANCES", "500"))  # total parts (sum of counts) per /api/pack
 THUMBNAIL_TIMEOUT = 120
 
 SYSTEM_PROFILES_DIR = os.environ.get("SYSTEM_PROFILES_DIR", "/opt/orcaslicer/resources/profiles")
@@ -1584,7 +1585,13 @@ def _build_bed_template_bytes(printable_area: list, printable_height: float) -> 
         "No profile catalog or template file needed — useful when you want geometry-only "
         "packing without print settings.\n\n"
         "## STL inputs\n\n"
-        "- `files` — one or more `.stl` files (max 50 per request)\n"
+        "- `files` — one or more `.stl` files (max 50 distinct uploads per request)\n"
+        "- `counts` — optional JSON array of positive integers, same length and order as `files`; "
+        "`counts[i]` copies of `files[i]` are packed (default 1 each). Total parts across all "
+        "counts is capped at `PACK_MAX_INSTANCES` (default 500; see `limits.max_pack_instances` "
+        "in `/api/v1`)\n"
+        "- Each part becomes a named object in the 3MF; the name is the uploaded filename stem "
+        "(e.g. `bracket.stl` -> `bracket`; same for every copy and for duplicate filenames)\n"
         "- Filenames must not contain null bytes, newlines, or semicolons\n"
         "- Duplicate filenames in the same batch are deduplicated with a numeric suffix\n\n"
         "## Notes\n\n"
@@ -1604,7 +1611,8 @@ def _build_bed_template_bytes(printable_area: list, printable_height: float) -> 
         408: {"description": "Pack operation timed out after 120 seconds"},
         422: {
             "description": (
-                "No STL files provided, more than 50 STLs, non-.stl file in files list, "
+                "No STL files provided, more than 50 STLs, invalid `counts` (not a JSON array of positive "
+                "integers matching `files`), total parts over the instance limit, non-.stl file in files list, "
                 "non-.3mf template, bed dimensions ≤ 0, invalid filament_uuids JSON, "
                 "UUID not found in catalog, or no settings source provided"
             ),
@@ -1623,15 +1631,44 @@ async def pack_stls(
     bed_x: Optional[float] = Form(None, description="Bed X dimension in mm (alternative to template / UUIDs)"),
     bed_y: Optional[float] = Form(None, description="Bed Y dimension in mm"),
     bed_z: Optional[float] = Form(None, description="Bed Z printable height in mm"),
+    counts: Optional[str] = Form(
+        None,
+        description='JSON array of positive integers, same length/order as `files`; '
+                    'counts[i] copies of files[i] are packed (default 1 each)',
+    ),
 ):
     if not files:
         raise HTTPException(status_code=422, detail="At least one STL file is required.")
     if len(files) > 50:
         raise HTTPException(status_code=422, detail="Maximum 50 STL files per request.")
 
+    if counts is None:
+        copies = [1] * len(files)
+    else:
+        try:
+            copies = json.loads(counts)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=422, detail="counts must be a JSON array of positive integers.")
+        if not isinstance(copies, list):
+            raise HTTPException(status_code=422, detail="counts must be a JSON array of positive integers.")
+        if len(copies) != len(files):
+            raise HTTPException(
+                status_code=422,
+                detail=f"counts must have one entry per file ({len(files)}); got {len(copies)}.",
+            )
+        if any(isinstance(c, bool) or not isinstance(c, int) or c < 1 for c in copies):
+            raise HTTPException(status_code=422, detail="counts entries must be integers >= 1.")
+    total_instances = sum(copies)
+    if total_instances > PACK_MAX_INSTANCES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Maximum {PACK_MAX_INSTANCES} parts per pack request; got {total_instances}.",
+        )
+
     # Validate STL filenames, deduplicating repeats within the batch with a numeric
     # suffix so two uploads named e.g. "bracket.stl" don't overwrite one another on disk.
     safe_names: list[str] = []
+    object_stems: list[str] = []  # original sanitized stem, before the duplicate suffix
     seen_counts: dict[str, int] = {}
     for f in files:
         try:
@@ -1640,6 +1677,7 @@ async def pack_stls(
             raise HTTPException(status_code=400, detail=str(e))
         if not name.lower().endswith(".stl"):
             raise HTTPException(status_code=422, detail=f"Only .stl files accepted; got: {name}")
+        object_stems.append(os.path.splitext(name)[0])
         count = seen_counts.get(name, 0)
         seen_counts[name] = count + 1
         if count:
@@ -1751,16 +1789,18 @@ async def pack_stls(
 
         # Write uploaded STLs
         stl_paths: list[str] = []
-        for f, name in zip(files, safe_names):
+        object_names: list[str] = []
+        for f, name, stem, n_copies in zip(files, safe_names, object_stems, copies):
             dest = os.path.join(input_dir, name)
             with open(dest, "wb") as buf:
                 await asyncio.to_thread(shutil.copyfileobj, f.file, buf)
-            stl_paths.append(dest)
+            stl_paths.extend([dest] * n_copies)
+            object_names.extend([stem] * n_copies)
 
         # Inject STL geometry into the template (preserves project_settings.config)
         combined_3mf = os.path.join(input_dir, "combined.3mf")
         try:
-            await asyncio.to_thread(_inject_stls_into_3mf, template_path, stl_paths, combined_3mf)
+            await asyncio.to_thread(_inject_stls_into_3mf, template_path, stl_paths, combined_3mf, names=object_names)
         except ValueError as e:
             background_tasks.add_task(cleanup_directory, job_dir)
             raise HTTPException(status_code=422, detail=str(e))
