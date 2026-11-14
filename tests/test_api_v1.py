@@ -57,13 +57,13 @@ def test_request_id_echoed():
     assert r.headers["X-Request-ID"] == "abc-123"
 
 
-def test_error_envelope_on_v1_but_legacy_shape_unchanged():
+def test_error_envelope_on_v1_and_retired_legacy_path():
     v1 = client.get("/api/v1/jobs/nope")
     assert v1.status_code == 404
     assert v1.json()["error"] == {"code": "job_not_found", "message": "Job not found.", "status": 404}
     assert v1.json()["request_id"] == v1.headers["X-Request-ID"]
     legacy = client.get("/api/slice/status/nope")
-    assert legacy.status_code == 404 and legacy.json() == {"detail": "Job not found."}
+    assert legacy.status_code == 404 and legacy.json() == {"detail": "Not Found"}
 
 
 def test_validation_errors_are_enveloped():
@@ -156,22 +156,8 @@ def test_profiles_catalog_not_ready_has_retry_after():
     assert r.json()["error"]["code"] == "catalog_not_ready"
 
 
-def test_legacy_routes_have_no_deprecation_headers_by_default(monkeypatch):
-    monkeypatch.delenv("LEGACY_DEPRECATION_HEADERS", raising=False)
-    r = client.get("/api/jobs")
-    assert r.status_code == 200 and r.json() == {"jobs": []}
-    assert "Deprecation" not in r.headers and "Link" not in r.headers
 
 
-def test_legacy_routes_carry_deprecation_headers_when_enabled(monkeypatch):
-    monkeypatch.setenv("LEGACY_DEPRECATION_HEADERS", "true")
-    r = client.get("/api/jobs")
-    assert r.status_code == 200 and r.json() == {"jobs": []}  # body unchanged
-    assert r.headers["Deprecation"] == "true"
-    assert r.headers["Link"] == '</api/v1/jobs>; rel="successor-version"'
-    health = client.get("/api/health")
-    assert health.headers["Link"] == '</api/v1/health>; rel="successor-version"'
-    assert "Deprecation" not in client.get("/api/v1/jobs").headers
 
 
 # ------------------------------------------------------------ idempotency
@@ -247,16 +233,8 @@ def test_project_routes_exist_under_v1_with_enveloped_errors():
     assert "error" in r.json()
 
 
-def test_every_legacy_mapping_points_at_a_real_v1_route():
-    paths = {r.path for r in main_mod.app.routes}
-    for old, new in api_v1.LEGACY_TO_V1.items():
-        assert old in paths and new in paths, (old, new)
 
 
-def test_every_alias_is_served_under_v1():
-    have = {(m, r.path) for r in main_mod.app.routes if hasattr(r, "methods") for m in r.methods}
-    for _old, method, new, _tag, _summary in api_v1.V1_ALIASES:
-        assert (method, new) in have, (method, new)
 
 
 def test_v1_health_and_literal_profile_paths_beat_uuid_route():

@@ -1,4 +1,4 @@
-"""Tests for POST /api/slice/thumbnail."""
+"""Tests for POST /api/v1/slice/thumbnail."""
 import io
 import zipfile
 from unittest.mock import AsyncMock, patch
@@ -54,7 +54,7 @@ def test_thumbnail_returns_png():
     client = TestClient(app)
     with patch("asyncio.create_subprocess_exec", new=_mock_slicer_ok):
         resp = client.post(
-            "/api/slice/thumbnail",
+            "/api/v1/slice/thumbnail",
             files={"file": ("model.3mf", _make_3mf(), "application/octet-stream")},
             data={"plate": "1"},
         )
@@ -68,7 +68,7 @@ def test_thumbnail_fallback_to_plate_1():
     client = TestClient(app)
     with patch("asyncio.create_subprocess_exec", new=_mock_slicer_plate1_only):
         resp = client.post(
-            "/api/slice/thumbnail",
+            "/api/v1/slice/thumbnail",
             files={"file": ("model.3mf", _make_3mf(), "application/octet-stream")},
             data={"plate": "2"},
         )
@@ -80,18 +80,18 @@ def test_thumbnail_422_on_nonzero_exit():
     client = TestClient(app)
     with patch("asyncio.create_subprocess_exec", new=_mock_slicer_fail):
         resp = client.post(
-            "/api/slice/thumbnail",
+            "/api/v1/slice/thumbnail",
             files={"file": ("model.3mf", _make_3mf(), "application/octet-stream")},
             data={"plate": "1"},
         )
     assert resp.status_code == 422
-    assert "error" in resp.json()["detail"]
+    assert "error" in resp.json()["error"]["details"]
 
 
 def test_thumbnail_rejects_non_3mf():
     client = TestClient(app)
     resp = client.post(
-        "/api/slice/thumbnail",
+        "/api/v1/slice/thumbnail",
         files={"file": ("model.stl", b"solid test\nendsolid", "application/octet-stream")},
         data={"plate": "1"},
     )
@@ -101,7 +101,7 @@ def test_thumbnail_rejects_non_3mf():
 def test_thumbnail_rejects_plate_zero():
     client = TestClient(app)
     resp = client.post(
-        "/api/slice/thumbnail",
+        "/api/v1/slice/thumbnail",
         files={"file": ("model.3mf", _make_3mf(), "application/octet-stream")},
         data={"plate": "0"},
     )

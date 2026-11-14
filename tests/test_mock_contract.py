@@ -61,7 +61,7 @@ def client(request):
         tc = TestClient(_real_app, raise_server_exceptions=False)
         # Catalog builds in the background; poll until ready (or give up quickly).
         for _ in range(20):
-            health = tc.get("/api/health").json()
+            health = tc.get("/api/v1/health").json()
             if health.get("catalog_loaded"):
                 break
             if not health.get("catalog_building"):
@@ -81,8 +81,8 @@ HEALTH_FIELDS = {"status", "orca_version", "catalog_loaded", "catalog_building",
 MACHINE_FIELDS = {"uuid", "name", "manufacturer", "model", "nozzle", "bed_size_x", "bed_size_y", "extruder_count"}
 PROCESS_FIELDS = {"uuid", "name", "layer_height", "compatible_printers"}
 FILAMENT_FIELDS = {"uuid", "name", "filament_type", "compatible_printers"}
-SLICE_START_FIELDS = {"job_id", "status"}
-SLICE_STATUS_FIELDS = {"job_id", "status", "output_format", "sliced_file", "error"}
+SLICE_START_FIELDS = {"id", "status"}
+SLICE_STATUS_FIELDS = {"id", "status", "output_format", "artifact", "error"}
 KNOWN_PROFILE_FIELDS = {"machine_uuid", "machine_name", "process_uuid", "process_name", "filament_uuid", "filament_name"}
 
 
@@ -116,14 +116,14 @@ def _minimal_3mf() -> bytes:
 
 
 def _known_profile(client: TestClient) -> dict:
-    r = client.get("/api/test/known-profile")
+    r = client.get("/api/v1/test/known-profile")
     assert r.status_code == 200
     return r.json()
 
 
 def _start_job(client: TestClient, kp: dict) -> str:
     r = client.post(
-        "/api/slice/start",
+        "/api/v1/jobs",
         files={"file": ("m.stl", _stl(), "application/octet-stream")},
         data={
             "machine_uuid": kp["machine_uuid"],
@@ -132,8 +132,8 @@ def _start_job(client: TestClient, kp: dict) -> str:
             "plate": "1",
         },
     )
-    assert r.status_code == 200, f"slice/start failed: {r.text[:200]}"
-    return r.json()["job_id"]
+    assert r.status_code == 202, f"jobs create failed: {r.text[:200]}"
+    return r.json()["id"]
 
 
 # ---------------------------------------------------------------------------
@@ -141,16 +141,16 @@ def _start_job(client: TestClient, kp: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def test_health_200(client):
-    assert client.get("/api/health").status_code == 200
+    assert client.get("/api/v1/health").status_code == 200
 
 
 def test_health_fields(client):
-    data = client.get("/api/health").json()
+    data = client.get("/api/v1/health").json()
     assert not _missing(HEALTH_FIELDS, data), _missing(HEALTH_FIELDS, data)
 
 
 def test_health_catalog_ready(client):
-    data = client.get("/api/health").json()
+    data = client.get("/api/v1/health").json()
     assert data["catalog_loaded"] is True
     assert data["catalog_building"] is False
     assert isinstance(data["active_jobs"], int)
@@ -161,49 +161,47 @@ def test_health_catalog_ready(client):
 # ---------------------------------------------------------------------------
 
 def test_profiles_top_level_keys(client):
-    data = client.get("/api/profiles").json()
-    assert {"machine", "process", "filament"} <= data.keys()
+    data = client.get("/api/v1/profiles").json()
+    assert {"data", "page"} <= data.keys()
 
 
 def test_profiles_non_empty(client):
-    data = client.get("/api/profiles").json()
-    assert len(data["machine"]) >= 1
-    assert len(data["process"]) >= 1
-    assert len(data["filament"]) >= 1
+    data = client.get("/api/v1/profiles").json()
+    assert {p["type"] for p in data["data"]} >= {"machine", "process", "filament"}
 
 
 def test_profiles_machine_fields(client):
-    m = client.get("/api/profiles").json()["machine"][0]
+    m = client.get("/api/v1/profiles", params={"type": "machine"}).json()["data"][0]
     assert not _missing(MACHINE_FIELDS, m), _missing(MACHINE_FIELDS, m)
 
 
 def test_profiles_process_fields(client):
-    p = client.get("/api/profiles").json()["process"][0]
+    p = client.get("/api/v1/profiles", params={"type": "process"}).json()["data"][0]
     assert not _missing(PROCESS_FIELDS, p), _missing(PROCESS_FIELDS, p)
 
 
 def test_profiles_filament_fields(client):
-    f = client.get("/api/profiles").json()["filament"][0]
+    f = client.get("/api/v1/profiles", params={"type": "filament"}).json()["data"][0]
     assert not _missing(FILAMENT_FIELDS, f), _missing(FILAMENT_FIELDS, f)
 
 
 def test_profile_detail_by_uuid(client):
     kp = _known_profile(client)
     for uid in (kp["machine_uuid"], kp["process_uuid"], kp["filament_uuid"]):
-        r = client.get(f"/api/profiles/{uid}")
+        r = client.get(f"/api/v1/profiles/{uid}")
         assert r.status_code == 200
         assert r.json()["uuid"] == uid
 
 
 def test_profile_detail_404(client):
-    assert client.get("/api/profiles/no-such-uuid").status_code == 404
+    assert client.get("/api/v1/profiles/no-such-uuid").status_code == 404
 
 
 def test_profiles_broken_fields(client):
-    """Regression: /api/profiles/broken must be registered before
-    /api/profiles/{profile_uuid} - if that ordering regresses, this 404s (swallowed as a
+    """Regression: /api/v1/profiles/broken must be registered before
+    /api/v1/profiles/{profile_uuid} - if that ordering regresses, this 404s (swallowed as a
     UUID lookup) instead of 200ing."""
-    r = client.get("/api/profiles/broken")
+    r = client.get("/api/v1/profiles/broken")
     assert r.status_code == 200
     body = r.json()
     assert "count" in body and "broken" in body
@@ -211,7 +209,7 @@ def test_profiles_broken_fields(client):
 
 
 def test_profiles_rescan_starts(client):
-    r = client.post("/api/profiles/rescan")
+    r = client.post("/api/v1/profiles/rescan")
     assert r.status_code == 200
     assert "status" in r.json()
 
@@ -219,7 +217,7 @@ def test_profiles_rescan_starts(client):
 def test_merged_config_returns_dict(client):
     kp = _known_profile(client)
     r = client.post(
-        "/api/profiles/merged-config",
+        "/api/v1/profiles/merged-config",
         json={
             "machine_uuid": kp["machine_uuid"],
             "process_uuid": kp["process_uuid"],
@@ -236,7 +234,7 @@ def test_merged_config_returns_dict(client):
 # ---------------------------------------------------------------------------
 
 def test_known_profile_fields(client):
-    r = client.get("/api/test/known-profile")
+    r = client.get("/api/v1/test/known-profile")
     assert r.status_code == 200
     assert not _missing(KNOWN_PROFILE_FIELDS, r.json()), _missing(KNOWN_PROFILE_FIELDS, r.json())
 
@@ -244,20 +242,20 @@ def test_known_profile_fields(client):
 def test_known_profile_uuids_in_catalog(client):
     kp = _known_profile(client)
     for field, uid in [("machine_uuid", kp["machine_uuid"]), ("process_uuid", kp["process_uuid"]), ("filament_uuid", kp["filament_uuid"])]:
-        r = client.get(f"/api/profiles/{uid}")
+        r = client.get(f"/api/v1/profiles/{uid}")
         assert r.status_code == 200, f"{field} {uid!r} not in catalog"
 
 
 def test_known_profile_by_machine_name(client):
     """Requesting the default machine by name returns that same triple."""
     default = _known_profile(client)
-    r = client.get("/api/test/known-profile", params={"machine_name": default["machine_name"]})
+    r = client.get("/api/v1/test/known-profile", params={"machine_name": default["machine_name"]})
     assert r.status_code == 200
     assert r.json() == default
 
 
 def test_known_profile_unknown_machine_name_404s(client):
-    r = client.get("/api/test/known-profile", params={"machine_name": "No Such Printer Ever"})
+    r = client.get("/api/v1/test/known-profile", params={"machine_name": "No Such Printer Ever"})
     assert r.status_code == 404
 
 
@@ -268,7 +266,7 @@ def test_known_profile_unknown_machine_name_404s(client):
 def test_slice_start_fields(client):
     kp = _known_profile(client)
     r = client.post(
-        "/api/slice/start",
+        "/api/v1/jobs",
         files={"file": ("m.stl", _stl(), "application/octet-stream")},
         data={
             "machine_uuid": kp["machine_uuid"],
@@ -277,7 +275,7 @@ def test_slice_start_fields(client):
             "plate": "1",
         },
     )
-    assert r.status_code == 200
+    assert r.status_code == 202
     assert not _missing(SLICE_START_FIELDS, r.json())
 
 
@@ -292,7 +290,7 @@ def test_slice_start_rejects_unsafe_export_3mf(client, export_name):
     rejects the identical request."""
     kp = _known_profile(client)
     r = client.post(
-        "/api/slice/start",
+        "/api/v1/jobs",
         files={"file": ("m.stl", _stl(), "application/octet-stream")},
         data={
             "machine_uuid": kp["machine_uuid"],
@@ -307,7 +305,7 @@ def test_slice_start_rejects_unsafe_export_3mf(client, export_name):
 
 def test_slice_prepared_fields(client):
     r = client.post(
-        "/api/slice/prepared",
+        "/api/v1/slice/prepared",
         files={"file": ("m.3mf", _minimal_3mf(), "application/octet-stream")},
         data={"plate": "1"},
     )
@@ -317,7 +315,7 @@ def test_slice_prepared_fields(client):
 
 def test_slice_prepared_rejects_unsafe_export_3mf(client):
     r = client.post(
-        "/api/slice/prepared",
+        "/api/v1/slice/prepared",
         files={"file": ("m.3mf", _minimal_3mf(), "application/octet-stream")},
         data={"plate": "1", "export_3mf": "../../../data/jobs.json"},
     )
@@ -329,7 +327,7 @@ def test_slice_status_fields(client):
     job_id = _start_job(client, kp)
     # Poll until terminal (mock completes instantly; real may need retries)
     for _ in range(30):
-        r = client.get(f"/api/slice/status/{job_id}")
+        r = client.get(f"/api/v1/jobs/{job_id}")
         assert r.status_code == 200
         data = r.json()
         assert not _missing(SLICE_STATUS_FIELDS, data)
@@ -344,16 +342,16 @@ def test_slice_download_returns_bytes(client):
     job_id = _start_job(client, kp)
     # Wait for completion
     for _ in range(30):
-        r = client.get(f"/api/slice/status/{job_id}")
+        r = client.get(f"/api/v1/jobs/{job_id}")
         if r.json().get("status") == "completed":
             break
-    r = client.get(f"/api/slice/download/{job_id}")
+    r = client.get(f"/api/v1/jobs/{job_id}/artifact")
     assert r.status_code == 200
     assert len(r.content) > 0
 
 
 def test_slice_status_404_unknown(client):
-    assert client.get("/api/slice/status/nonexistent-id-xyz").status_code == 404
+    assert client.get("/api/v1/jobs/nonexistent-id-xyz").status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +360,7 @@ def test_slice_status_404_unknown(client):
 
 def test_pack_returns_zip(client):
     r = client.post(
-        "/api/pack",
+        "/api/v1/pack",
         files=[("files", ("m.stl", _stl(), "application/octet-stream"))],
         data={"bed_x": "200", "bed_y": "200", "bed_z": "200"},
     )
@@ -372,7 +370,7 @@ def test_pack_returns_zip(client):
 
 def test_arrange_returns_zip(client):
     r = client.post(
-        "/api/arrange",
+        "/api/v1/arrange",
         files={"file": ("m.3mf", _minimal_3mf(), "application/octet-stream")},
         data={"arrange": "true", "orient": "true"},
     )
@@ -390,16 +388,16 @@ PRESET_FIELDS = {"ref", "uuid", "name", "kind"}
 
 
 def _model_query(client: TestClient) -> dict:
-    m = next(m for m in client.get("/api/profiles").json()["machine"] if m.get("manufacturer") and m.get("model"))
+    m = next(m for m in client.get("/api/v1/profiles", params={"type": "machine"}).json()["data"] if m.get("manufacturer") and m.get("model"))
     return {"manufacturer": m["manufacturer"], "model": m["model"]}
 
 
 def _suggested_ref(client: TestClient) -> str:
-    return client.post("/api/profiles/machines/suggest", json=_model_query(client)).json()["candidates"][0]["ref"]
+    return client.post("/api/v1/profiles/machines/suggest", json=_model_query(client)).json()["candidates"][0]["ref"]
 
 
 def test_neutral_suggest_fields_and_version_header(client):
-    r = client.post("/api/profiles/machines/suggest", json=_model_query(client))
+    r = client.post("/api/v1/profiles/machines/suggest", json=_model_query(client))
     assert r.status_code == 200
     body = r.json()
     assert r.headers["X-Catalog-Version"] == body["catalog_version"]
@@ -409,42 +407,42 @@ def test_neutral_suggest_fields_and_version_header(client):
 
 
 def test_neutral_suggest_no_match_is_empty(client):
-    r = client.post("/api/profiles/machines/suggest", json={"manufacturer": "Nobody", "model": "Zzz9000"})
+    r = client.post("/api/v1/profiles/machines/suggest", json={"manufacturer": "Nobody", "model": "Zzz9000"})
     assert r.status_code == 200 and r.json()["candidates"] == []
 
 
 def test_neutral_variants_one_default(client):
-    v = client.post("/api/profiles/models/variants", json=_model_query(client)).json()["variants"]
+    v = client.post("/api/v1/profiles/models/variants", json=_model_query(client)).json()["variants"]
     assert v and not _missing(VARIANT_FIELDS, v[0])
     assert sum(x["is_default_guess"] for x in v) == 1
 
 
 def test_neutral_presets_fields_and_kind_filter(client):
     ref = _suggested_ref(client)
-    presets = client.get(f"/api/profiles/machines/{ref}/presets").json()["presets"]
+    presets = client.get(f"/api/v1/profiles/machines/{ref}/presets").json()["presets"]
     assert {p["kind"] for p in presets} == {"process", "filament"}
     assert not _missing(PRESET_FIELDS, presets[0])
-    only = client.get(f"/api/profiles/machines/{ref}/presets?kind=process").json()["presets"]
+    only = client.get(f"/api/v1/profiles/machines/{ref}/presets?kind=process").json()["presets"]
     assert only and {p["kind"] for p in only} == {"process"}
 
 
 def test_neutral_presets_unknown_ref_404(client):
-    r = client.get("/api/profiles/machines/machine:nope/presets")
+    r = client.get("/api/v1/profiles/machines/machine:nope/presets")
     assert r.status_code == 404 and r.json()["error"] == "unknown_machine_ref"
 
 
 def test_neutral_supports(client):
     ref = _suggested_ref(client)
-    ok = client.get(f"/api/profiles/machines/{ref}/supports").json()
+    ok = client.get(f"/api/v1/profiles/machines/{ref}/supports").json()
     assert ok["supported"] is True and ok["reason"] is None
-    bad = client.get(f"/api/profiles/machines/{ref}/supports?bed_x=1&bed_y=1").json()
+    bad = client.get(f"/api/v1/profiles/machines/{ref}/supports?bed_x=1&bed_y=1").json()
     assert bad["reason"] == "bed_mismatch"
-    unk = client.get("/api/profiles/machines/machine:nope/supports")
+    unk = client.get("/api/v1/profiles/machines/machine:nope/supports")
     assert unk.status_code == 200 and unk.json()["reason"] == "unknown_machine_ref"
 
 
 # ---------------------------------------------------------------------------
-# /api/v1
+# /api/v1/v1
 # ---------------------------------------------------------------------------
 
 JOB_VIEW_FIELDS = {"id", "status", "filename", "output_format", "error", "artifact", "links"}
@@ -590,6 +588,11 @@ def test_v1_slice_prepared(client):
     r = client.post("/api/v1/slice/prepared",
                     files={"file": ("m.3mf", _minimal_3mf(), "application/octet-stream")}, data={"plate": "1"})
     assert r.status_code == 200 and "job_id" in r.json()
+    job_id = r.json()["job_id"]
+    view = client.get(f"/api/v1/jobs/{job_id}")
+    assert view.status_code == 200 and view.json()["status"] == "completed"
+    artifact = client.get(f"/api/v1/jobs/{job_id}/artifact")
+    assert artifact.status_code == 200 and artifact.content
 
 
 def test_v1_pack_and_arrange_return_zip(client):

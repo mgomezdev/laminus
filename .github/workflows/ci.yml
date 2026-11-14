@@ -51,6 +51,12 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt pytest pytest-asyncio httpx
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Verify dashboard v1 integration
+        run: node --test tests/test_dashboard_v1.mjs
+
       # mock/orca_cli.py stands in for the real 200 MB AppImage so the suite
       # never downloads it. tests/test_mock_contract.py separately asserts the
       # HTTP mock and the real app satisfy identical contracts -- which is what
@@ -67,6 +73,30 @@ jobs:
           CONFIG_DIR: /tmp/laminus-test-config
           DATA_DIR: /tmp/laminus-test-data
         run: pytest tests/ -v -ra
+
+  # Browser e2e for the dashboard: the real app (uvicorn) against mock/orca_cli.py,
+  # driven through Chromium. e2e/conftest.py shims orcaslicer + xvfb-run itself.
+  e2e-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            e2e/requirements.txt
+      - run: pip install -r requirements.txt -r e2e/requirements.txt
+      - run: python -m playwright install --with-deps chromium
+      - run: pytest e2e -v -ra --tracing retain-on-failure
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-traces
+          path: test-results/
+          retention-days: 7
 
   # Build the mock image this change produces and hand it to the cross-service
   # suite. Themis's e2e runs entirely against this mock, so a change that breaks
@@ -98,7 +128,7 @@ jobs:
           path: /tmp/laminus-mock-ci.tar
           retention-days: 1
 
-  # Ordinus is not started: it never talks to Laminus.
+  # Core checks Themis with the mock built above; Ordinus has its own integration gate.
   e2e-core:
     needs: [mock-image]
     # A called workflow's token is capped by the caller's; Concordia's e2e logs
@@ -108,9 +138,8 @@ jobs:
       packages: read
     uses: mgomezdev/concordia/.github/workflows/e2e.yml@main
     with:
-      # PRs onto develop run Concordia's develop suite. Kept as one job (not a
-      # separate @develop one) so the required check stays "e2e-core / e2e".
-      concordia_ref: ${{ (github.base_ref == 'develop' || github.ref_name == 'develop') && 'develop' || 'main' }}
+      # Concordia has no develop branch; its maintained integration suite is on main.
+      concordia_ref: main
       profile: core
       image_artifact: laminus-mock-ci-image
       mock_laminus_image: laminus-mock:ci
@@ -119,7 +148,7 @@ jobs:
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
   publish:
-    needs: [spec, test, mock-image, e2e-core]
+    needs: [spec, test, e2e-ui, mock-image, e2e-core]
     # develop pushes run the checks but don't publish images
     if: github.event_name == 'push' && github.ref != 'refs/heads/develop'
     runs-on: ubuntu-latest

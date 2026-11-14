@@ -10,7 +10,9 @@ Supported invocations:
   orcaslicer --datadir DIR --export-3mf PATH [--arrange N] [--orient N] INPUT
 """
 import os
+import re
 import sys
+import time
 import zipfile
 
 # Minimal 1×1 red PNG (37 bytes)
@@ -60,6 +62,21 @@ def main():
 
     if "--slice" in args:
         plate = int(_get(args, "--slice") or 1)
+        # e2e hooks, keyed on the plate the client requested (the plate is the only knob a
+        # client controls): slicing MOCK_ORCA_SLOW_PLATE takes MOCK_ORCA_SLICE_DELAY
+        # seconds, slicing MOCK_ORCA_FAIL_PLATE fails. Laminus extracts the requested plate
+        # into "<input>_plate<N>.3mf" and always slices it as plate 1, so read N from there.
+        m = re.search(r"_plate(\d+)\.3mf$", args[-1]) if args else None
+        if m:
+            plate = int(m.group(1))
+        delay = float(os.environ.get("MOCK_ORCA_SLICE_DELAY", "0"))
+        if delay and os.environ.get("MOCK_ORCA_SLOW_PLATE") == str(plate):
+            for step in range(1, 4):
+                print(f"mock: slicing step {step}/3", flush=True)
+                time.sleep(delay / 3)
+        if os.environ.get("MOCK_ORCA_FAIL_PLATE") == str(plate):
+            print("mock: ERROR slicing failed: mesh is not manifold", flush=True)
+            sys.exit(1)
         if output_dir and export_3mf:
             # Slice → 3MF: outputdir/export_3mf (relative name)
             _write_3mf(os.path.join(output_dir, export_3mf))

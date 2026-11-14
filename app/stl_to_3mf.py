@@ -5,8 +5,10 @@ import os
 import re
 import struct
 import zipfile
-from typing import Optional
-from xml.sax.saxutils import quoteattr
+
+from app.project_config_builder import (
+    ensure_extruder_reset_per_layer, normalize_filament_ids, replace_bambu_auto_sentinels,
+)
 
 _NS_CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 _NS_PROD = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
@@ -111,13 +113,13 @@ def parse_stl_triangles(path: str) -> list[tuple]:
     return _parse_binary(path) if _is_binary(path) else _parse_ascii(path)
 
 
-def _object_model_xml(tris: list[tuple]) -> str:
-    """Build a 3D/Objects/*.model XML string for a single mesh (internal id always 1)."""
+def _object_model_xml(tris: list[tuple], object_id: int = 1) -> str:
+    """Build a 3D/Objects/*.model XML string for a single mesh."""
     verts, tris_xml = _mesh_body(tris, "     ")
     return (
         _OBJ_MODEL_HEADER
         + ' <resources>\n'
-          '  <object id="1" type="model">\n'
+        + f'  <object id="{object_id}" type="model">\n'
           '   <mesh>\n'
           '    <vertices>\n'
         + verts
@@ -136,7 +138,7 @@ def inject_stls_into_3mf(
     template_path: str,
     stl_paths: list[str],
     out_path: str,
-    names: Optional[list[str]] = None,
+    quantities: list[int] | None = None,
 ) -> None:
     """Build a 3MF that carries settings from *template_path* and geometry from *stl_paths*.
 
@@ -144,17 +146,20 @@ def inject_stls_into_3mf(
     verbatim. All geometry in the template is discarded and replaced with fresh objects
     built from the supplied STL files. The result is ready for OrcaSlicer --arrange.
 
-    Each wrapper object gets a ``name`` attribute from *names* (same length as
-    *stl_paths*; default: the stem of each path's basename). A path repeated in
-    *stl_paths* is parsed once; each instance still gets its own object entry.
+    *quantities* (aligned with *stl_paths*, default 1 each) yields that many build items per
+    STL; all copies of one STL reference a single shared mesh file.
 
-    Raises ValueError if the template lacks Metadata/project_settings.config.
+    Raises ValueError if the template lacks Metadata/project_settings.config, or if
+    *quantities* does not match *stl_paths* in length.
     """
-    if names is not None and len(names) != len(stl_paths):
-        raise ValueError("names must have the same length as stl_paths")
+    if quantities is None:
+        quantities = [1] * len(stl_paths)
+    if len(quantities) != len(stl_paths):
+        raise ValueError("quantities must have the same length as stl_paths")
+
     with zipfile.ZipFile(template_path, "r") as src:
-        member_names = src.namelist()
-        if "Metadata/project_settings.config" not in member_names:
+        names = src.namelist()
+        if "Metadata/project_settings.config" not in names:
             raise ValueError("Template 3MF is missing Metadata/project_settings.config")
         project_settings = src.read("Metadata/project_settings.config")
 
@@ -163,32 +168,27 @@ def inject_stls_into_3mf(
     build_parts: list[str] = []
     rels_parts: list[str] = []
 
-    parsed: dict[str, bytes] = {}  # stl path -> object-model XML bytes (parse once)
-
-    for i, stl_path in enumerate(stl_paths, start=1):
+    wrapper_id = 0
+    for i, (stl_path, qty) in enumerate(zip(stl_paths, quantities), start=1):
         stem = os.path.splitext(os.path.basename(stl_path))[0]
-        obj_name = names[i - 1] if names is not None else stem
         obj_path = f"3D/Objects/{stem}_{i}.model"
-        wrapper_id = i * 2  # 2, 4, 6, … — matches OrcaSlicer component/wrapper pattern
 
-        model_bytes = parsed.get(stl_path)
-        if model_bytes is None:
-            tris = parse_stl_triangles(stl_path)
-            if not tris:
-                raise ValueError(f"No triangles found in '{os.path.basename(stl_path)}' (empty or unparseable STL)")
-            model_bytes = _object_model_xml(tris).encode("utf-8")
-            parsed[stl_path] = model_bytes
-        object_files[obj_path] = model_bytes
+        tris = parse_stl_triangles(stl_path)
+        if not tris:
+            raise ValueError(f"No triangles found in '{os.path.basename(stl_path)}' (empty or unparseable STL)")
+        object_files[obj_path] = _object_model_xml(tris, i).encode("utf-8")
 
-        resources_parts.append(
-            f'  <object id="{wrapper_id}" type="model" name={quoteattr(obj_name)}>\n'
-            f'   <components>\n'
-            f'    <component p:path="/{obj_path}" objectid="1"'
-            f' transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n'
-            f'   </components>\n'
-            f'  </object>'
-        )
-        build_parts.append(f'  <item objectid="{wrapper_id}" printable="1"/>')
+        for _ in range(qty):
+            wrapper_id += 2  # 2, 4, 6, … — matches OrcaSlicer component/wrapper pattern
+            resources_parts.append(
+                f'  <object id="{wrapper_id}" type="model">\n'
+                f'   <components>\n'
+                f'    <component p:path="/{obj_path}" objectid="{i}"'
+                f' transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n'
+                f'   </components>\n'
+                f'  </object>'
+            )
+            build_parts.append(f'  <item objectid="{wrapper_id}" printable="1"/>')
         rels_parts.append(
             f' <Relationship Target="/{obj_path}" Id="rel-{i}"'
             f' Type="{_REL_TYPE_3D}"/>'
@@ -233,35 +233,235 @@ _VERSION_META_RE = re.compile(
 )
 
 
-def strip_application_version(src_path: str, dst_path: str) -> None:
+# Uncompressed-size ceiling for a 3MF we rewrite in memory (decompression-bomb guard).
+MAX_3MF_UNCOMPRESSED_BYTES = int(os.environ.get("MAX_3MF_UNCOMPRESSED_BYTES", 2 * 1024**3))
+
+
+def strip_application_version(src_path: str, dst_path: str, fix_settings: bool = True) -> list[str]:
     """Copy *src_path* to *dst_path* with two fixes for OrcaSlicer Linux slice bugs:
 
     1. Remove version-bearing metadata tags from .model files to avoid segfaults
        (triggered by Application/OrcaSlicer metadata in both v2.3.x and v2.4.x).
 
-    2. If project_settings.config has ``use_relative_e_distances = "1"`` but an
-       empty ``layer_gcode``, override to ``"0"`` so OrcaSlicer generates M82 +
-       absolute E values — correct for machines whose start-gcode uses M83 only
-       for purge lines before handing off to the slicer's generated print body.
+    2. Add the per-layer ``G92 E0`` OrcaSlicer requires for relative extrusion when
+       project_settings.config lacks it (see ``ensure_extruder_reset_per_layer``).
+       Also repairs ``filament_ids`` (see ``normalize_filament_ids``), whose absence
+       segfaults ``--export-3mf``, and replaces Bambu "-1 = auto" values Orca rejects
+       (see ``replace_bambu_auto_sentinels``).
+       Skipped when *fix_settings* is False (e.g. arrange, whose output keeps its settings).
+
+    Returns a note per rewritten setting value, for the job log.
     """
     import json as _json
 
+    notes: list[str] = []
     with zipfile.ZipFile(src_path, "r") as src:
+        infos = src.infolist()
+        if len({i.filename for i in infos}) != len(infos):
+            raise ValueError("3MF contains duplicate entry names")
+        budget = MAX_3MF_UNCOMPRESSED_BYTES  # enforced on bytes actually decompressed, not zip headers
         with zipfile.ZipFile(dst_path, "w", compression=zipfile.ZIP_DEFLATED) as dst:
-            for item in src.infolist():
-                data = src.read(item.filename)
+            for item in infos:
+                chunks = []
+                with src.open(item) as fh:
+                    while chunk := fh.read(1024 * 1024):
+                        budget -= len(chunk)
+                        if budget < 0:
+                            raise ValueError(f"3MF expands past {MAX_3MF_UNCOMPRESSED_BYTES} bytes")
+                        chunks.append(chunk)
+                data = b"".join(chunks)
                 if item.filename.endswith(".model"):
                     text = data.decode("utf-8", errors="replace")
                     text = _VERSION_META_RE.sub("", text)
                     data = text.encode("utf-8")
-                elif item.filename == "Metadata/project_settings.config":
+                elif fix_settings and item.filename == "Metadata/project_settings.config":
                     try:
                         cfg = _json.loads(data.decode("utf-8"))
-                        if cfg.get("use_relative_e_distances") == "1":
-                            lg = cfg.get("layer_gcode", "")
-                            if not lg or "G92" not in str(lg):
-                                cfg["use_relative_e_distances"] = "0"
-                                data = _json.dumps(cfg, ensure_ascii=False, indent=2).encode("utf-8")
+                        changed = normalize_filament_ids(cfg)
+                        changed = ensure_extruder_reset_per_layer(cfg) or changed
+                        sentinel_notes = replace_bambu_auto_sentinels(cfg)
+                        if changed or sentinel_notes:
+                            data = _json.dumps(cfg, ensure_ascii=False, indent=2).encode("utf-8")
+                            notes.extend(sentinel_notes)
                     except Exception:
                         pass
                 dst.writestr(item, data)
+    return notes
+
+
+def stl_min_z(stl_path: str) -> float:
+    """Lowest Z coordinate of an STL's vertices (0.0 if it has no triangles)."""
+    tris = parse_stl_triangles(stl_path)
+    return min((v[2] for tri in tris for v in tri), default=0.0)
+
+
+_BUILD_ITEM_RE = re.compile(r'(<item\b[^>]*?\btransform=")([^"]*)(")')
+
+
+def restore_build_item_z(packed_path: str, z_offsets: list[float]) -> None:
+    """Add z_offsets[k] to the Z translation of the build item for input instance k.
+
+    OrcaSlicer re-seats every object at min Z = 0 on load; call this to put each
+    instance back at its input STL's min Z. Valid only when no X/Y rotation was applied.
+    Orca reorders and renumbers objects, so instance k is found via the
+    `source_object_id` it records in Metadata/model_settings.config (the input position).
+    Rewrites *packed_path* in place; raises ValueError if the 3MF doesn't match z_offsets.
+    """
+    with zipfile.ZipFile(packed_path, "r") as src:
+        entries = [(info, src.read(info.filename)) for info in src.infolist()]
+    files = {info.filename: data for info, data in entries}
+
+    cfg = files.get("Metadata/model_settings.config", b"").decode("utf-8")
+    source_of: dict[str, int] = {}
+    for obj in re.finditer(r'<object id="(\d+)">(.*?)</object>', cfg, re.S):
+        m = re.search(r'key="source_object_id" value="(\d+)"', obj.group(2))
+        if m:
+            source_of[obj.group(1)] = int(m.group(1))
+
+    text = files["3D/3dmodel.model"].decode("utf-8")
+    items = list(_BUILD_ITEM_RE.finditer(text))
+    if len(items) != len(z_offsets):
+        raise ValueError(f"packed 3MF has {len(items)} build items, expected {len(z_offsets)}")
+
+    def _shift(m: re.Match) -> str:
+        oid = re.search(r'objectid="(\d+)"', m.group(0)).group(1)
+        k = source_of.get(oid)
+        if k is None or not 0 <= k < len(z_offsets):
+            raise ValueError(f"build item {oid} has no valid source_object_id")
+        vals = m.group(2).split()
+        vals[11] = repr(float(vals[11]) + z_offsets[k])
+        return m.group(1) + " ".join(vals) + m.group(3)
+
+    files["3D/3dmodel.model"] = _BUILD_ITEM_RE.sub(_shift, text).encode("utf-8")
+
+    with zipfile.ZipFile(packed_path, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+        for info, _ in entries:
+            dst.writestr(info.filename, files[info.filename])
+
+
+def _build_item_worlds(path: str) -> list[tuple[str, str, list[tuple[float, float, float]]]]:
+    """Per build item, in build order: (objectid, name, world-space vertices).
+
+    Row-vector 3MF transforms (`v' = v·R + t`), nested components and the per-part
+    `matrix` in Metadata/model_settings.config (matched to components by index) are applied.
+    """
+    from defusedxml import ElementTree as ET  # 3MFs are untrusted uploads: reject DTDs/entities
+
+    def _tf(s: str | None) -> list[float]:
+        return [float(x) for x in s.split()] if s else [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]
+
+    def _mul(a: list[float], b: list[float]) -> list[float]:
+        """Apply a then b (row-vector convention)."""
+        r = [sum(a[3 * i + k] * b[3 * k + j] for k in range(3)) for i in range(3) for j in range(3)]
+        t = [sum(a[9 + k] * b[3 * k + j] for k in range(3)) + b[9 + j] for j in range(3)]
+        return r + t
+
+    def _part_matrix(s: str) -> list[float]:
+        """Orca's 4x4 row-major column-vector matrix -> 12-number row-vector transform."""
+        m = [float(x) for x in s.split()]
+        return [m[0], m[4], m[8], m[1], m[5], m[9], m[2], m[6], m[10], m[3], m[7], m[11]]
+
+    def _local(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1]
+
+    with zipfile.ZipFile(path, "r") as z:
+        def _root(name: str):
+            return ET.fromstring(z.read(name.lstrip("/")))
+
+        part_tf: dict[str, list[list[float]]] = {}
+        names: dict[str, str] = {}
+        if "Metadata/model_settings.config" in z.namelist():
+            for o in _root("Metadata/model_settings.config").findall("object"):
+                part_tf[o.get("id")] = [
+                    _part_matrix(md.get("value"))
+                    for p in o.findall("part") for md in p.findall("metadata") if md.get("key") == "matrix"
+                ]
+                names[o.get("id")] = next(
+                    (md.get("value") for md in o.findall("metadata") if md.get("key") == "name"), "")
+
+        models: dict[str, dict] = {}
+
+        def _objects(name: str) -> dict:
+            if name not in models:
+                models[name] = {o.get("id"): o for el in _root(name) for o in el if _local(o.tag) == "object"}
+            return models[name]
+
+        def _verts(model: str, oid: str, tf: list[float], parts: list[list[float]], out: list) -> None:
+            obj = _objects(model)[oid]
+            mesh = next((c for c in obj if _local(c.tag) == "mesh"), None)
+            if mesh is not None:
+                for v in mesh.iter():
+                    if _local(v.tag) == "vertex":
+                        x, y, zz = float(v.get("x")), float(v.get("y")), float(v.get("z"))
+                        out.append((x * tf[0] + y * tf[3] + zz * tf[6] + tf[9],
+                                    x * tf[1] + y * tf[4] + zz * tf[7] + tf[10],
+                                    x * tf[2] + y * tf[5] + zz * tf[8] + tf[11]))
+            comps = next((c for c in obj if _local(c.tag) == "components"), None)
+            if comps is not None:
+                comp_list = list(comps)
+                for i, c in enumerate(comp_list):
+                    ctf = _tf(c.get("transform"))
+                    if len(parts) == len(comp_list):
+                        ctf = _mul(parts[i], ctf)
+                    sub = next((v for k, v in c.attrib.items() if k.endswith("}path") or k == "path"), None)
+                    _verts((sub or model).lstrip("/"), c.get("objectid"), _mul(ctf, tf), [], out)
+
+        main = "3D/3dmodel.model"
+        # Default matters: a bare StopIteration can't cross asyncio.to_thread on py3.12 and hangs the caller.
+        build = next((el for el in _root(main) if _local(el.tag) == "build"), None)
+        if build is None:
+            raise ValueError(f"{main} has no <build> element")
+        result = []
+        for item in build:
+            oid = item.get("objectid")
+            verts: list = []
+            _verts(main, oid, _tf(item.get("transform")), part_tf.get(oid, []), verts)
+            result.append((oid, names.get(oid, ""), verts))
+        return result
+
+
+def _shape_key(name: str, verts: list[tuple[float, float, float]]) -> tuple:
+    """Identity that survives rigid motion: object name + sorted vertex distances from the centroid."""
+    uniq = sorted({(round(x, 3), round(y, 3), round(z, 3)) for x, y, z in verts})
+    n = len(uniq) or 1
+    cx, cy, cz = (sum(v[i] for v in uniq) / n for i in range(3))
+    dists = sorted(round(((x - cx) ** 2 + (y - cy) ** 2 + (z - cz) ** 2) ** 0.5, 2) for x, y, z in uniq)
+    return (name, hash(tuple(dists)))
+
+
+def restore_z_from_source(source_path: str, packed_path: str) -> None:
+    """Shift each object of *packed_path* up by its min Z in *source_path* (Orca re-seats at 0).
+
+    Objects are matched across the two files by (name, shape): Orca reorders and renumbers
+    objects, but keeps names and rigid geometry. Identical (name, shape) twins are paired in
+    build order. Only valid when Orca applied no X/Y rotation. Rewrites *packed_path* in place;
+    raises ValueError if the objects can't be paired.
+    """
+    from collections import defaultdict
+
+    pending: dict[tuple, list[float]] = defaultdict(list)
+    for _, name, verts in _build_item_worlds(source_path):
+        pending[_shape_key(name, verts)].append(min((v[2] for v in verts), default=0.0))
+
+    shifts: dict[str, float] = {}
+    for oid, name, verts in _build_item_worlds(packed_path):
+        zs = pending.get(_shape_key(name, verts))
+        if not zs:
+            raise ValueError(f"object {oid} ('{name}') has no counterpart in the source 3MF")
+        shifts[oid] = zs.pop(0)
+
+    with zipfile.ZipFile(packed_path, "r") as src:
+        entries = [(info, src.read(info.filename)) for info in src.infolist()]
+    files = {info.filename: data for info, data in entries}
+    text = files["3D/3dmodel.model"].decode("utf-8")
+
+    def _shift(m: re.Match) -> str:
+        oid = re.search(r'objectid="(\d+)"', m.group(0)).group(1)
+        vals = m.group(2).split()
+        vals[11] = repr(float(vals[11]) + shifts[oid])
+        return m.group(1) + " ".join(vals) + m.group(3)
+
+    files["3D/3dmodel.model"] = _BUILD_ITEM_RE.sub(_shift, text).encode("utf-8")
+    with zipfile.ZipFile(packed_path, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+        for info, _ in entries:
+            dst.writestr(info.filename, files[info.filename])

@@ -5,7 +5,7 @@
 | Version | Prefix | Status |
 |---|---|---|
 | v1 | `/api/v1` | Stable. The contract is `openapi-v1.json` (CI-regenerated) |
-| legacy | `/api/*` (no version) | Fully functional and unchanged; coexists with v1. Not yet deprecated (headers off by default), no sunset date set |
+| legacy | `/api/*` (no version) | Retired October 24, 2026 (pre-alpha exception); returns 404 |
 
 `GET /api/v1` is the discovery document: supported versions, engine, readiness, `features` flags and limits. Feature-detect from `features`; don't parse version strings.
 
@@ -62,7 +62,7 @@ These need a new major (`/api/v2`):
 
 Differences worth knowing: a job record outlives its artifact (`artifact.available: false` after the one-time download or TTL eviction, instead of a 404 on the job); artifact on a not-yet-complete job is 409 (legacy: 400); profile lists are flat with `type`, filtered by `type=`/`q=` and paginated (legacy: grouped, unpaginated).
 
-Also served under `/api/v1` (same handlers and request/response bodies as the legacy route; only the error envelope and `API-Version` header differ):
+Other supported v1 endpoints (the legacy paths in this migration map now return 404):
 
 | v1 | Replaces (legacy) |
 |---|---|
@@ -74,11 +74,24 @@ Also served under `/api/v1` (same handlers and request/response bodies as the le
 | `POST /api/v1/profiles/merged-config`, `POST /api/v1/profiles/machines/suggest`, `POST /api/v1/profiles/models/variants`, `GET /api/v1/profiles/machines/{ref}/presets`, `GET /api/v1/profiles/machines/{ref}/supports` | same paths under `/api` |
 | `POST /api/v1/cleanup` | `POST /api/cleanup` |
 
-Every legacy `/api/*` route now has a v1 equivalent.
+Every former legacy operation has a v1 replacement. Versionless routes are no longer registered.
 
-## Deprecation policy
+## Pre-alpha retirement exception (BIZ-334 / BIZ-335)
 
-* Legacy routes that have a v1 equivalent answer with `Deprecation: true` and `Link: </api/v1/…>; rel="successor-version"` **when `LEGACY_DEPRECATION_HEADERS=true`**. This is off by default: v1 is purely additive until consumers have migrated, then the flag is turned on. Bodies and status codes are unchanged either way.
-* A `Sunset` header (RFC 8594) is added only once a removal date is decided, at least **6 months** ahead, and recorded in `GET /api/v1` under `legacy.sunset`.
-* A v1 endpoint is deprecated the same way, only after its replacement in a newer major version is released, and stays for at least one full major cycle.
-* Behaviour changes to legacy routes are limited to bug fixes and security fixes.
+On October 24, 2026 the owner explicitly waived the sunset window across the
+repository set because the stack is pre-alpha. This supersedes the previously
+agreed April 24, 2027 date and the zero-traffic waiting gate for this migration.
+Versionless API routes are removed immediately in Laminus and its mock; there
+are no compatibility redirects or environment flags to restore them. Upgrade
+clients and the bundled UI together. Themis, Ordinus, and Concordia already use
+v1 in their active clients and healthchecks.
+
+`GET /api/v1` reports `legacy.retired: true` and `legacy.sunset: "2026-10-24"`.
+`openapi.json` now contains only the v1 contract; `openapi-v1.json` remains the
+version-specific artifact. Both are regenerated and checked by CI. Dashboard,
+Swagger, and OpenAPI document URLs remain operational outside `/api`.
+
+This is a breaking pre-alpha release (0.12.0). The exception does not change the
+compatibility guarantees for API v1 or future stable deprecations. Future route
+removals require a replacement and the normal six-month notice unless another
+explicit exception is agreed.

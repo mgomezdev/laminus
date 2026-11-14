@@ -13,10 +13,14 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
+
+from defusedxml import DefusedXmlException
+from defusedxml.ElementTree import fromstring as _defused_fromstring
 from typing import Optional
 
 NS_CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
@@ -144,9 +148,33 @@ class SubsetError(ValueError):
 
 def _parse(data: bytes) -> ET.Element:
     # Uploaded XML: refuse DTDs/entities outright (billion-laughs); 3MF never needs them.
+    # defusedxml also catches encodings (e.g. UTF-16) that hide the markers from a byte scan.
     if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
         raise SubsetError("3MF XML containing DOCTYPE/ENTITY declarations is not accepted")
-    return ET.fromstring(data)
+    try:
+        return _defused_fromstring(data)
+    except DefusedXmlException:
+        raise SubsetError("3MF XML containing DOCTYPE/ENTITY declarations is not accepted")
+
+
+# Uncompressed-size ceiling for uploaded 3MFs (decompression-bomb guard). zipfile never yields
+# more than an entry's declared size, so bounding the declared total bounds every z.read().
+MAX_3MF_UNCOMPRESSED_BYTES = int(os.environ.get("MAX_3MF_UNCOMPRESSED_BYTES", 2 * 1024**3))
+
+
+def open_zip(path) -> zipfile.ZipFile:
+    """Open an uploaded 3MF, rejecting duplicate entry names and oversized expansion."""
+    z = zipfile.ZipFile(path)
+    try:
+        infos = z.infolist()
+        if len({i.filename for i in infos}) != len(infos):
+            raise SubsetError("3MF contains duplicate entry names")
+        if sum(i.file_size for i in infos) > MAX_3MF_UNCOMPRESSED_BYTES:
+            raise SubsetError(f"3MF expands past {MAX_3MF_UNCOMPRESSED_BYTES} bytes")
+    except Exception:
+        z.close()
+        raise
+    return z
 
 
 def _q(tag: str) -> str:
@@ -166,7 +194,7 @@ def _meta(el: ET.Element, key: str) -> Optional[str]:
 
 def list_objects(src: str) -> list[dict]:
     """Objects in the 3MF: id, name, extruder, part summary, current instance count."""
-    with zipfile.ZipFile(src) as z:
+    with open_zip(src) as z:
         settings = _parse(z.read(MODEL_SETTINGS))
         build = _parse(z.read(MODEL)).find(_q("build"))
     counts: dict[str, int] = {}
@@ -191,7 +219,7 @@ def list_objects(src: str) -> list[dict]:
 
 def plate_members(src: str) -> dict[int, dict[int, int]]:
     """{plate_no: {object_id: instances_on_that_plate}} as laid out in the source project."""
-    with zipfile.ZipFile(src) as z:
+    with open_zip(src) as z:
         settings = _parse(z.read(MODEL_SETTINGS))
     out: dict[int, dict[int, int]] = {}
     for n, pl in enumerate(settings.findall("plate"), start=1):
@@ -203,17 +231,29 @@ def plate_members(src: str) -> dict[int, dict[int, int]]:
 
 
 def resolve_selection(objects: list[dict], selection: list[dict],
-                      plates: Optional[dict[int, dict[int, int]]] = None) -> dict[int, int]:
+                      plates: Optional[dict[int, dict[int, int]]] = None,
+                      origins: Optional[dict[int, list[int]]] = None,
+                      item_ids: Optional[list[int]] = None) -> dict[int, int]:
     """Map selector list to {object_id: qty}.
 
     Selectors: ``{"id"|"name": ..., "qty": n}`` for one object, or ``{"plate": p, "qty": n}``
     for everything on source plate ``p`` (each object x its count on that plate x ``qty``).
     A name matching several objects is ambiguous (e.g. four distinct "Platte 1.stl") and
     is rejected with the candidate ids rather than guessed at.
+
+    *origins*, when given, is filled with {object_id: [selector index per instance]} in the
+    order ``build_subset`` creates the instances (instance k of an object came from
+    ``origins[oid][k]``); *item_ids* renames selector indices (e.g. to global positions).
     """
     by_id = {o["id"]: o for o in objects}
     want: dict[int, int] = {}
-    for sel in selection:
+
+    def _add(oid: int, n: int, idx: int) -> None:
+        want[oid] = want.get(oid, 0) + n
+        if origins is not None:
+            origins.setdefault(oid, []).extend([item_ids[idx] if item_ids else idx] * n)
+
+    for idx, sel in enumerate(selection):
         qty = int(sel.get("qty", 1))
         if qty < 1:
             raise SubsetError(f"qty must be >= 1 for {sel!r}")
@@ -222,7 +262,7 @@ def resolve_selection(objects: list[dict], selection: list[dict],
             if not (plates or {}).get(pl):
                 raise SubsetError(f"No plate {pl} (or it is empty)")
             for oid, cnt in plates[pl].items():
-                want[oid] = want.get(oid, 0) + cnt * qty
+                _add(oid, cnt * qty, idx)
             continue
         if "id" in sel:
             oid = int(sel["id"])
@@ -237,7 +277,7 @@ def resolve_selection(objects: list[dict], selection: list[dict],
             oid = hits[0]
         else:
             raise SubsetError(f"Selector needs 'id', 'name' or 'plate': {sel!r}")
-        want[oid] = want.get(oid, 0) + qty
+        _add(oid, qty, idx)
     if not want:
         raise SubsetError("Selection is empty")
     return want
@@ -266,7 +306,7 @@ def build_subset(src: str, dst: str, want: dict[int, int],
     """
     if printer_cfg is None and (process_cfg is not None or filament_cfgs is not None):
         raise SubsetError("process/filament overrides require a target machine")
-    zin = zipfile.ZipFile(src)
+    zin = open_zip(src)
     names = zin.namelist()
     keep_ids = {str(i) for i in want}
     ext_map: dict[int, int] = {}
@@ -419,7 +459,7 @@ def build_subset(src: str, dst: str, want: dict[int, int],
 
 
 def count_plates(path: str) -> int:
-    with zipfile.ZipFile(path) as z:
+    with open_zip(path) as z:
         return len(_parse(z.read(MODEL_SETTINGS)).findall("plate"))
 
 
@@ -448,11 +488,13 @@ def merge_subsets(parts: list[str], dst: str, labels: Optional[list[str]] = None
         raise SubsetError("Nothing to merge")
     labels = labels or [f"source {i}" for i in range(len(parts))]
     warnings: list[str] = []
-    zb = zipfile.ZipFile(parts[0])
+    zb = open_zip(parts[0])
     base_names = zb.namelist()
     model = _parse(zb.read(MODEL))
     ms = _parse(zb.read(MODEL_SETTINGS))
     resources = model.find(_q("resources"))
+    # {old object id: merged object id} per part; instance numbering per object is kept
+    id_maps: list[dict[str, str]] = [{o.get("id"): o.get("id") for o in resources.findall(_q("object"))}]
     build = model.find(_q("build"))
     asm = ms.find("assemble")
     base_cfg = json.loads(zb.read(PROJECT_SETTINGS)) if PROJECT_SETTINGS in base_names else {}
@@ -472,7 +514,7 @@ def merge_subsets(parts: list[str], dst: str, labels: Optional[list[str]] = None
 
     for idx, path in enumerate(parts[1:], start=1):
         label = labels[idx]
-        with zipfile.ZipFile(path) as zp:
+        with open_zip(path) as zp:
             pmodel = _parse(zp.read(MODEL))
             pms = _parse(zp.read(MODEL_SETTINGS))
             pcfg = json.loads(zp.read(PROJECT_SETTINGS)) if PROJECT_SETTINGS in zp.namelist() else {}
@@ -495,6 +537,7 @@ def merge_subsets(parts: list[str], dst: str, labels: Optional[list[str]] = None
             for o in pmodel.find(_q("resources")).findall(_q("object")):
                 remap[o.get("id")] = str(max(used_ids | {0}) + 1)
                 used_ids.add(int(remap[o.get("id")]))
+            id_maps.append(dict(remap))
 
             # Inner ids (the <object id> inside a mesh file == component objectid == model_settings
             # <part id>) must be unique across the *whole* merged project: OrcaSlicer resolves
@@ -615,7 +658,7 @@ def merge_subsets(parts: list[str], dst: str, labels: Optional[list[str]] = None
             zout.writestr(n, data, zipfile.ZIP_DEFLATED)
     zb.close()
     return {"objects": len(resources.findall(_q("object"))), "instances": len(instances),
-            "warnings": warnings}
+            "warnings": warnings, "id_maps": id_maps}
 
 
 # ----------------------------------------------------------- layout via oracle
@@ -632,9 +675,14 @@ _TAG = "lmns:"
 
 def expand_instances(subset: str, dst: str) -> None:
     """Oracle input: one uniquely named object per instance of ``subset``."""
-    with zipfile.ZipFile(subset) as zin:
+    with open_zip(subset) as zin:
         model = _parse(zin.read(MODEL))
         ms = _parse(zin.read(MODEL_SETTINGS))
+        # OrcaSlicer 2.4.2 segfaults in `--arrange 1 --export-3mf` on a model carrying its own
+        # generator tag (<metadata name="OrcaSlicer">), i.e. any Orca-saved project. The oracle
+        # is only read for its layout, so the model-level metadata goes.
+        for m in model.findall(_q("metadata")):
+            model.remove(m)
         resources = model.find(_q("resources"))
         build = model.find(_q("build"))
         res_by_id = {o.get("id"): o for o in resources.findall(_q("object"))}
@@ -692,7 +740,7 @@ def expand_instances(subset: str, dst: str) -> None:
 
 def _arranged_layout(path: str) -> tuple[dict[tuple[str, int], str], list[list[tuple[str, int]]]]:
     """({(obj, idx): transform}, plates[[(obj, idx)]]) read from an oracle output."""
-    with zipfile.ZipFile(path) as z:
+    with open_zip(path) as z:
         model = _parse(z.read(MODEL))
         ms = _parse(z.read(MODEL_SETTINGS))
     tag_of: dict[str, tuple[str, int]] = {}
@@ -717,11 +765,18 @@ def transplant_layout(subset: str, arranged: str, dst: str) -> int:
     """Write ``subset`` to ``dst`` with plate lists and instance transforms taken from
     the oracle output ``arranged``. Returns the plate count."""
     a_tf, a_plates = _arranged_layout(arranged)
+    return apply_layout(subset, a_tf, a_plates, dst)
+
+
+def apply_layout(subset: str, a_tf: dict[tuple[str, int], str],
+                 a_plates: list[list[tuple[str, int]]], dst: str) -> int:
+    """Write ``subset`` to ``dst`` with the given plate lists and instance transforms
+    ({(object id, instance index): transform}). Returns the plate count."""
     placed = sorted(x for p in a_plates for x in p)
     if placed != sorted(a_tf) or len(set(placed)) != len(placed):
         raise SubsetError("Arranged plates do not cover every instance exactly once")
 
-    with zipfile.ZipFile(subset) as zin:
+    with open_zip(subset) as zin:
         model = _parse(zin.read(MODEL))
         ms = _parse(zin.read(MODEL_SETTINGS))
         seen: dict[str, int] = {}
@@ -778,7 +833,7 @@ def fingerprint(path: str) -> dict:
     Independent of ids/ordering/serialization so it can compare the pre-arrange subset
     and Orca's re-exported output.
     """
-    with zipfile.ZipFile(path) as z:
+    with open_zip(path) as z:
         ms = _parse(z.read(MODEL_SETTINGS))
         model = _parse(z.read(MODEL))
         ranges = {}
