@@ -115,6 +115,11 @@ def remap_for_target(cfg: dict, printer_cfg: dict, process_cfg: Optional[dict] =
                 cfg[k] = v
         cfg["print_settings_id"] = process_cfg.get("name", cfg.get("print_settings_id"))
         warnings.append(f"process preset replaced by '{cfg['print_settings_id']}'")
+        # The file's recorded process changes belonged to the replaced preset: with them left in place a client (Themis)
+        # would re-apply the new preset's values as if the author had changed them.
+        diffs = cfg.get("different_settings_to_system")
+        if isinstance(diffs, list) and diffs:
+            cfg["different_settings_to_system"] = [""] + diffs[1:]
     if filament_cfgs is not None:
         for i, fc in enumerate(filament_cfgs):
             for k, v in fc.items():

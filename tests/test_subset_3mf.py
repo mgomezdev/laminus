@@ -723,3 +723,17 @@ def test_v1_projects_subset_supports_remap_and_enveloped_errors(tmp_path):
     assert bad.json()["error"]["code"] == "unprocessable" and "slot" in bad.json()["error"]["message"]
     legacy = _post_subset(srcp, machine_uuid="m1")
     assert "Deprecation" not in legacy.headers
+
+
+def test_replacing_the_process_preset_clears_its_recorded_changes_only():
+    """different_settings_to_system[0] belonged to the replaced process preset; a client re-applying the file's
+    recorded changes (Themis) must not mistake the new preset's values for the author's. Filament/printer entries stay."""
+    cfg = {"layer_height": "0.12", "different_settings_to_system": ["layer_height;enable_support", "nozzle_temperature", "host_type"],
+           "filament_colour": ["#FFFFFF"], "nozzle_diameter": ["0.4"]}
+    s.remap_for_target(cfg, _ONE_EXTRUDER, process_cfg={"name": "0.20mm Mono", "layer_height": "0.2"})
+    assert cfg["layer_height"] == "0.2"
+    assert cfg["different_settings_to_system"] == ["", "nozzle_temperature", "host_type"]
+
+    kept = {"different_settings_to_system": ["layer_height", "", ""], "filament_colour": ["#FFFFFF"], "nozzle_diameter": ["0.4"]}
+    s.remap_for_target(kept, _ONE_EXTRUDER)                       # no process replacement: the author's changes stay
+    assert kept["different_settings_to_system"] == ["layer_height", "", ""]
