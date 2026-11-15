@@ -19,6 +19,8 @@ import zipfile
 import xml.etree.ElementTree as ET
 from typing import Optional
 
+from app.project_config_builder import clamp_orca_minimums
+
 NS_CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 NS_PROD = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
 NS_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -46,10 +48,6 @@ PRINTER_KEYS = (
     "extruder_clearance_radius",
 )
 
-
-# Bambu Studio writes -1 ("auto") for options whose Orca minimum is 0; the Orca CLI
-# rejects the whole project ("not in range") where the GUI would silently clamp.
-_ORCA_MIN_CLAMP = {"raft_first_layer_expansion": 0, "tree_support_wall_count": 0}
 
 
 # Preset bookkeeping keys that must not be copied from a process/filament preset into the
@@ -363,12 +361,7 @@ def build_subset(src: str, dst: str, want: dict[int, int],
                       zin.read(MODEL_RELS).decode("utf-8")).encode("utf-8")
 
     if cfg is not None:
-        for k, floor in _ORCA_MIN_CLAMP.items():
-            try:
-                if float(cfg.get(k, floor)) < floor:
-                    cfg[k] = str(floor)
-            except (TypeError, ValueError):
-                pass
+        clamp_orca_minimums(cfg)
         if printer_cfg is not None:
             for k in PRINTER_KEYS:
                 if k in printer_cfg:

@@ -62,6 +62,23 @@ def _ensure_extruder_reset_per_layer(config: dict) -> None:
         config["before_layer_change_gcode"] = (current.rstrip("\n") + "\n" if current else "") + "G92 E0\n"
 
 
+# Bambu Studio writes -1 ("auto") for options whose Orca minimum is 0; the Orca CLI rejects the whole project
+# ("not in range") where the GUI would silently clamp. Reaches slice/start through `extra_config` when a client carries a
+# Bambu-made 3MF's own setting changes onto the target preset.
+ORCA_MIN_CLAMP = {"raft_first_layer_expansion": 0, "tree_support_wall_count": 0}
+
+
+def clamp_orca_minimums(config: dict) -> dict:
+    """Raise known Bambu-only out-of-range values to Orca's minimum, in place; non-numeric values are left alone."""
+    for k, floor in ORCA_MIN_CLAMP.items():
+        try:
+            if float(config.get(k, floor)) < floor:
+                config[k] = str(floor)
+        except (TypeError, ValueError):
+            pass
+    return config
+
+
 def embed_project_settings(src_3mf: str, project_settings: dict, dst_3mf: str) -> None:
     """Write dst_3mf as a copy of src_3mf with Metadata/project_settings.config replaced."""
     if os.path.realpath(src_3mf) == os.path.realpath(dst_3mf):

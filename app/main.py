@@ -17,7 +17,7 @@ from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPExcept
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from app.profile_catalog import ProfileCatalog
-from app.project_config_builder import build_project_settings, embed_project_settings
+from app.project_config_builder import build_project_settings, clamp_orca_minimums, embed_project_settings
 from app import preview_3mf as _preview
 from app import subset_3mf as _subset
 from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf, inject_stls_into_3mf as _inject_stls_into_3mf, strip_application_version as _strip_app_version
@@ -1160,6 +1160,7 @@ async def start_slice(
             project_cfg.update(overrides)
         except (ValueError, TypeError):
             raise HTTPException(status_code=422, detail="extra_config must be a JSON object.")
+        clamp_orca_minimums(project_cfg)   # carried 3MF settings may hold Bambu-only -1 values Orca rejects
     prepared_3mf = os.path.join(input_dir, "prepared.3mf")
     try:
         await asyncio.to_thread(embed_project_settings, base_3mf, project_cfg, prepared_3mf)

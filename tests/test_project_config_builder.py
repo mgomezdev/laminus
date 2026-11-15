@@ -107,3 +107,12 @@ def test_filament_key_present_when_at_least_one_filament_defines_it():
     fil_with_density = {**_filament(), "filament_density": 1.24}
     cfg = build_project_settings(_machine(), _process(), [_filament(), fil_with_density])
     assert cfg["filament_density"] == ["", 1.24]
+
+
+def test_clamp_orca_minimums_raises_bambu_auto_values_and_leaves_the_rest():
+    from app.project_config_builder import clamp_orca_minimums
+    cfg = {"raft_first_layer_expansion": "-1", "tree_support_wall_count": "2", "brim_type": "no_brim"}
+    assert clamp_orca_minimums(cfg) is cfg
+    assert cfg == {"raft_first_layer_expansion": "0", "tree_support_wall_count": "2", "brim_type": "no_brim"}
+    odd = {"tree_support_wall_count": "auto"}
+    assert clamp_orca_minimums(odd) == {"tree_support_wall_count": "auto"}

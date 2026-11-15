@@ -186,7 +186,7 @@ Content-Type: multipart/form-data
 | `plate`            | int     | yes      | Build plate number (1-based)                             |
 | `export_3mf`       | string  | no       | Output 3MF filename; omit to get GCode only              |
 | `geometry_only_retry` | bool | no      | Default `true` — retry stripping model_settings on fail  |
-| `extra_config`     | string  | no       | JSON object merged into project settings after profile resolution |
+| `extra_config`     | string  | no       | JSON object merged into project settings after profile resolution (then Bambu-only `-1` "auto" values Orca rejects — `raft_first_layer_expansion`, `tree_support_wall_count` — are clamped to 0). Themis sends bed type + printer overrides + the uploaded 3MF's own process changes + job overrides here, already merged. |
 
 \* Provide `machine_uuid` **or** all three of `manufacturer` + `model` + `nozzle`.
 
