@@ -1,6 +1,6 @@
-"""Regression: POST /api/cleanup (via _scan_stale_temp) must not sweep up ARRANGE_DIR
-scratch dirs or stable output copies belonging to an in-flight /api/pack, /api/arrange,
-or /api/slice/thumbnail request, even with min_age_seconds=0 (remove-everything mode).
+"""Regression: POST /api/v1/cleanup (via _scan_stale_temp) must not sweep up ARRANGE_DIR
+scratch dirs or stable output copies belonging to an in-flight /api/v1/pack, /api/v1/arrange,
+or /api/v1/slice/thumbnail request, even with min_age_seconds=0 (remove-everything mode).
 """
 import os
 

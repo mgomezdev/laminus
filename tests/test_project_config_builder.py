@@ -17,27 +17,44 @@ def _filament():
             "filament_colour": "#FFFFFF", "nozzle_temperature": 220, "bed_temperature": 35}
 
 
-def test_klipper_machine_gets_extruder_reset_before_layer_change():
-    # BIZ-336: Centauri Carbon is klipper with no before_layer_change_gcode; OrcaSlicer 2.4 -51s.
-    machine = {**_machine(), "gcode_flavor": "klipper", "layer_change_gcode": "SET_PRINT_STATS_INFO"}
-    cfg = build_project_settings(machine, _process(), [_filament()])
-    assert "G92 E0" in cfg["before_layer_change_gcode"]
+# BIZ-350: Orca 2.4.2 (Print.cpp) -51s when extrusion is relative - `use_relative_e_distances`,
+# default true - on a marlin/marlin2 flavor and neither before_layer_change_gcode nor
+# layer_change_gcode has an exact "G92 E0". It skips that for BBL printers, but never
+# recognises one in a Laminus-built project.
+
+@pytest.mark.parametrize("flavor", ["marlin", "marlin2"])
+def test_marlin_with_default_relative_gets_extruder_reset(flavor):
+    # Bambu P1S (marlin) and Creality Ender-3 V3 SE (marlin2) leave the key unset.
+    cfg = build_project_settings({**_machine(), "gcode_flavor": flavor}, _process(), [_filament()])
+    assert cfg["before_layer_change_gcode"] == "G92 E0\n"
 
 
 def test_explicit_relative_extrusion_gets_extruder_reset_and_keeps_existing_gcode():
-    machine = {**_machine(), "use_relative_e_distances": "1", "before_layer_change_gcode": "; mine\n"}
+    machine = {**_machine(), "gcode_flavor": "marlin", "use_relative_e_distances": "1",
+               "before_layer_change_gcode": "; mine\n"}
     gcode = build_project_settings(machine, _process(), [_filament()])["before_layer_change_gcode"]
-    assert gcode.startswith("; mine\n") and gcode.count("G92 E0") == 1
+    assert gcode == "; mine\nG92 E0\n"
 
 
-def test_extruder_reset_not_duplicated_when_already_present():
-    machine = {**_machine(), "gcode_flavor": "klipper", "before_layer_change_gcode": "G92 E0\n; x"}
-    assert build_project_settings(machine, _process(), [_filament()])["before_layer_change_gcode"] == "G92 E0\n; x"
+@pytest.mark.parametrize("key", ["before_layer_change_gcode", "layer_change_gcode"])
+def test_extruder_reset_not_added_when_either_hook_has_it(key):
+    machine = {**_machine(), "gcode_flavor": "marlin", key: ";x\nG92 E0 ; reset\n"}
+    cfg = build_project_settings(machine, _process(), [_filament()])
+    assert cfg.get("before_layer_change_gcode", "").count("G92 E0") == (key == "before_layer_change_gcode")
 
 
-def test_absolute_machine_is_left_alone():
-    cfg = build_project_settings({**_machine(), "gcode_flavor": "marlin2"}, _process(), [_filament()])
+@pytest.mark.parametrize("machine", [
+    {"gcode_flavor": "klipper"},  # Elegoo Centauri Carbon, Snapmaker U1: Orca needs no reset
+    {"gcode_flavor": "marlin2", "use_relative_e_distances": "0"},  # absolute: a reset is an error
+])
+def test_extruder_reset_left_alone_when_orca_does_not_need_it(machine):
+    cfg = build_project_settings({**_machine(), **machine}, _process(), [_filament()])
     assert "before_layer_change_gcode" not in cfg
+
+
+def test_no_legacy_layer_gcode_key():
+    # Orca reads layer_change_gcode; `layer_gcode` was a dead default.
+    assert "layer_gcode" not in build_project_settings(_machine(), _process(), [_filament()])
 
 
 def test_build_sets_from_user():
@@ -64,6 +81,31 @@ def test_metadata_keys_stripped():
     cfg = build_project_settings(_machine(), _process(), [_filament()])
     assert "inherits" not in cfg
     assert "compatible_printers" not in cfg
+
+
+def test_preset_identity_keys_stripped():
+    # A list-valued `name` (the filament loop made every filament key a list) made Orca 2.4.2
+    # discard the whole project config and slice with its defaults (200 x 200 bed -> -52).
+    fil = {**_filament(), "type": "filament", "setting_id": "GFSA00", "description": "x",
+           "renamed_from": "old", "instantiation": "true", "version": "2.0.0.1"}
+    cfg = build_project_settings({**_machine(), "type": "machine"}, _process(), [fil])
+    for k in ("name", "type", "setting_id", "description", "renamed_from", "instantiation"):
+        assert k not in cfg, k
+    assert cfg["filament_type"] == ["PLA"] and cfg["from"] == "user"
+
+
+def test_filament_id_written_as_project_level_filament_ids():
+    # BIZ-351: Orca 2.4.2 segfaults in --export-3mf when a project carries the preset-level
+    # `filament_id` key or lacks a non-empty `filament_ids`; Orca-saved projects only have the latter.
+    cfg = build_project_settings(_machine(), _process(),
+                                 [{**_filament(), "filament_id": "GFA00"}, _filament()])
+    assert cfg["filament_ids"] == ["GFA00", ""]
+    assert "filament_id" not in cfg
+
+
+def test_filament_ids_present_when_no_filament_defines_an_id():
+    cfg = build_project_settings(_machine(), _process(), [_filament()])
+    assert cfg["filament_ids"] == [""]
 
 
 def test_embed_project_settings_creates_valid_zip(tmp_path):
@@ -109,10 +151,11 @@ def test_filament_key_present_when_at_least_one_filament_defines_it():
     assert cfg["filament_density"] == ["", 1.24]
 
 
-def test_clamp_orca_minimums_raises_bambu_auto_values_and_leaves_the_rest():
-    from app.project_config_builder import clamp_orca_minimums
-    cfg = {"raft_first_layer_expansion": "-1", "tree_support_wall_count": "2", "brim_type": "no_brim"}
-    assert clamp_orca_minimums(cfg) is cfg
-    assert cfg == {"raft_first_layer_expansion": "0", "tree_support_wall_count": "2", "brim_type": "no_brim"}
-    odd = {"tree_support_wall_count": "auto"}
-    assert clamp_orca_minimums(odd) == {"tree_support_wall_count": "auto"}
+@pytest.mark.parametrize("value, expected", [("-1", "2"), (["-1"], ["2"]), ("1.5", "1.5"), ("0", "0")])
+def test_bambu_auto_sentinel_replaced_with_orca_default(value, expected):
+    # BIZ-352: Orca range-checks raft_first_layer_expansion >= 0; Bambu's -1 means "auto".
+    from app.project_config_builder import replace_bambu_auto_sentinels
+    cfg = {"raft_first_layer_expansion": value}
+    notes = replace_bambu_auto_sentinels(cfg)
+    assert cfg["raft_first_layer_expansion"] == expected
+    assert bool(notes) == (value != expected)

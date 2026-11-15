@@ -33,7 +33,7 @@ def test_slice_start_rejects_when_pending_jobs_fill_the_limit(profile_tree):
         }
     try:
         resp = client.post(
-            "/api/slice/start",
+            "/api/v1/jobs",
             files={"file": ("m.stl", b"solid t\nendsolid", "application/octet-stream")},
             data={
                 "machine_uuid": machine_uuid,
@@ -43,7 +43,7 @@ def test_slice_start_rejects_when_pending_jobs_fill_the_limit(profile_tree):
             },
         )
         assert resp.status_code == 503
-        assert "Too many active jobs" in resp.json()["detail"]
+        assert "Too many active jobs" in resp.json()["error"]["message"]
     finally:
         for i in range(main_mod.MAX_CONCURRENT_JOBS):
             main_mod.jobs.pop(f"pending-job-{i}", None)

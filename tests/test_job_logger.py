@@ -1,5 +1,5 @@
 """Regression: JobLogger must bound its buffered output instead of retaining every
-line for the full JOB_TTL, and GET /api/slice/logs's cursor-based streaming must stay
+line for the full JOB_TTL, and GET /api/v1/slice/logs's cursor-based streaming must stay
 correct once old lines have been evicted."""
 import pytest
 

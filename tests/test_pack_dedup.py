@@ -1,4 +1,4 @@
-"""Regression: /api/pack must not silently overwrite two uploaded STLs sharing a
+"""Regression: /api/v1/pack must not silently overwrite two uploaded STLs sharing a
 filename - both must be written and both must reach the packer."""
 import io
 import os
@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
+from tests.conftest import fake_pack_export
 
 
 def _stl() -> bytes:
@@ -23,7 +24,7 @@ def _stl() -> bytes:
 def test_pack_dedupes_duplicate_stl_filenames():
     captured = {}
 
-    def _fake_inject(template_path, stl_paths, out_path):
+    def _fake_inject(template_path, stl_paths, out_path, quantities=None):
         # Capture + verify existence here, while the job directory is still alive -
         # background_tasks cleanup deletes it once the response has been sent.
         captured["stl_paths"] = list(stl_paths)
@@ -35,7 +36,7 @@ def test_pack_dedupes_duplicate_stl_filenames():
         args_list = list(args)
         out_path = args_list[args_list.index("--export-3mf") + 1]
         with open(out_path, "wb") as fh:
-            fh.write(b"not-a-real-3mf")
+            fh.write(fake_pack_export(2))
         proc = AsyncMock()
         proc.returncode = 0
         proc.communicate = AsyncMock(return_value=(b"Done\n", None))
@@ -45,7 +46,7 @@ def test_pack_dedupes_duplicate_stl_filenames():
     with patch("app.main._inject_stls_into_3mf", new=_fake_inject), \
          patch("asyncio.create_subprocess_exec", new=_mock_slicer_ok):
         resp = client.post(
-            "/api/pack",
+            "/api/v1/pack",
             files=[
                 ("files", ("bracket.stl", _stl(), "application/octet-stream")),
                 ("files", ("bracket.stl", _stl(), "application/octet-stream")),

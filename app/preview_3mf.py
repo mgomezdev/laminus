@@ -18,7 +18,7 @@ from typing import Optional
 import numpy as np
 
 from app.subset_3mf import (
-    MODEL, MODEL_SETTINGS, PROJECT_SETTINGS, SubsetError, _meta, _p, _parse, _q,
+    MODEL, MODEL_SETTINGS, PROJECT_SETTINGS, SubsetError, _meta, _p, _parse, _q, open_zip,
 )
 
 _NON_PRINTED_PARTS = {"modifier_part", "negative_part", "support_blocker", "support_enforcer"}
@@ -105,6 +105,9 @@ def _object_geometry(src: _Source, model_obj, res_by_id: dict, excluded_part_ids
         return out
     comps = model_obj.find(_q("components"))
     if comps is None:
+        if model_obj.find(_q("mesh")) is not None:  # mesh inline in the root model
+            geo = src.mesh(MODEL, int(model_obj.get("id")))
+            out.extend([geo] if geo else [])
         return out
     for comp in comps.findall(_q("component")):
         cid = int(comp.get("objectid"))
@@ -273,7 +276,7 @@ def object_previews(src_path: str, size: int = 256, with_images: bool = True) ->
     """
     if not 32 <= size <= 1024:
         raise SubsetError("size must be between 32 and 1024")
-    with zipfile.ZipFile(src_path) as z:
+    with open_zip(src_path) as z:
         names = z.namelist()
         model = _parse(z.read(MODEL))
         ms = _parse(z.read(MODEL_SETTINGS))
@@ -332,7 +335,7 @@ def bed_clearance_warnings(src_path: str, tol: float = 0.5) -> list[str]:
     plate. Modifier / negative / blocker parts are ignored. ``tol`` is in mm.
     """
     warnings: list[str] = []
-    with zipfile.ZipFile(src_path) as z:
+    with open_zip(src_path) as z:
         model = _parse(z.read(MODEL))
         ms = _parse(z.read(MODEL_SETTINGS))
         res_by_id = {o.get("id"): o for o in model.find(_q("resources")).findall(_q("object"))}

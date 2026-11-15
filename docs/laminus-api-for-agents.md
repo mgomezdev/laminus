@@ -1,455 +1,245 @@
 # Laminus API — Agent Reference
 
-Base URL: `http://localhost:5000` (adjust to wherever the container is exposed)
+Use `http://laminus:5000/api/v1` (adjust host as needed). All versionless API
+routes were retired in pre-alpha 0.12.0 on October 24, 2026. See
+[versioning and migration map](api-versioning.md) for the explicit sunset-window
+exception. Old `/api/*` URLs return 404.
 
-Full OpenAPI 3.0 spec: [`openapi.json`](../openapi.json) (CI-regenerated, always matches the running code)
-Live Swagger UI (container must be running): `http://localhost:5000/docs`
-Live OpenAPI JSON: `http://localhost:5000/openapi.json`
+The complete request schemas, required fields, and endpoint descriptions are in
+[`openapi-v1.json`](../openapi-v1.json), regenerated in CI. `/docs` serves Swagger;
+`/openapi.json` serves the same v1-only API surface. UI/document URLs are not API
+version aliases. Feature-detect using `GET /api/v1` rather than version strings.
 
-> **API v1 (`/api/v1`) is the stable, versioned contract**: uniform error envelope, cursor pagination, `Idempotency-Key` on job creation, typed SSE events, `GET /api/v1` discovery. New integrations should use it; the routes below remain supported and unchanged (they will carry `Deprecation` headers where a v1 equivalent exists once `LEGACY_DEPRECATION_HEADERS` is enabled). See [`api-versioning.md`](api-versioning.md) and [`openapi-v1.json`](../openapi-v1.json).
+## Canonical slice workflow
 
+1. `GET /api/v1/health`: wait for `catalog_loaded: true`.
+2. `GET /api/v1/profiles?type=machine&limit=200`: choose a machine UUID. List process
+   and filament profiles the same way. Follow `page.next_cursor` until null;
+   listings return `{data: [...], page: {limit, next_cursor}}`.
+3. `POST /api/v1/jobs` with multipart `file`, `machine_uuid`, `process_uuid`,
+   `filament_uuids` (a JSON array string), and `plate`; optional `extra_config` (a JSON object merged into the
+   resolved project settings — Bambu "-1 = auto" values Orca rejects are then rewritten to Orca's defaults, BIZ-352).
+   Themis sends the bed type + its job and printer overrides + the uploaded 3MF's own process changes here, merged.
+   A machine may alternatively
+   be identified with `manufacturer`, `model`, and `nozzle` together. Return:
+   **202**, a job view with `id`, and `Location: /api/v1/jobs/{id}`.
+4. Poll `GET /api/v1/jobs/{id}` or connect to
+   `GET /api/v1/jobs/{id}/events`. SSE events are typed `log`/`dropped` with
+   `{message}`, `completed` with `{}`, or `failed` with `{reason}`. They are not
+   untyped legacy sentinel strings. Reconnect with `Last-Event-ID`.
+5. `GET /api/v1/jobs/{id}/artifact` returns GCode/3MF once. The job record remains
+   after download; its `artifact.available` becomes false. Artifact requests
+   before completion return 409; missing artifacts return 404.
 
----
+A job view has `id`, `status`, `filename`, `output_format`, `error`,
+`artifact: {name, available}`, timestamps, and `links: {self, events, artifact}`.
+List jobs with `GET /api/v1/jobs?limit=50&cursor=...&status=completed`.
 
-## Canonical workflow
+`POST /api/v1/jobs` accepts `Idempotency-Key`. The same key/body replays the
+original job; different bodies return 422 and in-flight duplicates return 409.
+Keys live 24 hours in memory and do not survive restart.
 
-```
-GET  /api/health                        → wait until catalog_loaded = true
-GET  /api/profiles?manufacturer=…&model=…&nozzle=…
-                                        → pick process_uuid + filament_uuids
-POST /api/slice/start  (multipart)      → job_id
-loop: GET /api/slice/status/{job_id}    → until status = "completed" | "failed"
-GET  /api/slice/download/{job_id}       → binary GCode (or 3MF)
-```
+Slicing always extracts the requested `plate` into its own single-plate project
+(moved to plate-1 coordinates; that plate's custom layer G-code kept) and runs
+Orca with `--arrange 0`, so parts never move between plates. A missing or empty
+plate, or a run that produces no G-code, fails the job.
 
-If you already have a fully-configured 3MF (OrcaSlicer-exported with settings embedded):
+Plate isolation across beds (`POST /api/v1/jobs` with a 3MF; feature
+`slice.plate_isolation`): the plate is located using the uploaded project's own
+`printable_area` (the bed it was laid out/packed for; the target machine's bed is
+used only if the project has none), then moved from the source bed centre to the
+target bed centre, so the same plate N yields the same objects and the same
+relative layout on any printer. If the footprint fits but that placement would
+overflow, the footprint itself is centred. The printed footprint (build items ×
+transforms; modifier/negative/blocker/enforcer parts ignored) is checked against
+the target `printable_area` and `printable_height`; a misfit fails the job before
+Orca runs with `error` like `Plate 2 footprint 300.0 × 210.0 × 120.0 mm does not
+fit the target bed 256 × 256 × 256 mm`. STL uploads and `/slice/prepared` are
+unaffected (prepared projects already carry their target bed). `geometry_only_retry` is
+opt-in (default `false`): when `true`, a failed slice is retried once without
+`model_settings.config`, which drops per-object settings; the job log warns.
 
-```
-POST /api/slice/prepared  (multipart)   → job_id
-... same poll/download loop
-```
+For an already-configured 3MF use `POST /api/v1/slice/prepared` with multipart
+`file` and `plate`. This endpoint returns 200 `{job_id}`; use the same v1 job
+status/events/artifact URLs afterwards. Optional `export_3mf` must be a plain
+filename ending in `.3mf`, never an absolute or relative path. Every slice input has
+its `filament_ids` repaired on the way in (a stray preset-level `filament_id` is
+moved or dropped, and a missing or empty list is filled with `""` per filament):
+OrcaSlicer 2.4.2 segfaults in `--export-3mf` without it. Bambu Studio's `-1` ("auto")
+for `raft_first_layer_expansion` and `tree_support_wall_count`, which Orca rejects
+(`-18`), is replaced with Orca's defaults (`2` and `0`), and each rewrite is logged in
+the job log.
 
----
+## Profiles
 
-## 1 — Health check
+- `GET /api/v1/profiles`: flat, typed, cursor-paginated entries, optionally filtered
+  by `type` (`machine`, `process`, `filament`) or `q`. Compatibility filtering
+  requires `manufacturer`, `model`, and `nozzle` together.
+- `GET /api/v1/profiles/{uuid}`: one profile. UUIDs are stable identifiers;
+  integrations should not send catalog filesystem paths as profile references.
+- `POST /api/v1/profiles/rescan`: force a rebuild (200); poll v1 health until ready.
+- `GET /api/v1/profiles/broken`: profiles with unresolved inheritance.
+- `POST /api/v1/profiles/upload`: install a user profile and rebuild the catalog.
+- `POST /api/v1/profiles/merged-config`: resolve machine/process/filament UUIDs.
+- `POST /api/v1/profiles/machines/suggest` and
+  `POST /api/v1/profiles/models/variants`: model/nozzle discovery.
+- `GET /api/v1/profiles/machines/{ref}/presets` and
+  `GET /api/v1/profiles/machines/{ref}/supports`: compatible presets and bed checks.
 
-```
-GET /api/health
-```
+Neutral model references use `<kind>:<slug(name)>`. Responses expose catalog
+version/staleness. Prefer thin user presets using `inherits` so vendor fixes can
+be picked up; flatten only for permanent forks.
 
-**Do not call profile or slice endpoints until `catalog_loaded` is `true`.** The catalog
-builds in the background after container startup (~10–60 seconds depending on profile count).
+## Packing, arrangement, and project operations
 
-```json
-{
-  "status": "healthy",
-  "orcaslicer_installed": true,
-  "orcaslicer_version": "OrcaSlicer-2.2.0",
-  "orca_version": "2.2.0",
-  "config_mounted": true,
-  "system_profiles_available": true,
-  "catalog_loaded": true,
-  "catalog_profile_count": { "machine": 142, "process": 87, "filament": 310 },
-  "active_jobs": 0
-}
-```
-
----
-
-## 2 — Discover profiles
-
-```
-GET /api/profiles
-GET /api/profiles?manufacturer=Bambu+Lab&model=P1S&nozzle=0.4
-```
-
-Without filters: returns all machines, all processes, all filaments.
-
-With filters (supply all three or none): returns the matching machine plus only the
-process and filament presets that are compatible with it.
-
-**503 while catalog is building.** Retry.
-
-**Response shape:**
-```json
-{
-  "machine":  [ { ...MachineProfile }, ... ],
-  "process":  [ { ...ProcessProfile }, ... ],
-  "filament": [ { ...FilamentProfile }, ... ]
-}
-```
-
-**MachineProfile key fields:**
-| Field          | Type    | Notes                                        |
-|----------------|---------|----------------------------------------------|
-| `uuid`         | string  | Stable UUID — use for machine lookup         |
-| `manufacturer` | string  | e.g. `"Bambu Lab"`                           |
-| `model`        | string  | e.g. `"P1S"`                                 |
-| `nozzle`       | string  | e.g. `"0.4"`                                 |
-| `extruder_count` | int   | Number of extruders                          |
-
-**ProcessProfile key fields:**
-| Field                 | Type          | Notes                                 |
-|-----------------------|---------------|---------------------------------------|
-| `uuid`                | string        | Pass as `process_uuid`                |
-| `layer_height`        | string\|null  | e.g. `"0.2"`                          |
-| `compatible_printers` | string[]      | Empty = universal                     |
-
-**FilamentProfile key fields:**
-| Field                         | Type    | Notes                           |
-|-------------------------------|---------|---------------------------------|
-| `uuid`                        | string  | Pass in `filament_uuids` array  |
-| `display_name`                | string  | Human-friendly name             |
-| `filament_type`               | string  | `"PLA"`, `"PETG"`, etc.         |
-| `filament_colour`             | string  | Hex, e.g. `"#FFFFFF"`           |
-| `compatible_printers`         | string[]| Empty = universal               |
-| `nozzle_temperature`          | any     | Recommended print temp (°C)     |
-
-### Get one profile by UUID
-
-```
-GET /api/profiles/{profile_uuid}
-```
-
-Returns the full profile dict for inspection. Same 503 behaviour.
-
----
-
-## 2b — Neutral lookups (model / nozzle variant → machine, presets)
-
-Resolve profiles from neutral inputs instead of Orca preset names. Pure catalog lookups: no
-engine needed, answered from the cached catalog.
-
-**Common to all four endpoints**
-- Header `X-Catalog-Version` = body `catalog_version` (opaque; changes only when preset identity or
-  compatibility data changes). Revalidate stored refs when it changes.
-- `"stale": true` in the body when served from an older on-disk cache (no live catalog yet) or
-  while a rebuild runs. No catalog at all: **503** `{"error": "catalog_unavailable"}`.
-- **Refs** are `<kind>:<slug(name)>` (lowercase, runs of non `[a-z0-9.]` → `-`), e.g.
-  `machine:bambu-lab-p1s-0.4-nozzle`, `process:0.20mm-p1s`. Stable across rebuilds while the
-  preset keeps its name. Every item also carries its `uuid`, which the slice endpoints take.
-- `flow` is `high_flow` when the preset name contains "High Flow", else `standard`.
-
-```
-POST /api/profiles/machines/suggest   {"manufacturer": "Bambu Lab", "model": "P1S", "model_key": "p1s"}
-→ {"catalog_version": "…", "candidates": [
-     {"ref": "machine:bambu-lab-p1s-0.4-nozzle", "uuid": "…", "name": "Bambu Lab P1S 0.4 nozzle",
-      "nozzle_diameter_mm": 0.4, "flow": "standard", "confidence": 1.0, "match_reason": "exact_model"}, … ]}
-```
-`match_reason`: `exact_model` | `fuzzy_name` | `vendor_only` (same vendor, other model, conf 0.1,
-max 5). Sorted by confidence, then 0.4 standard first, then nozzle. Max 20. No match → `[]`, 200.
-
-```
-POST /api/profiles/models/variants    {"manufacturer": "Bambu Lab", "model": "P1S"}
-→ {"catalog_version": "…", "variants": [
-     {"ref": …, "uuid": …, "name": …, "nozzle_diameter_mm": 0.4, "flow": "standard", "is_default_guess": true},
-     {… 0.4 high_flow, false}, {… 0.6 standard, false} ]}
-```
-Best-matching model only; ordered by nozzle then standard-before-high-flow. Exactly one
-`is_default_guess` (0.4 standard, else smallest standard). Unknown model → `[]`.
-
-```
-GET /api/profiles/machines/{machine_ref}/presets?kind=process|filament   (default: both)
-→ {"catalog_version": "…", "machine_ref": "…", "presets": [
-     {"ref": "process:0.20mm-p1s", "uuid": "…", "name": "0.20mm P1S", "kind": "process",
-      "compatible_models": ["Bambu Lab P1S"]}, … ]}
-```
-Applies inheritance, then `compatible_printers`. Empty = universal within the machine's own vendor bundle, plus user presets and the shared `OrcaFilamentLibrary` (`compatible_models` omitted
-then). Abstract bases (`instantiation: false`) are excluded. `compatible_printers_condition` is not evaluated. 404 `{"error": "unknown_machine_ref"}`;
-bad `kind` → 422 `{"error": "invalid_kind"}`.
-
-```
-GET /api/profiles/machines/{machine_ref}/supports?bed_x=256&bed_y=256
-→ {"catalog_version": "…", "machine_ref": "…", "supported": true, "reason": null}
-```
-Always 200. `reason`: `unknown_machine_ref` | `bed_mismatch` (>1 mm off; a machine with no
-declared bed size is never ruled out).
-
----
-
-## 3a — Slice with UUID-based profile resolution
-
-```
-POST /api/slice/start
-Content-Type: multipart/form-data
-```
-
-| Field              | Type    | Required | Description                                              |
-|--------------------|---------|----------|----------------------------------------------------------|
-| `file`             | file    | yes      | `.3mf` or `.stl` model                                  |
-| `machine_uuid`     | string  | one of*  | UUID of a `machine` profile — **preferred**, stable across catalog rebuilds |
-| `manufacturer`     | string  | one of*  | e.g. `"Bambu Lab"` — fallback when you don't have `machine_uuid` |
-| `model`            | string  | one of*  | e.g. `"P1S"` — fallback, provide with `manufacturer` + `nozzle` |
-| `nozzle`           | string  | one of*  | e.g. `"0.4"` — fallback, provide with `manufacturer` + `model` |
-| `process_uuid`     | string  | yes      | UUID of a `process` profile                              |
-| `filament_uuids`   | string  | yes      | JSON array of filament UUIDs, e.g. `'["uuid1"]'`         |
-| `plate`            | int     | yes      | Build plate number (1-based)                             |
-| `export_3mf`       | string  | no       | Output 3MF filename; omit to get GCode only              |
-| `geometry_only_retry` | bool | no      | Default `true` — retry stripping model_settings on fail  |
-| `extra_config`     | string  | no       | JSON object merged into project settings after profile resolution (then Bambu-only `-1` "auto" values Orca rejects — `raft_first_layer_expansion`, `tree_support_wall_count` — are clamped to 0). Themis sends bed type + printer overrides + the uploaded 3MF's own process changes + job overrides here, already merged. |
-
-\* Provide `machine_uuid` **or** all three of `manufacturer` + `model` + `nozzle`.
-
-**curl example (preferred — `machine_uuid`):**
-```bash
-curl -X POST http://localhost:5000/api/slice/start \
-  -F "file=@model.3mf" \
-  -F "machine_uuid=<uuid-from-catalog>" \
-  -F 'process_uuid=<uuid-from-catalog>' \
-  -F 'filament_uuids=["<uuid-from-catalog>"]' \
-  -F "plate=1"
-```
-
-**curl example (fallback — manufacturer/model/nozzle):**
-```bash
-curl -X POST http://localhost:5000/api/slice/start \
-  -F "file=@model.3mf" \
-  -F "manufacturer=Bambu Lab" \
-  -F "model=P1S" \
-  -F "nozzle=0.4" \
-  -F 'process_uuid=<uuid-from-catalog>' \
-  -F 'filament_uuids=["<uuid-from-catalog>"]' \
-  -F "plate=1"
-```
-
-**Response:**
-```json
-{ "job_id": "550e8400-...", "status": "pending", "message": "Slicing job started." }
-```
-
-**Error cases:**
-- `503` — catalog not ready
-- `422` — UUID not found, incompatible profiles, `plate < 1`, malformed `filament_uuids`
-- `400` — bad filename
-
----
-
-## 3b — Slice a pre-built 3MF
-
-```
-POST /api/slice/prepared
-Content-Type: multipart/form-data
-```
-
-Use this when the `.3mf` already contains `Metadata/project_settings.config` (i.e., it
-was exported from OrcaSlicer or assembled externally). No catalog lookup is performed.
-
-| Field              | Type    | Required | Description                                    |
-|--------------------|---------|----------|------------------------------------------------|
-| `file`             | file    | yes      | `.3mf` with embedded print settings            |
-| `plate`            | int     | yes      | Build plate number (1-based)                   |
-| `export_3mf`       | string  | no       | Optional output 3MF filename                   |
-| `geometry_only_retry` | bool | no      | Default `true`                                  |
-
-**curl example:**
-```bash
-curl -X POST http://localhost:5000/api/slice/prepared \
-  -F "file=@model_with_settings.3mf" \
-  -F "plate=1"
-```
-
----
-
-## 4 — Poll job status
-
-```
-GET /api/slice/status/{job_id}
-```
-
-Recommended interval: every 2–5 seconds.
+`POST /api/v1/pack` takes multipart `files` (STL only; 3MF uploads are rejected
+with 422, so use `projects/subset` or `projects/merge` to rearrange existing
+projects without losing per-object data) and either a `template` 3MF,
+profile UUIDs, a `machine_uuid` alone (shortcut: uses that machine's bed, no
+process/filament needed; explicit `bed_*` win if also sent), or explicit `bed_x`, `bed_y`,
+`bed_z`. It returns a packed 3MF.
+For quantities send `items` as a JSON array string:
 
 ```json
-{
-  "job_id": "550e8400-...",
-  "status": "completed",
-  "output_format": "gcode",
-  "sliced_file": "model_plate1.gcode",
-  "error": null
-}
+[{"file": "part.stl", "quantity": 3}, {"file": "other.stl", "quantity": 2}]
 ```
 
-`status` values: `pending` → `slicing` → `completed` | `failed`
+Upload each unique file once, with a unique filename. The manifest must name all
+uploads exactly once, quantities must be integers >= 1, and the total is capped
+at 500 instances. Omitting `items` makes one copy per upload. Validation errors
+include per-field `error.details`. Packing preserves each input's minimum Z and
+does not tilt parts about X/Y; the arranger may rotate about Z.
 
-`output_format`: `"gcode"` (standard) or `"gcode_3mf"` (when `export_3mf` was set —
-download returns the `.3mf`).
+`POST /api/v1/arrange` accepts a 3MF and `arrange`/`orient` flags. Orientation is
+opt-in (off by default) to preserve layer direction.
 
-`404` after a job was completed = job was already downloaded and evicted.
+Other project operations:
 
----
+- `POST /api/v1/projects/inspect`: objects in a 3MF.
+- `POST /api/v1/projects/previews`: render plate previews.
+- `POST /api/v1/projects/subset`: select objects and quantities, arrange/retarget.
+- `POST /api/v1/projects/merge`: combine selections from multiple projects.
+- `POST /api/v1/slice/thumbnail`: render a configured 3MF thumbnail.
+- `POST /api/v1/cleanup`: inspect/remove stale temporary directories.
 
-## 5 — Download output
+Subset/merge support `process_uuid` and `filament_uuids` overrides; inspect
+`X-Remap-Warnings` for dropped/remapped filament slots and incompatible embedded
+presets. The OpenAPI document defines multipart field shapes and defaults.
 
-```
-GET /api/slice/download/{job_id}
-```
+### Plate manifest (feature `pack.manifest`)
 
-Only call when `status = "completed"`. Returns `application/octet-stream`.
-
-**Warning:** downloading evicts the job immediately. There is no second download.
-
-```bash
-curl http://localhost:5000/api/slice/download/{job_id} -o output.gcode
-```
-
----
-
-## (Optional) Stream logs
-
-```
-GET /api/slice/logs/{job_id}
-```
-
-Server-Sent Events. Each event: `data: <log line>\r\n\r\n`.
-
-Stream ends with `data: __COMPLETED__` (success) or `data: __FAILED__: <reason>`.
-
-Most agents can skip this and just poll `/api/slice/status` instead.
-
----
-
-## Arrange (synchronous, no job lifecycle)
-
-```
-POST /api/arrange
-Content-Type: multipart/form-data
-```
-
-| Field     | Type    | Required | Default | Description                        |
-|-----------|---------|----------|---------|------------------------------------|
-| `file`    | file    | yes      |         | `.3mf` to arrange                  |
-| `arrange` | bool    | no       | `true`  | Run plate packing                  |
-| `orient`  | bool    | no       | `true`  | Run auto-orientation               |
-
-Returns the rearranged `.3mf` as `application/octet-stream`. Timeout: 35 seconds.
-
-```bash
-curl -X POST http://localhost:5000/api/arrange \
-  -F "file=@multi_model.3mf" \
-  -o arranged.3mf
-```
-
----
-
-## List objects with plate names and previews
-
-```
-POST /api/3mf/previews         # multipart/form-data
-```
-
-| Field    | Type | Required | Description |
-|----------|------|----------|-------------|
-| `file`   | file | yes      | Orca/Bambu `.3mf` |
-| `size`   | int  | no       | Preview edge in px, 32-1024 (default 256) |
-| `images` | bool | no       | `false` = names/plates only, no rendering (fast) |
+`/pack`, `/projects/subset` and `/projects/merge` embed
+`Metadata/laminus_manifest.json` in the returned 3MF:
 
 ```json
-{"objects": [{
-  "id": 8, "name": "insert", "extruder": "1",
-  "plates": [{"plate": 3, "name": "regular pot", "instances": 1}],
-  "preview": {"mime": "image/png", "width": 256, "height": 256, "data_base64": "iVBORw0..."}
-}]}
+{"version": 1,
+ "items": [{"item": 0, "source": "c.stl", "requested": 7}],
+ "plates": [{"plate": 1, "instances": [
+   {"item": 0, "source": "c.stl", "object_id": "16", "object_name": "c", "part": "c.stl"}]}]}
 ```
 
-`plates[].name` is the plate's name in the project, or `Plate N` when unnamed; an object on several plates lists each. `preview` renders **the object itself** (3/4 view, transparent background, tinted with its filament colour, modifier parts omitted), or is `null` if nothing printable. Use `id` in `/api/arrange/subset` / `/api/arrange/merge` selections. Rendering is CPU-bound (~0.5 s/object; a 21-object project ~12 s) - use `images=false` when only names are needed. Requires `numpy` (in `requirements.txt`).
+- `item`: 0-based index of the `/pack` `items` entry (upload order when `items` is
+  omitted) or of the subset/merge `selection` entry.
+- `source`: uploaded filename. `object_id`/`object_name`: the object in the returned 3MF.
+- `part`: stable key within the item: the STL filename (pack) or the source 3MF's
+  object id as a string (subset/merge; a `plate` selector yields several parts).
+- `requested` = qty × parts; per item, instances summed over plates always equal it
+  (otherwise the request fails with 500 instead of returning a wrong manifest).
+- `plate` is the plater_id: `POST /api/v1/jobs` with `plate=N` slices exactly that
+  plate's instances. When two selection entries pick the same object, its instances
+  are attributed in selection order.
 
----
+### Next plate (feature `pack.next`)
 
-## Arrange a subset (pick objects × qty from a 3MF)
-
-```
-POST /api/v1/projects/inspect  # list objects: id, name, extruder, override keys, parts, instances (legacy alias: /api/3mf/objects)
-POST /api/v1/projects/subset   # multipart/form-data (legacy alias: /api/arrange/subset)
-```
-
-| Field             | Type   | Required | Description |
-|-------------------|--------|----------|-------------|
-| `file`            | file   | yes      | Orca/Bambu `.3mf` |
-| `selection`       | string | yes      | JSON `[{"name":"Lid","qty":4},{"id":12,"qty":1}]`. A name shared by several objects → 422, use `id` |
-| `machine_uuid`    | string | no       | Retarget bed/printer keys to this machine preset (catalog UUID) |
-| `process_uuid`    | string | no       | Replace the project's process preset with this one (needs `machine_uuid`) |
-| `filament_uuids`  | string | no       | JSON array of filament preset UUIDs, one per slot (needs `machine_uuid`; more than the machine's slots → 422) |
-| `allow_rotations` | bool   | no       | Pass `--allow-rotations` to the arranger |
-
-Returns a `.3mf` with only the selected objects (qty copies each, as instances) arranged over as many plates as OrcaSlicer needs. Headers: `X-Plate-Count`, `X-Instance-Count`, `X-Warnings` (objects not resting on the bed; empty when fine). Per-object/part overrides, modifier parts, height ranges and painted data are preserved; with `machine_uuid`, filament slots are cut to what the machine supports (`nozzle_diameter` count, unless `single_extruder_multi_material`): per-slot settings are truncated and objects/parts/height ranges on a dropped slot move to extruder 1. Painted colours are not remapped. `process_uuid` / `filament_uuids` replace the embedded presets; otherwise embedded presets whose `compatible_printers` exclude the target are reported. `X-Remap-Warnings` lists everything remapped/dropped/incompatible. See `docs/experiments/subset-arrange.md`.
-
-```bash
-curl -X POST http://localhost:5000/api/v1/projects/subset \
-  -F "file=@project.3mf" \
-  -F 'selection=[{"name":"Lid","qty":6},{"id":12,"qty":2}]' \
-  -F "machine_uuid=8aaac37c-14a7-5a53-b9f7-3dd1df210919" \
-  -o subset.3mf -D -
-```
-
----
-
-## Merge selections from several 3MFs into one
-
-```
-POST /api/v1/projects/merge    # multipart/form-data, repeated `files` parts (legacy alias: /api/arrange/merge)
-```
-
-| Field             | Type   | Required | Description |
-|-------------------|--------|----------|-------------|
-| `files`           | file[] | yes      | Two or more `.3mf`. **The first upload is the base**: its process/filament/printer settings, thumbnails and metadata are used for the whole result |
-| `selection`       | string | yes      | JSON list. Each entry names its source with `file` (uploaded filename, or 0-based upload index) plus `id` / `name` / `plate` and `qty` |
-| `machine_uuid`    | string | no       | Retarget bed/printer keys (as in `/api/arrange/subset`) |
-| `process_uuid`    | string | no       | Replace the project's process preset with this one (needs `machine_uuid`) |
-| `filament_uuids`  | string | no       | JSON array of filament preset UUIDs, one per slot (needs `machine_uuid`; more than the machine's slots → 422) |
-| `allow_rotations` | bool   | no       | Pass `--allow-rotations` to the arranger |
-
-`{"plate": N, "qty": q}` = everything on source plate N (each object x its count there x q); it also works in `/api/arrange/subset`. Entries for the same object accumulate.
-
-Response: one `.3mf`. Headers `X-Plate-Count`, `X-Instance-Count`, `X-Remap-Warnings` (as in subset, prefixed by source file) and `X-Merge-Warnings` (non-empty when a non-base source used a different process/filament preset, has painted data with a different filament count, or an object ends up not resting on the bed - floating/sunk by more than 0.5 mm). Errors: 422 (bad selection / unknown file / base not selected / non-base object uses a filament slot the base lacks), 400, 408, 503.
-
-```bash
-curl -X POST http://localhost:5000/api/arrange/merge   -F "files=@Hex-Moss-Pole.3mf"   -F "files=@cloud pots.3mf"   -F 'selection=[
-        {"file":"Hex-Moss-Pole.3mf","plate":1,"qty":2},
-        {"file":"Hex-Moss-Pole.3mf","plate":6},
-        {"file":"Hex-Moss-Pole.3mf","plate":7},
-        {"file":"cloud pots.3mf","plate":3,"qty":2},
-        {"file":"cloud pots.3mf","id":8,"qty":1}]'   -F "machine_uuid=0f0a771f-0a29-5077-8571-e1fee605f432"   -o merged.3mf -D -
-```
-
----
-
-## Upload a user profile
-
-```
-POST /api/profiles/upload
-Content-Type: multipart/form-data
-```
-
-| Field  | Type   | Values                      |
-|--------|--------|-----------------------------|
-| `type` | string | `machine`, `process`, `filament` |
-| `file` | file   | Flat OrcaSlicer preset JSON |
-
-Triggers a catalog rebuild. Wait ~5 seconds, then call `GET /api/profiles?refresh=false`
-to confirm the new profile appears.
-
----
-
-## Error response shape
-
-All JSON error responses have a single `detail` field:
+`POST /api/v1/pack/next` returns the fullest single plate one machine can print
+from a remaining-parts selection. Multipart: repeated `files` (`.3mf` and/or
+`.stl`), `machine_uuid` (required), optional `max_parts`, and `selection` shaped
+like `/projects/merge`, plus an optional `rule` per entry:
 
 ```json
-{ "detail": "Human-readable error message." }
+[{"file": "a.3mf", "plate": 2, "qty": 1, "rule": "together"},
+ {"file": "a.3mf", "id": 8, "qty": 3},
+ {"file": "b.stl", "qty": 6}]
 ```
 
-The 503 "catalog building" response is the exception:
+- An STL entry is `{file, qty}` only.
+- `split` (default): instances are placed independently.
+- `together`: each copy of the entry (e.g. one plate bundle) is all-or-nothing on
+  the returned plate. Orca chooses the copy's layout; the authored layout is not kept.
+- `solo` is rejected with 422; send those as their own jobs.
+- Orca arranges the selection for the machine's bed and plate 1 is taken. Parts
+  larger than the bed are left out up front. A `together` copy Orca split is dropped;
+  over `max_parts`, whole units are dropped, last placed first. After any drop the
+  kept instances are arranged again.
+- **200**: a single-plate `.3mf` with the footprint centred on the bed, ready for
+  `POST /api/v1/jobs` `plate=1`. Its manifest (schema above) has
+  `items[].requested` (asked) and `items[].consumed` (on this plate). Header
+  `X-Consumed` is a JSON array of consumed instances indexed by selection entry,
+  e.g. `[4,3,2]`.
+- **422 with `error.code` `nothing_fits`**: nothing fits this machine's bed.
+  `error.details[].loc` is `["body", "selection", <entry>]` for each entry whose
+  parts are too big. No other failure uses this code; bad input (including `solo`)
+  is a 422 with code `unprocessable`.
+
+### Mixed multi-plate pack (feature `pack.mixed`)
+
+`POST /api/v1/pack/mixed` arranges a mixed selection on the fewest plates of one
+bed. Same `files` and `selection` as `/pack/next` (`rule` per entry), plus the bed:
+either `bed_x` + `bed_y` + `bed_z` (mm; printer-less, only the projects' bed is
+replaced) or `machine_uuid` (bed and printer retargeted), never both.
+
+- `split` (default): instances go where OrcaSlicer's arrange puts them.
+- `together`: each copy (one `plate` bundle) lands whole on one plate; Orca chooses
+  its layout. Copies Orca split are taken off and arranged again; one that still
+  splits on its own is `part_too_large`.
+- `solo`: each instance alone on its own plate, footprint centred, placed after the
+  arranged plates.
+- **200**: one multi-plate `.3mf`; slice each plate with `POST /api/v1/jobs`
+  `plate=N`. 3MF objects keep per-object overrides, modifiers and paint; project
+  settings come from the first selected `.3mf` (as `/projects/merge`). Manifest
+  (schema above): `item` = selection index, `part` = source object id or STL
+  filename, `requested` = qty × parts, always fully placed. Headers
+  `X-Plate-Count`, `X-Instance-Count`, `X-Merge-Warnings`.
+- Fewest plates is Orca's arrange plus the together repair, not a global optimum:
+  a re-arranged copy goes on a new plate rather than into gaps it left.
+- **422 with `error.code` `part_too_large`**: a part bigger than the bed, or a
+  `together` copy bigger than one plate. `error.details[].loc` is
+  `["body", "selection", <entry>]` per offending entry. Other input errors are 422
+  `unprocessable`.
+
+### Measure (feature `projects.measure`)
+
+`POST /api/v1/projects/measure` returns bounding-box sizes for fit checks. Multipart
+`file` (`.3mf` or `.stl`) and optional `selection`, a JSON list of `{"id": n}` /
+`{"name": s}` (one object) or `{"plate": n}` (one plate); omitted or `[]` measures
+the whole file.
+
 ```json
-{ "status": "building_catalog", "detail": "Catalog not ready. Retry shortly." }
+{"items": [{"size_mm": [70.0, 60.0, 10.0]}, {"size_mm": [150.0, 60.0, 30.0]}]}
 ```
 
----
+- One item per selection entry, in order (one for the whole file).
+- Axis-aligned box of printed parts (modifier / negative / blocker / enforcer parts
+  ignored), after the build transform. An object is its first instance as placed,
+  so a rotated object reports its placed size. A plate is every instance on it as
+  authored. A whole 3MF is every build item; a multi-plate project needs `plate`
+  selectors. An STL is its mesh extents and takes no selection.
+- 422 `unprocessable`: unreadable file, bad selection, unknown or ambiguous object,
+  missing or empty plate.
 
-## UUID stability
+Machine catalog entries (`GET /api/v1/profiles?type=machine`, `/profiles/{uuid}`) carry
+`bed_size_z`: the machine's `printable_height` in mm (`null` when the preset does not
+declare one), alongside `bed_size_x` / `bed_size_y`.
 
-Profile UUIDs are deterministic (UUID5) and do not change across container restarts:
+## Errors and readiness
 
-- **Machine UUIDs** are derived from `(manufacturer, model, nozzle)`.
-- **Process / filament UUIDs** are derived from `(source, rel_path)`.
+V1 errors, including validation and unknown v1 routes, use:
 
-This means a UUID discovered in one session is valid in the next session without
-re-querying the catalog, as long as the profile files haven't changed.
+```json
+{"error":{"code":"job_not_found","message":"Job not found.","status":404},"request_id":"..."}
+```
+
+Validation errors may include `error.details`. Branch on `error.code`, display
+`error.message`, and retain the request ID for diagnostics. Responses include
+`X-Request-ID` and `API-Version: v1`. Catalog-not-ready errors carry `Retry-After`.
+Do not submit profile-dependent work until health reports the catalog loaded.

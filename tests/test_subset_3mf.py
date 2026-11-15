@@ -300,7 +300,7 @@ def _upload(src_path):
 
 
 def test_endpoint_list_objects(src):
-    r = TestClient(app).post("/api/3mf/objects", files=[_upload(src)])
+    r = TestClient(app).post("/api/v1/projects/inspect", files=[_upload(src)])
     assert r.status_code == 200
     assert {o["name"] for o in r.json()["objects"]} == {"Lid", "Base"}
 
@@ -323,7 +323,7 @@ def test_endpoint_subset_runs_orca_on_expanded_oracle(src):
 
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
         r = TestClient(app).post(
-            "/api/arrange/subset", files=[_upload(src)],
+            "/api/v1/projects/subset", files=[_upload(src)],
             data={"selection": json.dumps([{"name": "Lid", "qty": 5}]), "allow_rotations": "true"})
     assert r.status_code == 200, r.text
     assert r.headers["X-Instance-Count"] == "5"
@@ -341,13 +341,13 @@ def test_endpoint_subset_runs_orca_on_expanded_oracle(src):
     ('[{"name": "Nope", "qty": 1}]', 422),
 ])
 def test_endpoint_rejects_bad_selection(src, selection, code):
-    r = TestClient(app).post("/api/arrange/subset", files=[_upload(src)], data={"selection": selection})
+    r = TestClient(app).post("/api/v1/projects/subset", files=[_upload(src)], data={"selection": selection})
     assert r.status_code == code
 
 
 def test_endpoint_rejects_non_3mf():
     r = TestClient(app).post(
-        "/api/arrange/subset", files=[("file", ("m.stl", b"x", "application/octet-stream"))],
+        "/api/v1/projects/subset", files=[("file", ("m.stl", b"x", "application/octet-stream"))],
         data={"selection": "[]"})
     assert r.status_code == 400
 
@@ -432,7 +432,7 @@ def test_endpoint_merge_two_files(src, tmp_path):
              ("files", ("second.3mf", open(other, "rb"), "application/octet-stream"))]
     sel = [{"file": "first.3mf", "plate": 1, "qty": 2}, {"file": 1, "name": "Lid", "qty": 1}]
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
-        r = TestClient(app).post("/api/arrange/merge", files=files, data={"selection": json.dumps(sel)})
+        r = TestClient(app).post("/api/v1/projects/merge", files=files, data={"selection": json.dumps(sel)})
     assert r.status_code == 200, r.text
     assert r.headers["X-Instance-Count"] == "5" and r.headers["X-Plate-Count"] == "2"
     fp = s.fingerprint(io.BytesIO(r.content))
@@ -458,7 +458,7 @@ def test_endpoint_merge_selection_validation(src, selection, code):
     files = [("files", ("first.3mf", open(src, "rb"), "application/octet-stream")),
              ("files", ("second.3mf", open(src, "rb"), "application/octet-stream"))]
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
-        r = TestClient(app).post("/api/arrange/merge", files=files, data={"selection": selection})
+        r = TestClient(app).post("/api/v1/projects/merge", files=files, data={"selection": selection})
     assert r.status_code == code, r.text
 
 
@@ -492,13 +492,13 @@ def test_object_previews_names_plates_and_png(src, tmp_path):
 
 def test_endpoint_previews(src):
     c = TestClient(app)
-    r = c.post("/api/3mf/previews", files=[_upload(src)], data={"size": "48"})
+    r = c.post("/api/v1/projects/previews", files=[_upload(src)], data={"size": "48"})
     assert r.status_code == 200, r.text
     objs = r.json()["objects"]
     assert {o["name"] for o in objs} == {"Lid", "Base"} and all(o["preview"]["height"] == 48 for o in objs)
-    r = c.post("/api/3mf/previews", files=[_upload(src)], data={"images": "false"})
+    r = c.post("/api/v1/projects/previews", files=[_upload(src)], data={"images": "false"})
     assert all(o["preview"] is None and o["plates"] for o in r.json()["objects"])
-    assert c.post("/api/3mf/previews", files=[_upload(src)], data={"size": "5"}).status_code == 422
+    assert c.post("/api/v1/projects/previews", files=[_upload(src)], data={"size": "5"}).status_code == 422
 
 
 def test_merge_makes_inner_object_ids_unique_across_sources(src, tmp_path):
@@ -548,7 +548,7 @@ def test_endpoints_report_empty_warnings_for_flat_layout(src):
         return proc
 
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
-        r = TestClient(app).post("/api/arrange/subset", files=[_upload(src)],
+        r = TestClient(app).post("/api/v1/projects/subset", files=[_upload(src)],
                                  data={"selection": json.dumps([{"name": "Lid", "qty": 3}])})
     assert r.status_code == 200 and r.headers["X-Warnings"] == ""
 
@@ -659,7 +659,7 @@ class _FakeCatalog:
         return self.cfgs[u]
 
 
-def _post_subset(src_path, _url="/api/arrange/subset", **data):
+def _post_subset(src_path, _url="/api/v1/projects/subset", **data):
     async def _fake_orca(*args, **kwargs):
         a = list(args)
         _fake_two_plates(a[-1], a[a.index("--export-3mf") + 1])
@@ -737,3 +737,39 @@ def test_replacing_the_process_preset_clears_its_recorded_changes_only():
     kept = {"different_settings_to_system": ["layer_height", "", ""], "filament_colour": ["#FFFFFF"], "nozzle_diameter": ["0.4"]}
     s.remap_for_target(kept, _ONE_EXTRUDER)                       # no process replacement: the author's changes stay
     assert kept["different_settings_to_system"] == ["layer_height", "", ""]
+
+
+
+def test_parse_rejects_utf16_entity_declaration():
+    # a byte scan for b"<!ENTITY" misses UTF-16; defusedxml must still refuse it
+    from app.subset_3mf import SubsetError, _parse
+    xml = '<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE m [<!ENTITY x "boom">]><m>&x;</m>'
+    with pytest.raises(SubsetError):
+        _parse(xml.encode("utf-16"))
+
+
+def test_open_zip_rejects_oversized_expansion(tmp_path, monkeypatch):
+    path = str(tmp_path / "big.3mf")
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("a.bin", b"x" * 4096)
+    monkeypatch.setattr(s, "MAX_3MF_UNCOMPRESSED_BYTES", 1024)
+    with pytest.raises(s.SubsetError, match="expands past"):
+        s.open_zip(path)
+
+
+def test_open_zip_rejects_duplicate_entries(tmp_path):
+    path = str(tmp_path / "dup.3mf")
+    with pytest.warns(UserWarning):
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("a.txt", b"1")
+            z.writestr("a.txt", b"2")
+    with pytest.raises(s.SubsetError, match="duplicate"):
+        s.open_zip(path)
+
+
+def test_list_objects_rejects_zip_bomb(tmp_path, monkeypatch):
+    path = str(tmp_path / "in.3mf")
+    make_3mf(path)
+    monkeypatch.setattr(s, "MAX_3MF_UNCOMPRESSED_BYTES", 10)
+    with pytest.raises(s.SubsetError):
+        s.list_objects(path)

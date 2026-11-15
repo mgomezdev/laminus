@@ -3,11 +3,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import zipfile
 
+# Preset bookkeeping, not settings. `name` in particular: OrcaSlicer 2.4.2 discards the whole
+# project config when it is present as a list (which the filament merge made it) and slices
+# with its defaults - 200 x 200 bed, default speeds and temperatures.
 _STRIP_KEYS = {
     "inherits", "compatible_printers", "compatible_printers_condition",
     "is_custom_defined", "from", "instantiation",
+    "name", "type", "setting_id", "base_id", "description", "renamed_from",
 }
 
 def build_project_settings(machine: dict, process: dict, filaments: list[dict]) -> dict:
@@ -36,47 +41,77 @@ def build_project_settings(machine: dict, process: dict, filaments: list[dict]) 
             values.append(val)
         config[key] = values
 
+    normalize_filament_ids(config, len(filaments))
+
     config["from"] = "user"
     config.setdefault("version", process.get("version", machine.get("version", "1.0.0")))
-    # OrcaSlicer CLI -51: if machine_start_gcode uses M83 (relative extrusion),
-    # layer_gcode must contain G92 E0 or the slicer aborts. Docker AppImage profiles
-    # omit the key entirely; inject the minimal safe default when absent.
-    config.setdefault("layer_gcode", "G92 E0\n")
-    _ensure_extruder_reset_per_layer(config)
+    ensure_extruder_reset_per_layer(config)
     return config
 
 
-def _ensure_extruder_reset_per_layer(config: dict) -> None:
-    """OrcaSlicer 2.4 refuses to slice with relative extruder addressing (-51) unless
-    ``before_layer_change_gcode`` contains ``G92 E0`` - the error text names the legacy
-    ``layer_gcode`` key, which the slicer no longer reads. Klipper presets (e.g. Elegoo
-    Centauri Carbon) are treated as relative even with ``use_relative_e_distances`` off, and
-    their vendor presets leave this key unset. A per-layer extruder reset is a no-op for
-    relative addressing, so add it whenever relative addressing applies."""
-    relative = (str(config.get("use_relative_e_distances", "")).lower() in ("1", "true")
-                or config.get("gcode_flavor") == "klipper")
-    if not relative:
-        return
-    current = config.get("before_layer_change_gcode") or ""
-    if "G92 E0" not in current:
-        config["before_layer_change_gcode"] = (current.rstrip("\n") + "\n" if current else "") + "G92 E0\n"
+def normalize_filament_ids(config: dict, filament_count: int | None = None) -> bool:
+    """BIZ-351: projects carry each filament's id as ``filament_ids``, never the preset-level
+    ``filament_id``. OrcaSlicer 2.4.2 segfaults in --export-3mf if ``filament_id`` is present
+    or ``filament_ids`` is missing/empty; "" is accepted for a filament without an id.
+    Fixes *config* in place and returns whether anything changed."""
+    preset_ids = config.pop("filament_id", None)
+    if config.get("filament_ids"):
+        return preset_ids is not None
+    if isinstance(preset_ids, list) and preset_ids:
+        config["filament_ids"] = preset_ids
+    else:
+        if filament_count is None:
+            types = config.get("filament_type")
+            filament_count = len(types) if isinstance(types, list) else 0
+        config["filament_ids"] = [""] * max(filament_count, 1)
+    return True
 
 
-# Bambu Studio writes -1 ("auto") for options whose Orca minimum is 0; the Orca CLI rejects the whole project
-# ("not in range") where the GUI would silently clamp. Reaches slice/start through `extra_config` when a client carries a
-# Bambu-made 3MF's own setting changes onto the target preset.
-ORCA_MIN_CLAMP = {"raft_first_layer_expansion": 0, "tree_support_wall_count": 0}
+_G92_E0 = re.compile(r"^[ \t]*G92[ \t]*E(0(\.0*)?|\.0+)[ \t]*(;.*)?$", re.MULTILINE)
 
 
-def clamp_orca_minimums(config: dict) -> dict:
-    """Raise known Bambu-only out-of-range values to Orca's minimum, in place; non-numeric values are left alone."""
-    for k, floor in ORCA_MIN_CLAMP.items():
-        try:
-            if float(config.get(k, floor)) < floor:
-                config[k] = str(floor)
-        except (TypeError, ValueError):
-            pass
-    return config
+def ensure_extruder_reset_per_layer(config: dict) -> bool:
+    """Mirror OrcaSlicer 2.4.2's -51 check (Print::validate): relative extrusion
+    (``use_relative_e_distances``, default true) on a marlin/marlin2 flavor needs an exact
+    ``G92 E0`` in ``before_layer_change_gcode`` or ``layer_change_gcode`` - the error text
+    names the legacy ``layer_gcode``, which it does not read. Orca exempts BBL printers but
+    does not recognise one in a Laminus-built project, so Bambu gets the reset too. Klipper
+    needs none, and absolute extrusion rejects one, so both are left alone.
+    Fixes *config* in place and returns whether anything changed."""
+    relative = str(config.get("use_relative_e_distances", "1")).lower() not in ("0", "false")
+    if not relative or config.get("gcode_flavor", "marlin") not in ("marlin", "marlin2"):
+        return False
+    before = config.get("before_layer_change_gcode") or ""
+    if _G92_E0.search(before) or _G92_E0.search(config.get("layer_change_gcode") or ""):
+        return False
+    config["before_layer_change_gcode"] = (before.rstrip("\n") + "\n" if before else "") + "G92 E0\n"
+    return True
+
+
+# BIZ-352: Bambu Studio 2.x writes -1 for "auto" on these; OrcaSlicer 2.4.2 range-checks them
+# (min 0) and fails the slice -18. Each maps to Orca's own default. Other -1 values Bambu
+# writes (prime_tower_lift_height, ironing_fan_speed, filament_ramming_volumetric_speed, ...)
+# are accepted by Orca and left alone.
+_BAMBU_AUTO_DEFAULTS = {
+    "raft_first_layer_expansion": "2",
+    "tree_support_wall_count": "0",
+}
+
+
+def replace_bambu_auto_sentinels(config: dict) -> list[str]:
+    """Replace Bambu's "-1 = auto" values Orca rejects with Orca's defaults, in place.
+    Returns one note per rewritten key, for the job log."""
+    notes = []
+    for key, default in _BAMBU_AUTO_DEFAULTS.items():
+        val = config.get(key)
+        if isinstance(val, list):
+            new = [default if str(v).strip() == "-1" else v for v in val]
+        else:
+            new = default if val is not None and str(val).strip() == "-1" else val
+        if new != val:
+            config[key] = new
+            notes.append(f"{key}: -1 (Bambu auto) -> {default}")
+    return notes
 
 
 def embed_project_settings(src_3mf: str, project_settings: dict, dst_3mf: str) -> None:

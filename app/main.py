@@ -5,6 +5,7 @@ import asyncio
 import signal
 import uuid
 import glob
+import re
 import time
 import logging
 import json
@@ -17,10 +18,19 @@ from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPExcept
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from app.profile_catalog import ProfileCatalog
-from app.project_config_builder import build_project_settings, clamp_orca_minimums, embed_project_settings
+from app.project_config_builder import build_project_settings, embed_project_settings, replace_bambu_auto_sentinels
 from app import preview_3mf as _preview
 from app import subset_3mf as _subset
-from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf, inject_stls_into_3mf as _inject_stls_into_3mf, strip_application_version as _strip_app_version
+from app import manifest as _manifest
+from app import measure as _measure
+from app import pack_mixed as _pack_mixed
+from app import pack_next as _pack_next
+from app import plate_extract as _plate_extract
+from app.plate_extract import (
+    extract_plate as _extract_plate, retarget_plate as _retarget_plate,
+    PlateExtractError as _PlateExtractError, PlateFitError as _PlateFitError,
+)
+from app.stl_to_3mf import stl_to_3mf as _stl_to_3mf, inject_stls_into_3mf as _inject_stls_into_3mf, stl_min_z as _stl_min_z, restore_build_item_z as _restore_build_item_z, restore_z_from_source as _restore_z_from_source, strip_application_version as _strip_app_version
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("laminus")
@@ -37,7 +47,27 @@ def _form_default_true(value) -> bool:
     return str(value).strip().lower() not in ("false", "0", "no", "off", "")
 
 
-CONFIG_DIR = "/config"
+def _form_default_false(value) -> bool:
+    """Opt-in flag: omitted means False; "true"/"1"/"yes"/"on" turn it on."""
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
+
+
+GEOMETRY_ONLY_RETRY_DESC = (
+    "Opt-in fallback, default `false`. When `true` and the first slice fails, retry once with "
+    "`Metadata/model_settings.config` removed. The retry DISCARDS every per-object and per-part "
+    "override (walls, infill, supports, brim, modifiers, layer ranges, extruder assignment) and "
+    "the plate settings, so the result can differ from the project; the job log says so when it "
+    "happens."
+)
+
+
+# CONFIG_DIR / DATA_DIR are env-overridable so the e2e suite can run the real app as a
+# non-root user; in the container they stay at their mount points.
+CONFIG_DIR = os.environ.get("CONFIG_DIR", "/config")
 USER_CONFIG_DIR = os.environ.get("USER_CONFIG_DIR", os.path.join(CONFIG_DIR, "user"))
 # The datadir passed to the OrcaSlicer CLI itself (--datadir). Set by entrypoint.sh to
 # a disposable scratch path, with only user/ and plugins/ symlinked back into the
@@ -45,9 +75,9 @@ USER_CONFIG_DIR = os.environ.get("USER_CONFIG_DIR", os.path.join(CONFIG_DIR, "us
 # given, and neither belongs in a volume that gets backed up. Falls back to CONFIG_DIR
 # so local (non-Docker, non-entrypoint.sh) dev keeps working.
 ORCA_DATADIR = os.environ.get("ORCA_DATADIR", CONFIG_DIR)
-DATA_DIR = "/data"
-JOBS_DIR = "/tmp/jobs"
-ARRANGE_DIR = "/tmp/arrange"
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
+JOBS_DIR = os.environ.get("JOBS_DIR", "/tmp/jobs")
+ARRANGE_DIR = os.environ.get("ARRANGE_DIR", "/tmp/arrange")
 
 JOB_TTL = int(os.environ.get("JOB_TTL_SECONDS", "3600"))
 JOB_SWEEP_INTERVAL = int(os.environ.get("JOB_SWEEP_INTERVAL_SECONDS", "300"))
@@ -67,6 +97,7 @@ _orcaslicer_version: Optional[str] = None
 _catalog_task: Optional[asyncio.Task] = None
 # Template cache: maps (machine_uuid, process_uuid, filament_uuids_key) → 3MF bytes
 _template_cache: Dict[str, bytes] = {}
+PACK_MAX_INSTANCES = 500  # total copies across all STLs in one /api/v1/pack call
 
 
 # Fix R6: lifespan context runs startup/shutdown logic and background eviction task
@@ -155,35 +186,35 @@ app = FastAPI(
         "Laminus is a sidecar service used by Themis; it is not intended to be called directly "
         "by end-users in normal operation.\n\n"
         "## Typical agent workflow\n\n"
-        "1. **`GET /api/health`** — wait until `catalog_loaded: true` before making any other calls.\n"
-        "2. **`GET /api/profiles`** — discover machine / process / filament UUIDs for your printer "
+        "1. **`GET /api/v1/health`** — wait until `catalog_loaded: true` before making any other calls.\n"
+        "2. **`GET /api/v1/profiles`** — discover machine / process / filament UUIDs for your printer "
         "and material. Filter by `manufacturer`, `model`, and `nozzle` to narrow results.\n"
-        "3. **`POST /api/slice/start`** — upload the model (`.3mf` or `.stl`) with the resolved "
-        "UUIDs. The response contains a `job_id`.\n"
-        "4. **`GET /api/slice/status/{job_id}`** — poll every 2–5 s until `status` is `completed` "
+        "3. **`POST /api/v1/jobs`** — upload the model (`.3mf` or `.stl`) with the resolved "
+        "UUIDs. The 202 response contains an `id`.\n"
+        "4. **`GET /api/v1/jobs/{job_id}`** — poll every 2–5 s until `status` is `completed` "
         "or `failed`.\n"
-        "5. **`GET /api/slice/download/{job_id}`** — retrieve the GCode (or `.3mf` when "
-        "`export_3mf` was requested). Downloading evicts the job immediately.\n\n"
-        "Alternatively, use **`POST /api/slice/prepared`** when the 3MF already embeds print "
+        "5. **`GET /api/v1/jobs/{job_id}/artifact`** — retrieve the GCode (or `.3mf` when "
+        "`export_3mf` was requested). Downloading removes the artifact; the job record remains.\n\n"
+        "Alternatively, use **`POST /api/v1/slice/prepared`** when the 3MF already embeds print "
         "settings from a previous OrcaSlicer session — no profile resolution is needed.\n\n"
         "## Packing / arrangement\n\n"
-        "Use **`POST /api/pack`** to distribute STL geometry across build plates before slicing. "
+        "Use **`POST /api/v1/pack`** to distribute STL geometry across build plates before slicing. "
         "Three modes: supply a template `.3mf`, profile UUIDs (preferred — catalog-aware), or "
         "explicit bed dimensions. The packed `.3mf` is returned directly (synchronous, up to "
         "120 s).\n\n"
         "## Error conventions\n\n"
         "- **422** — caller-side validation failure (bad UUIDs, missing required fields, etc.).\n"
         "- **503** — Laminus is not yet ready; the catalog is still building. "
-        "Retry after `GET /api/health` reports `catalog_loaded: true`.\n"
+        "Retry after `GET /api/v1/health` reports `catalog_loaded: true`.\n"
         "- **400 / 408 / 500** — OrcaSlicer-side failures; check server logs for details."
     ),
-    version="0.10.2",
+    version="0.12.0",
     lifespan=lifespan,
     openapi_tags=[
         {
             "name": "health",
             "description": (
-                "Service readiness and version information. Always check `/api/health` first — "
+                "Service readiness and version information. Always check `/api/v1/health` first — "
                 "profile and slice endpoints return **503** while `catalog_loading` is `true`."
             ),
         },
@@ -211,8 +242,8 @@ app = FastAPI(
             "description": (
                 "Synchronous plate arrangement and STL packing. No job tracking — responses "
                 "block until OrcaSlicer finishes (up to `ARRANGE_TIMEOUT_SECONDS`, default 120). "
-                "Use `POST /api/pack` to combine multiple STLs into a single multi-plate `.3mf`, "
-                "and `POST /api/arrange` to re-pack an existing `.3mf`."
+                "Use `POST /api/v1/pack` to combine multiple STLs into a single multi-plate `.3mf`, "
+                "and `POST /api/v1/arrange` to re-pack an existing `.3mf`."
             ),
         },
         {
@@ -262,8 +293,8 @@ class MergedConfigRequest(BaseModel):
     machine_uuid: str = Field(
         ...,
         description=(
-            "Stable UUID of the machine (printer) profile. Obtain from `GET /api/profiles` "
-            "or `GET /api/profiles/{uuid}`. Machine UUIDs are derived from the "
+            "Stable UUID of the machine (printer) profile. Obtain from `GET /api/v1/profiles` "
+            "or `GET /api/v1/profiles/{uuid}`. Machine UUIDs are derived from the "
             "(manufacturer, model, nozzle) tuple and are stable across catalog rebuilds."
         ),
     )
@@ -309,8 +340,8 @@ def init_config_directories():
 
 jobs: Dict[str, dict] = {}
 
-# job_ids of in-flight /api/pack, /api/arrange, /api/slice/thumbnail requests. These
-# are synchronous requests tracked in no other registry, so POST /api/cleanup (with
+# job_ids of in-flight /api/v1/pack, /api/v1/arrange, /api/v1/slice/thumbnail requests. These
+# are synchronous requests tracked in no other registry, so POST /api/v1/cleanup (with
 # min_age_seconds=0) would otherwise delete their scratch dirs / stable output copies
 # mid-write. _scan_stale_temp excludes any ARRANGE_DIR entry whose name contains one
 # of these ids, regardless of age.
@@ -456,7 +487,7 @@ async def _evict_stale_jobs():
 
 
 # --- Job history: a longer-lived record of every job, independent of the active `jobs` dict.
-# Backs GET /api/jobs (status + history view in the Web UI). Entries persist across the job's
+# Backs GET /api/v1/jobs (status + history view in the Web UI). Entries persist across the job's
 # eviction from `jobs` (download or TTL sweep) so the UI can still show what happened.
 job_history: "OrderedDict[str, dict]" = OrderedDict()
 _HISTORY_FILE = os.path.join(DATA_DIR, "job_history.json")
@@ -555,59 +586,10 @@ async def get_dashboard():
     return HTMLResponse(content=html_content)
 
 
-@app.get(
-    "/api/profiles",
-    tags=["profiles"],
-    summary="List profiles in the catalog",
-    description=(
-        "Returns all machine, process, and filament presets known to this container.\n\n"
-        "**Filtering:** supply all three of `manufacturer`, `model`, and `nozzle` together "
-        "to receive only the matching machine preset plus all process and filament presets "
-        "that declare that machine in their `compatible_printers` list. Supplying only one "
-        "or two of the three parameters is a **422** error.\n\n"
-        "**Refresh:** pass `refresh=true` to schedule a background catalog rebuild "
-        "(e.g., after uploading new profiles via `POST /api/profiles/upload`). The response "
-        "reflects the *current* catalog immediately; the new catalog is available after ~5 s. "
-        "While rebuilding, `GET /api/health` will show `catalog_building: true`.\n\n"
-        "**Response shape:**\n"
-        "```json\n"
-        "{\n"
-        '  "machine":  [{ "uuid": "...", "name": "...", "manufacturer": "...", "model": "...", "nozzle": "..." }],\n'
-        '  "process":  [{ "uuid": "...", "name": "...", "layer_height": 0.2, "compatible_printers": [...] }],\n'
-        '  "filament": [{ "uuid": "...", "name": "...", "filament_type": "PLA", "filament_colour": "#FFFFFF", ... }]\n'
-        "}\n"
-        "```\n\n"
-        "Returns **503** while the catalog is initialising on container start."
-    ),
-    responses={
-        422: {"description": "Partial filter: supply all three of manufacturer/model/nozzle or none"},
-        503: {"description": "Catalog not yet ready — retry after /api/health reports catalog_loaded: true"},
-    },
-)
-async def get_profiles(
-    manufacturer: Optional[str] = None,
-    model: Optional[str] = None,
-    nozzle: Optional[str] = None,
-    refresh: bool = False,
-):
-    if refresh:
-        _trigger_catalog_rebuild()
-    if catalog is None:
-        return JSONResponse(
-            status_code=503,
-            content={"status": "building_catalog", "detail": "Catalog not ready. Retry shortly."},
-        )
-    tuple_params = [p for p in (manufacturer, model, nozzle) if p is not None]
-    if tuple_params and len(tuple_params) != 3:
-        raise HTTPException(
-            status_code=422,
-            detail="Provide all three of manufacturer, model, and nozzle together, or none.",
-        )
-    return catalog.as_dict(manufacturer=manufacturer, model=model, nozzle=nozzle)
 
 
 @app.post(
-    "/api/profiles/merged-config",
+    "/api/v1/profiles/merged-config",
     tags=["profiles"],
     summary="Get merged project_settings.config for a profile set",
     description=(
@@ -632,9 +614,9 @@ async def get_profiles(
                 "or filament_uuids is empty"
             ),
         },
-        503: {"description": "Catalog not yet ready — retry after /api/health reports catalog_loaded: true"},
+        503: {"description": "Catalog not yet ready — retry after /api/v1/health reports catalog_loaded: true"},
     },
-)
+    operation_id="v1_get_merged_config")
 async def get_merged_config(body: MergedConfigRequest):
     if catalog is None:
         return JSONResponse(
@@ -665,20 +647,20 @@ async def get_merged_config(body: MergedConfigRequest):
 
 
 @app.get(
-    "/api/profiles/broken",
+    "/api/v1/profiles/broken",
     tags=["profiles"],
     summary="List profiles excluded from the catalog",
     description=(
         "Profiles dropped by the last catalog build, each with the reason. An unresolvable "
         "`inherits` parent here is the signal that an OrcaSlicer update renamed or removed a "
         "vendor base that a user profile was building on.\n\n"
-        "Must be registered before `/api/profiles/{profile_uuid}` — Starlette matches path "
+        "Must be registered before `/api/v1/profiles/{profile_uuid}` — Starlette matches path "
         "routes in registration order, and `{profile_uuid}` would otherwise swallow this path "
         "as a literal UUID lookup and always 404.\n\n"
         "Returns **503** while the catalog is still building."
     ),
     responses={503: {"description": "Catalog not yet ready"}},
-)
+    operation_id="v1_get_broken_profiles")
 async def get_broken_profiles():
     if catalog is None or not catalog.is_built:
         return JSONResponse(
@@ -732,7 +714,7 @@ def _catalog_unavailable() -> JSONResponse:
 
 
 @app.post(
-    "/api/profiles/machines/suggest",
+    "/api/v1/profiles/machines/suggest",
     tags=["profiles"],
     summary="Suggest machine presets for a printer model",
     description=(
@@ -743,7 +725,7 @@ def _catalog_unavailable() -> JSONResponse:
         "when served from a cached catalog while a fresh one is pending."
     ),
     responses=_NEUTRAL_RESPONSES,
-)
+    operation_id="v1_suggest_machines")
 async def suggest_machines(body: NeutralModelQuery):
     cat, stale = _neutral_catalog()
     if cat is None:
@@ -753,7 +735,7 @@ async def suggest_machines(body: NeutralModelQuery):
 
 
 @app.post(
-    "/api/profiles/models/variants",
+    "/api/v1/profiles/models/variants",
     tags=["profiles"],
     summary="List nozzle variants of a printer model",
     description=(
@@ -762,7 +744,7 @@ async def suggest_machines(body: NeutralModelQuery):
         "the smallest standard variant). Empty `variants` when the model is unknown."
     ),
     responses=_NEUTRAL_RESPONSES,
-)
+    operation_id="v1_model_variants")
 async def model_variants(body: NeutralModelQuery):
     cat, stale = _neutral_catalog()
     if cat is None:
@@ -772,7 +754,7 @@ async def model_variants(body: NeutralModelQuery):
 
 
 @app.get(
-    "/api/profiles/machines/{machine_ref}/presets",
+    "/api/v1/profiles/machines/{machine_ref}/presets",
     tags=["profiles"],
     summary="Process/filament presets compatible with a machine",
     description=(
@@ -781,7 +763,7 @@ async def model_variants(body: NeutralModelQuery):
         "universal presets. 404 `{\"error\": \"unknown_machine_ref\"}`, 422 `{\"error\": \"invalid_kind\"}`."
     ),
     responses={**_NEUTRAL_RESPONSES, 404: {"description": "unknown_machine_ref"}, 422: {"description": "invalid_kind"}},
-)
+    operation_id="v1_machine_presets")
 async def machine_presets(machine_ref: str, kind: Optional[str] = None):
     cat, stale = _neutral_catalog()
     if cat is None:
@@ -798,7 +780,7 @@ async def machine_presets(machine_ref: str, kind: Optional[str] = None):
 
 
 @app.get(
-    "/api/profiles/machines/{machine_ref}/supports",
+    "/api/v1/profiles/machines/{machine_ref}/supports",
     tags=["profiles"],
     summary="Can this machine ref (and bed) be sliced for?",
     description=(
@@ -807,7 +789,7 @@ async def machine_presets(machine_ref: str, kind: Optional[str] = None):
         "ruled out). `reason` is null when supported."
     ),
     responses=_NEUTRAL_RESPONSES,
-)
+    operation_id="v1_machine_supports")
 async def machine_supports(machine_ref: str, bed_x: Optional[float] = None, bed_y: Optional[float] = None):
     cat, stale = _neutral_catalog()
     if cat is None:
@@ -816,39 +798,6 @@ async def machine_supports(machine_ref: str, bed_x: Optional[float] = None, bed_
     return _neutral_json(cat, stale, {"machine_ref": machine_ref, "supported": supported, "reason": reason})
 
 
-@app.get(
-    "/api/profiles/{profile_uuid}",
-    tags=["profiles"],
-    summary="Get full detail for one profile",
-    description=(
-        "Returns all public fields for a single profile entry identified by its stable UUID. "
-        "The `_resolved` (inheritance-flattened) dict is not included — use "
-        "`POST /api/profiles/merged-config` for the fully merged config.\n\n"
-        "**Fields by type:**\n\n"
-        "*Machine:* `uuid`, `name`, `manufacturer`, `model`, `nozzle`, `nozzle_diameter`, "
-        "`bed_size_x`, `bed_size_y`, `extruder_count`, `source`, `rel_path`\n\n"
-        "*Process:* `uuid`, `name`, `layer_height`, `compatible_printers`, `source`, `rel_path`\n\n"
-        "*Filament:* `uuid`, `name`, `display_name`, `filament_type`, `filament_colour`, "
-        "`filament_vendor`, `filament_diameter`, `filament_density`, `nozzle_temperature`, "
-        "`nozzle_temperature_range_low`, `nozzle_temperature_range_high`, `bed_temperature`, "
-        "`bed_temperature_initial_layer`, `compatible_printers`, `source`, `rel_path`\n\n"
-        "Returns **503** while the catalog is initialising."
-    ),
-    responses={
-        404: {"description": "Profile UUID not found in catalog"},
-        503: {"description": "Catalog not yet ready — retry after /api/health reports catalog_loaded: true"},
-    },
-)
-async def get_profile_detail(profile_uuid: str):
-    if catalog is None:
-        return JSONResponse(
-            status_code=503,
-            content={"status": "building_catalog", "detail": "Catalog not ready. Retry shortly."},
-        )
-    entry = catalog.get_by_uuid(profile_uuid)
-    if entry is None:
-        raise HTTPException(status_code=404, detail=f"Profile UUID '{profile_uuid}' not found.")
-    return catalog._public(entry)
 
 
 async def _kill_process_group(process: asyncio.subprocess.Process) -> None:
@@ -886,14 +835,35 @@ async def _strip_model_settings(src: str, dst: str) -> None:
     await asyncio.to_thread(_do_strip)
 
 
+def _sliced_plate_gcode_error(threemf: str, plate_id: int) -> Optional[str]:
+    """None if the exported 3MF holds G-code for the requested plate (any plate when plate_id==0)."""
+    try:
+        with zipfile.ZipFile(threemf) as z:
+            names = z.namelist()
+    except Exception as exc:
+        return f"exported 3MF unreadable: {exc}"
+    want = f"Metadata/plate_{plate_id}.gcode"
+    if plate_id > 0 and want in names:
+        return None
+    if plate_id == 0 and any(re.fullmatch(r"Metadata/plate_\d+\.gcode", n) for n in names):
+        return None
+    which = f"plate {plate_id}" if plate_id > 0 else "any plate"
+    return (f"OrcaSlicer reported success but produced no G-code for {which} "
+            f"(plate missing or empty in the project).")
+
+
 async def run_orcaslicer_task(
     job_id: str,
     input_file_path: str,
     output_dir: str,
     plate_id: int = 1,
     export_3mf: Optional[str] = None,
-    geometry_only_retry: bool = True,
+    geometry_only_retry: bool = False,
+    target_settings: Optional[dict] = None,
 ):
+    """*target_settings*: the resolved machine/process/filament project config, embedded only
+    after the plate is extracted from the source project (BIZ-355). None (``/slice/prepared``)
+    slices the input's own embedded settings."""
     job = jobs.get(job_id)
     if job is None:
         return
@@ -903,11 +873,24 @@ async def run_orcaslicer_task(
     _history_upsert(job_id, status="slicing", updated_at=time.time())
     job_logger.log(f"Starting slice: {os.path.basename(input_file_path)}")
 
+    def _fail(error: str, sentinel: str) -> None:
+        job["status"] = "failed"
+        job["error"] = error
+        _save_jobs()
+        _history_upsert(job_id, status="failed", error=error, updated_at=time.time())
+        job_logger.log(f"ERROR: {error}")
+        job_logger.log(f"__FAILED__: {sentinel}")
+
+    # Orca slices plate 1 of the single-plate project built below; `arrange` is decided
+    # once extraction tells us whether the input carried a plate layout.
+    slice_plate = plate_id
+    arrange = "1"
+
     async def _attempt(slice_input: str, label: str) -> bool:
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-            "orcaslicer", "--slice", str(plate_id),
-            "--outputdir", output_dir, "--arrange", "1",
+            "orcaslicer", "--slice", str(slice_plate),
+            "--outputdir", output_dir, "--arrange", arrange,
         ]
         if export_3mf:
             cmd.extend(["--export-3mf", export_3mf])
@@ -937,27 +920,112 @@ async def run_orcaslicer_task(
     if input_file_path.lower().endswith(".3mf"):
         fixed_path = input_file_path[:-4] + "_fixed.3mf"
         try:
-            await asyncio.to_thread(_strip_app_version, input_file_path, fixed_path)
+            for note in await asyncio.to_thread(_strip_app_version, input_file_path, fixed_path):
+                job_logger.log(f"Rewrote project setting {note}")
             input_file_path = fixed_path
         except Exception as exc:
             job_logger.log(f"WARNING: could not strip Application version: {exc}")
 
+    # BIZ-349: never hand Orca a multi-plate project. `--arrange 1` re-packs objects across
+    # plates (plates collapse, parts migrate off the requested plate and silently vanish
+    # from the job) and `--arrange 0` checks plate bounds against a stride that does not
+    # always match the project's. Pull the requested plate - plate 1 included - into its own
+    # single-plate project at plate-1 coordinates and slice that with `--arrange 0`.
+    #
+    # BIZ-355: with target settings, the plate is located with the SOURCE project's bed (the
+    # grid it was laid out on), then moved from the source bed centre to the target's,
+    # checked against the target bed, and only then given the target settings.
+    if input_file_path.lower().endswith(".3mf") and plate_id >= 1:
+        single_path = input_file_path[:-4] + f"_plate{plate_id}.3mf"
+        extracted = single_path if target_settings is None else single_path[:-4] + "_src.3mf"
+        placed = None
+        try:
+            info = await asyncio.to_thread(
+                _extract_plate, input_file_path, plate_id, extracted, target_settings)
+            if target_settings is not None and info["has_plate_data"]:
+                placed = await asyncio.to_thread(
+                    _retarget_plate, extracted, single_path, plate_id, info["source_bed"],
+                    target_settings)
+            elif target_settings is not None:
+                await asyncio.to_thread(embed_project_settings, extracted, target_settings, single_path)
+        except _PlateFitError as exc:
+            logger.warning("Job %s: %s", job_id, exc)
+            _fail(str(exc), "Plate does not fit the target bed")
+            return
+        except _PlateExtractError as exc:
+            logger.warning("Job %s: plate extraction rejected plate %d: %s", job_id, plate_id, exc)
+            _fail(f"Cannot slice plate {plate_id}: {exc}", "Plate extraction failed")
+            return
+        except Exception as exc:
+            logger.exception("Job %s: plate extraction crashed", job_id)
+            _fail(f"Could not extract plate {plate_id}: {exc}", "Plate extraction failed")
+            return
+        logger.info("Job %s plate extraction: %s", job_id, json.dumps(info))
+        if info["has_plate_data"]:
+            job_logger.log(
+                f"Plate extraction: plate {plate_id} of {info['source_plates']} -> single-plate project; "
+                f"{info['kept_items']} build item(s) kept, {info['dropped_items']} dropped, "
+                f"shift {info['origin_shift']} mm (bed {info['bed_mm']}), objects {info['objects']}")
+            cg = info.get("custom_gcode")
+            if cg:
+                job_logger.log(f"Plate extraction: custom layer G-code (pauses/colour changes): "
+                               f"{cg['kept']} kept for plate {plate_id}, other plates' blocks "
+                               f"dropped {cg['dropped_plates']}")
+            if info["missing_instances"]:
+                job_logger.log(f"WARNING: {info['missing_instances']} instance(s) listed on plate "
+                               f"{plate_id} have no build item and were skipped")
+            for p in info["positions"]:
+                job_logger.log(f"  object {p['object_id']}#{p['instance']} at x={p['x']} y={p['y']}")
+            if placed:
+                logger.info("Job %s plate placement: %s", job_id, json.dumps(placed))
+                job_logger.log(
+                    f"Plate placement: source bed {info['source_bed']} -> target bed "
+                    f"{placed['target_bed_mm']} mm; footprint {placed['footprint_mm']} mm; "
+                    f"{placed['placement']} shift {placed['shift']} mm")
+            arrange = "0"
+        else:
+            # No plate layout (bare STL-derived 3MF): nothing to collapse, but parts still
+            # need placing, so let Orca arrange them.
+            job_logger.log("Plate extraction: input declares no plates; slicing as-is with --arrange 1")
+        input_file_path = single_path
+        slice_plate = 1
+
     success = await _attempt(input_file_path, "Attempt 1")
 
+    used_geometry_only = False
     if not success and geometry_only_retry:
-        job_logger.log("Attempt 1 failed - retrying with model_settings stripped")
+        job_logger.log(
+            "WARNING: Attempt 1 failed - geometry_only_retry=true, retrying with model_settings.config "
+            "REMOVED. Per-object/per-part overrides, modifiers, layer ranges, extruder assignment and "
+            "plate settings will NOT be applied to this slice.")
+        logger.warning("Job %s: attempt 1 failed, geometry-only retry requested", job_id)
         base, ext = os.path.splitext(input_file_path)
         geo_path = base + "_geo" + ext
         try:
             await _strip_model_settings(input_file_path, geo_path)
             success = await _attempt(geo_path, "Attempt 2 (geometry-only)")
+            used_geometry_only = success
         except Exception as exc:
             job_logger.log(f"ERROR stripping model_settings: {exc}")
+    elif not success:
+        job_logger.log("Attempt 1 failed (geometry_only_retry not requested; no fallback attempted)")
+
+    if used_geometry_only:
+        job_logger.log("WARNING: output was produced by the geometry-only fallback; per-object "
+                       "settings from the project were discarded")
+        logger.warning("Job %s: completed via geometry-only fallback (per-object settings discarded)",
+                       job_id)
 
     if success:
         if export_3mf:
             target = os.path.join(output_dir, export_3mf)
             found = target if os.path.exists(target) else None
+            empty = _sliced_plate_gcode_error(target, slice_plate) if found else None
+            if empty:
+                logger.warning("Job %s: %s (requested plate %d, sliced plate %d)",
+                               job_id, empty, plate_id, slice_plate)
+                _fail(empty, "No G-code produced")
+                return
         else:
             gcodes = sorted(glob.glob(os.path.join(output_dir, "*.gcode")))
             found = gcodes[0] if gcodes else None
@@ -985,61 +1053,6 @@ async def run_orcaslicer_task(
         job_logger.log("__FAILED__: OrcaSlicer returned non-zero")
 
 
-@app.post(
-    "/api/slice/start",
-    tags=["slice"],
-    summary="Start a slice job (UUID-based profile resolution)",
-    description=(
-        "Upload a `.3mf` or `.stl` and specify print settings by profile UUID. "
-        "The API resolves each profile's full inheritance chain, merges machine + process + "
-        "filament into a `project_settings.config`, embeds it into the 3MF, then launches "
-        "OrcaSlicer in the background and returns a `job_id` immediately.\n\n"
-        "**Machine identification (mutually exclusive):**\n"
-        "- `machine_uuid` — preferred; stable across catalog rebuilds.\n"
-        "- `manufacturer` + `model` + `nozzle` — tuple lookup; useful when the UUID is unknown.\n\n"
-        "**Key parameters:**\n"
-        "- `filament_uuids` — JSON array string, e.g. `'[\"uuid1\"]'`; one entry per extruder "
-        "slot in slot order. Single-extruder printers need exactly one entry.\n"
-        "- `plate` — 1-based plate number to slice. Use `1` for single-plate models.\n"
-        "- `export_3mf` — optional output filename. When set, OrcaSlicer embeds the GCode "
-        "inside a `.3mf` instead of writing a standalone `.gcode` file. The download endpoint "
-        "returns the `.3mf` in this case.\n"
-        "- `geometry_only_retry` — when `true` (default), if the first slice attempt fails "
-        "OrcaSlicer retries with `Metadata/model_settings.config` stripped from the 3MF. "
-        "This resolves failures caused by stale extruder-slot assignments baked into models "
-        "exported from OrcaSlicer.\n"
-        "- `extra_config` — optional JSON object merged into the resolved "
-        "`project_settings.config` after profile resolution. Use to override individual "
-        "settings, e.g. `{\"curr_bed_type\": \"Cool Plate\"}` or "
-        "`{\"layer_height\": \"0.12\"}`.\n\n"
-        "**STL files** are automatically converted to a minimal 3MF before slicing.\n\n"
-        "**Concurrency:** at most `MAX_CONCURRENT_JOBS` (default 4) jobs may be slicing "
-        "simultaneously. When the limit is reached the request returns **503** — retry later.\n\n"
-        "**Job lifecycle after creation:**\n"
-        "```\n"
-        "pending → slicing → completed  (download available)\n"
-        "                  ↘ failed     (check error field in status response)\n"
-        "```\n"
-        "Poll `GET /api/slice/status/{job_id}` every 2–5 s, then download via "
-        "`GET /api/slice/download/{job_id}` when complete."
-    ),
-    responses={
-        400: {"description": "Bad filename (null bytes, semicolons, or missing Content-Disposition filename)"},
-        422: {
-            "description": (
-                "Validation failure: plate < 1, filament_uuids is not a valid JSON array, "
-                "machine/process/filament UUID not found in catalog, profile not compatible "
-                "with the selected machine, or extra_config is not a JSON object"
-            ),
-        },
-        503: {
-            "description": (
-                "Profile catalog not yet ready (retry after catalog_loaded: true), "
-                "or too many concurrent slice jobs (retry when a slot opens)"
-            ),
-        },
-    },
-)
 async def start_slice(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -1051,10 +1064,10 @@ async def start_slice(
     filament_uuids: str = Form(..., description='JSON array, e.g. ["uuid1"]'),
     plate: int = Form(...),
     export_3mf: Optional[str] = Form(None),
-    geometry_only_retry: Optional[str] = Form(None),
+    geometry_only_retry: Optional[str] = Form(None, description=GEOMETRY_ONLY_RETRY_DESC),
     extra_config: Optional[str] = Form(None, description='JSON object merged into project settings after resolution'),
 ):
-    geometry_only_retry = _form_default_true(geometry_only_retry)
+    geometry_only_retry = _form_default_false(geometry_only_retry)
     if catalog is None:
         raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
 
@@ -1160,12 +1173,29 @@ async def start_slice(
             project_cfg.update(overrides)
         except (ValueError, TypeError):
             raise HTTPException(status_code=422, detail="extra_config must be a JSON object.")
-        clamp_orca_minimums(project_cfg)   # carried 3MF settings may hold Bambu-only -1 values Orca rejects
-    prepared_3mf = os.path.join(input_dir, "prepared.3mf")
-    try:
-        await asyncio.to_thread(embed_project_settings, base_3mf, project_cfg, prepared_3mf)
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Uploaded file is not a valid 3MF archive: {e}")
+        # A client may carry a Bambu-made 3MF's own setting changes in extra_config (Themis does): rewrite the
+        # Bambu "-1 = auto" values Orca rejects, as the 3MF path does for the file's own settings (BIZ-352).
+        replace_bambu_auto_sentinels(project_cfg)
+    # STL: no plate layout to preserve, embed now. 3MF: the slice task extracts the plate with
+    # the upload's own bed before embedding project_cfg (BIZ-355), so only validate it here.
+    target_settings = None
+    if base_3mf == raw_path and raw_path.lower().endswith(".3mf"):
+        prepared_3mf, target_settings = raw_path, project_cfg
+        try:
+            def _check_zip(path: str) -> None:
+                with zipfile.ZipFile(path) as zf:
+                    bad = zf.testzip()
+                if bad:
+                    raise ValueError(f"corrupt member {bad}")
+            await asyncio.to_thread(_check_zip, raw_path)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Uploaded file is not a valid 3MF archive: {e}")
+    else:
+        prepared_3mf = os.path.join(input_dir, "prepared.3mf")
+        try:
+            await asyncio.to_thread(embed_project_settings, base_3mf, project_cfg, prepared_3mf)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Uploaded file is not a valid 3MF archive: {e}")
 
     job_logger = JobLogger(job_id)
     _wall_now = time.time()
@@ -1185,28 +1215,34 @@ async def start_slice(
         run_orcaslicer_task,
         job_id=job_id, input_file_path=prepared_3mf, output_dir=output_dir,
         plate_id=plate, export_3mf=export_3mf, geometry_only_retry=geometry_only_retry,
+        target_settings=target_settings,
     )
     return {"job_id": job_id, "status": "pending", "message": "Slicing job started."}
 
 
 @app.post(
-    "/api/slice/prepared",
+    "/api/v1/slice/prepared",
     tags=["slice"],
     summary="Slice a pre-configured 3MF (no profile resolution)",
     description=(
         "Accepts a `.3mf` that already contains `Metadata/project_settings.config` "
-        "(e.g., exported from OrcaSlicer desktop or produced by `POST /api/slice/start` "
+        "(e.g., exported from OrcaSlicer desktop or produced by `POST /api/v1/jobs` "
         "with `export_3mf` set). No catalog lookup or profile merging is performed — "
         "OrcaSlicer uses the embedded settings verbatim.\n\n"
         "Use this endpoint when you already have a fully-configured 3MF and want to avoid "
         "the overhead of profile resolution. Typical callers: Themis queue engine dispatching "
         "pre-packed project 3MFs, or debugging with a known-good 3MF from the desktop app.\n\n"
-        "**Geometry-only retry** works the same as in `POST /api/slice/start`: when "
-        "`geometry_only_retry=true` (default) and the first slice fails, the API retries "
-        "with `Metadata/model_settings.config` stripped from the 3MF.\n\n"
+        "**Plate selection:** the requested plate is extracted into its own single-plate "
+        "project (moved to plate-1 coordinates, with its own custom layer G-code) and sliced "
+        "with `--arrange 0`, so parts are never re-packed across plates. A missing or empty "
+        "plate fails the job.\n\n"
+        "**Geometry-only retry** is opt-in (`geometry_only_retry=true`, default `false`), as in "
+        "`POST /api/v1/jobs`: if the first slice fails, retry once with "
+        "`Metadata/model_settings.config` removed, which discards per-object settings. The job "
+        "log flags it whenever it is used.\n\n"
         "**`export_3mf`:** when set, OrcaSlicer embeds the sliced GCode into a `.3mf` and "
         "the download endpoint returns that file instead of a standalone `.gcode`.\n\n"
-        "The response and job lifecycle are identical to `POST /api/slice/start`."
+        "The response and job lifecycle are identical to `POST /api/v1/jobs`."
     ),
     responses={
         400: {"description": "Bad filename (null bytes, semicolons, or missing Content-Disposition filename)"},
@@ -1214,19 +1250,19 @@ async def start_slice(
         503: {
             "description": (
                 "Too many concurrent slice jobs — retry when a slot opens "
-                "(check active_jobs in GET /api/health)"
+                "(check active_jobs in GET /api/v1/health)"
             ),
         },
     },
-)
+    operation_id="v1_slice_prepared")
 async def slice_prepared(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     plate: int = Form(...),
     export_3mf: Optional[str] = Form(None),
-    geometry_only_retry: Optional[str] = Form(None),
+    geometry_only_retry: Optional[str] = Form(None, description=GEOMETRY_ONLY_RETRY_DESC),
 ):
-    geometry_only_retry = _form_default_true(geometry_only_retry)
+    geometry_only_retry = _form_default_false(geometry_only_retry)
     if plate < 1:
         raise HTTPException(status_code=422, detail="plate must be >= 1.")
 
@@ -1286,7 +1322,7 @@ async def slice_prepared(
 
 
 @app.post(
-    "/api/slice/thumbnail",
+    "/api/v1/slice/thumbnail",
     tags=["slice"],
     summary="Render a plate thumbnail PNG (synchronous)",
     description=(
@@ -1311,7 +1347,7 @@ async def slice_prepared(
             ),
         },
     },
-)
+    operation_id="v1_slice_thumbnail")
 async def slice_thumbnail(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -1391,100 +1427,10 @@ async def slice_thumbnail(
             raise HTTPException(status_code=422, detail={"error": str(exc)})
 
 
-@app.get(
-    "/api/slice/status/{job_id}",
-    tags=["slice"],
-    summary="Poll slice job status",
-    description=(
-        "Returns the current status of a slice job. Poll every 2–5 seconds until `status` "
-        "is `completed` or `failed`.\n\n"
-        "**Response fields:**\n"
-        "- `job_id` — echoed back for correlation\n"
-        "- `status` — one of `pending`, `slicing`, `completed`, `failed`\n"
-        "- `output_format` — `gcode` (default) or `gcode_3mf` (when `export_3mf` was set)\n"
-        "- `sliced_file` — basename of the output file when `completed`, otherwise `null`\n"
-        "- `error` — human-readable error message when `failed`, otherwise `null`\n\n"
-        "**Job lifecycle:** `pending` → `slicing` → `completed` or `failed`\n\n"
-        "Jobs are kept for `JOB_TTL_SECONDS` (default 3600) or until downloaded. "
-        "A **404** on a previously-valid `job_id` means the job has already been evicted "
-        "— either downloaded or timed out."
-    ),
-    responses={
-        404: {"description": "Job not found — never existed, already downloaded, or evicted after TTL"},
-    },
-)
-async def get_job_status(job_id: str):
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found.")
-    job = jobs[job_id]
-    return {
-        "job_id": job["id"],
-        "status": job["status"],
-        "output_format": job.get("output_format", "gcode"),
-        "sliced_file": os.path.basename(job["sliced_file"]) if job["sliced_file"] else None,
-        "error": job["error"],
-    }
 
 
-@app.get(
-    "/api/slice/logs/{job_id}",
-    tags=["slice"],
-    summary="Stream slice job logs (Server-Sent Events)",
-    description=(
-        "Returns a Server-Sent Events stream of OrcaSlicer stdout/stderr lines, "
-        "emitted in real time as the slicer runs.\n\n"
-        "**Event format:** `data: <log line>\\r\\n\\r\\n`\n\n"
-        "**Terminal events (stream ends after these):**\n"
-        "- `data: __COMPLETED__` — job finished successfully\n"
-        "- `data: __FAILED__: <reason>` — job failed; `<reason>` is a short label\n\n"
-        "**Usage notes:**\n"
-        "- The stream replays all buffered log lines immediately on connect, so connecting "
-        "after the job has already completed still delivers the full log history.\n"
-        "- Most callers can skip this and poll `GET /api/slice/status` instead — logs are "
-        "primarily useful for debugging slice failures.\n"
-        "- If the job is evicted before you connect, the endpoint returns **404**."
-    ),
-    response_class=StreamingResponse,
-    responses={
-        404: {"description": "Job not found — never existed, already downloaded, or evicted after TTL"},
-    },
-)
-async def get_job_logs(job_id: str):
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found.")
-    job = jobs[job_id]
-    if job.get("logger") is None:
-        # Restored from disk after a restart (_load_jobs_on_startup): the in-memory
-        # JobLogger is gone, so there's no log history left to stream.
-        raise HTTPException(status_code=404, detail="Job data was lost when Laminus restarted.")
-    return StreamingResponse(job["logger"].get_stream(), media_type="text/event-stream")
 
 
-@app.get(
-    "/api/slice/download/{job_id}",
-    tags=["slice"],
-    summary="Download sliced output file",
-    description=(
-        "Returns the sliced output as `application/octet-stream`. The file extension "
-        "indicates the format:\n"
-        "- `.gcode` — standalone GCode file (default)\n"
-        "- `.3mf` — GCode embedded inside a 3MF (when `export_3mf` was set during job creation)\n\n"
-        "**⚠️ One-time download:** downloading evicts the job immediately — the in-memory "
-        "record and all temporary files on disk are deleted. There is no second download. "
-        "Only call this once you have confirmed `status == 'completed'`.\n\n"
-        "Returns **400** if the job exists but is not yet complete (wrong status). "
-        "Returns **404** if the job does not exist (never created, already downloaded, or evicted)."
-    ),
-    responses={
-        400: {"description": "Job exists but is not yet complete — check status first"},
-        404: {
-            "description": (
-                "Job not found (never existed, already downloaded, or evicted after TTL), "
-                "or job is complete but the output file is missing from disk"
-            ),
-        },
-    },
-)
 async def download_sliced_file(job_id: str, background_tasks: BackgroundTasks):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -1560,12 +1506,80 @@ def _build_bed_template_bytes(printable_area: list, printable_height: float) -> 
     return buf.getvalue()
 
 
+def _items_error(errors: list[dict]):
+    summary = "Invalid items: " + "; ".join(e["msg"] for e in errors)
+    return _api_v1.DetailedHTTPException(422, summary, "validation_error", errors)
+
+
+def _parse_pack_items(raw: str, filenames: list[str]) -> list[int]:
+    """Validate the /api/v1/pack ``items`` field; return copy counts in upload order.
+
+    422s carry per-problem ``details`` on v1 (legacy sees only the summary string).
+    """
+    base = ["body", "items"]
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        parsed = None
+    if not isinstance(parsed, list):
+        raise _items_error([{"loc": base, "msg": "must be a JSON array of {file, quantity} objects",
+                             "type": "type_error"}])
+
+    errors: list[dict] = []
+    dupes = sorted({n for n in filenames if filenames.count(n) > 1})
+    for n in dupes:
+        errors.append({"loc": ["body", "files"], "type": "value_error", "input": n,
+                       "msg": f"duplicate filename '{n}'; filenames must be unique when items is used"})
+
+    qty_by_name: dict[str, int] = {}
+    for i, entry in enumerate(parsed):
+        loc = base + [i]
+        if not isinstance(entry, dict):
+            errors.append({"loc": loc, "msg": "must be an object", "type": "type_error", "input": entry})
+            continue
+        name, qty = entry.get("file"), entry.get("quantity")
+        ok = True
+        if not isinstance(name, str) or name not in filenames:
+            errors.append({"loc": loc + ["file"], "type": "value_error", "input": name,
+                           "msg": "must be the filename of an uploaded file"})
+            ok = False
+        elif name in qty_by_name:
+            errors.append({"loc": loc + ["file"], "type": "value_error", "input": name,
+                           "msg": f"'{name}' listed more than once"})
+            ok = False
+        if isinstance(qty, bool) or not isinstance(qty, int):
+            errors.append({"loc": loc + ["quantity"], "type": "type_error", "input": qty,
+                           "msg": "must be an integer"})
+            ok = False
+        elif qty < 1:
+            errors.append({"loc": loc + ["quantity"], "type": "value_error", "input": qty,
+                           "msg": "must be >= 1"})
+            ok = False
+        if ok:
+            qty_by_name[name] = qty
+
+    if not dupes:
+        for n in filenames:
+            if n not in qty_by_name and not any(e.get("input") == n for e in errors):
+                errors.append({"loc": base, "type": "value_error", "input": n,
+                               "msg": f"no entry for uploaded file '{n}'"})
+    if not errors:
+        total = sum(qty_by_name.values())
+        if total > PACK_MAX_INSTANCES:
+            errors.append({"loc": base, "type": "value_error",
+                           "msg": f"total instances {total} exceeds max {PACK_MAX_INSTANCES}",
+                           "ctx": {"total": total, "max": PACK_MAX_INSTANCES}})
+    if errors:
+        raise _items_error(errors)
+    return [qty_by_name[n] for n in filenames]
+
+
 @app.post(
-    "/api/pack",
+    "/api/v1/pack",
     tags=["arrange"],
     summary="Pack N STLs onto as many plates as needed (synchronous)",
     description=(
-        "Distributes STL geometry across build plates via OrcaSlicer `--arrange 1 --orient 1`. "
+        "Distributes STL geometry across build plates via OrcaSlicer `--arrange 1` (no auto-orient). "
         "Returns the resulting multi-plate `.3mf` directly as `application/octet-stream`. "
         "**Blocks for up to 120 seconds.**\n\n"
         "## Bed / settings source (mutually exclusive — supply exactly one)\n\n"
@@ -1579,7 +1593,11 @@ def _build_bed_template_bytes(printable_area: list, printable_height: float) -> 
         "`printable_height` are embedded — no full machine config that could override the "
         "bed size). Templates for a given UUID combination are cached in memory, so repeated "
         "calls with the same profiles are fast. This mode requires `catalog_loaded: true`.\n\n"
-        "**3. Explicit bed dimensions** (`bed_x` + `bed_y` + `bed_z`, all in mm)\n"
+        "**3. Machine UUID alone** (`machine_uuid`, no `process_uuid`/`filament_uuids`)\n"
+        "Shortcut for geometry mode: the bed (`printable_area`, `printable_height`) is read from "
+        "that machine's catalog profile, so callers need not look up bed_x/bed_y/bed_z first. "
+        "If `bed_x`/`bed_y`/`bed_z` are all given too, they win. Requires `catalog_loaded: true`.\n\n"
+        "**4. Explicit bed dimensions** (`bed_x` + `bed_y` + `bed_z`, all in mm)\n"
         "Laminus constructs a minimal bed template from the supplied dimensions. "
         "`bed_z` is the printable height (not the physical Z travel). "
         "No profile catalog or template file needed — useful when you want geometry-only "
@@ -1587,13 +1605,23 @@ def _build_bed_template_bytes(printable_area: list, printable_height: float) -> 
         "## STL inputs\n\n"
         "- `files` — one or more `.stl` files (max 50 per request)\n"
         "- Filenames must not contain null bytes, newlines, or semicolons\n"
-        "- Duplicate filenames in the same batch are deduplicated with a numeric suffix\n\n"
+        "- Duplicate filenames in the same batch are deduplicated with a numeric suffix\n"
+        "- `items` (optional) — JSON array of `{\"file\": <uploaded filename>, \"quantity\": <int >= 1>}`, "
+        "e.g. `[{\"file\":\"a.stl\",\"quantity\":3},{\"file\":\"b.stl\",\"quantity\":1}]`. Each STL "
+        "yields that many arranged copies sharing one mesh in the 3MF. Omitted = 1 each. When "
+        "`items` is given, uploaded filenames must be unique and every upload needs exactly one "
+        "entry; anything else → 422. The 50 cap applies to unique files; total copies are "
+        f"capped at {PACK_MAX_INSTANCES}. On `/api/v1/pack` a 422 lists each problem in "
+        "`error.details` with a `loc` such as `[\"body\",\"items\",1,\"quantity\"]`.\n\n"
         "## Notes\n\n"
-        "- OrcaSlicer auto-orients objects (`--orient 1`) to minimise support material. "
-        "Pass orient=false to skip (not yet exposed as a parameter — file a request).\n"
+        "- Parts are never tilted about X/Y (no auto-orient), so layer-line direction is "
+        "preserved. Each instance keeps its input STL's min Z (models intentionally above or "
+        "below the plate stay there); the arranger may rotate about Z.\n"
         "- The packed `.3mf` preserves `Metadata/project_settings.config` from the template "
         "but discards any geometry or model_settings from it.\n"
-        "- All temporary files are cleaned up after the response is sent."
+        "- All temporary files are cleaned up after the response is sent.\n"
+        "- Embeds `Metadata/laminus_manifest.json`: per plate, which `items` entry each "
+        "instance came from (feature `pack.manifest`; see docs/laminus-api-for-agents.md)."
     ),
     responses={
         400: {
@@ -1607,13 +1635,15 @@ def _build_bed_template_bytes(printable_area: list, printable_height: float) -> 
             "description": (
                 "No STL files provided, more than 50 STLs, non-.stl file in files list, "
                 "non-.3mf template, bed dimensions ≤ 0, invalid filament_uuids JSON, "
+                "invalid `items` (bad JSON/shape, unknown/duplicate/missing file, quantity < 1) "
+                "or total copies over the cap, "
                 "UUID not found in catalog, or no settings source provided"
             ),
         },
         500: {"description": "Unexpected system error — check server logs"},
         503: {"description": "Profile catalog not yet ready (UUID mode only)"},
     },
-)
+    operation_id="v1_pack_stls")
 async def pack_stls(
     background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
@@ -1624,11 +1654,23 @@ async def pack_stls(
     bed_x: Optional[float] = Form(None, description="Bed X dimension in mm (alternative to template / UUIDs)"),
     bed_y: Optional[float] = Form(None, description="Bed Y dimension in mm"),
     bed_z: Optional[float] = Form(None, description="Bed Z printable height in mm"),
+    items: Optional[str] = Form(
+        None,
+        description=(
+            'JSON array pairing each uploaded file with a copy count, e.g. '
+            '`[{"file": "a.stl", "quantity": 3}, {"file": "b.stl", "quantity": 1}]`. '
+            f"Omitted = 1 copy each. Total copies capped at {PACK_MAX_INSTANCES}."
+        ),
+    ),
 ):
     if not files:
         raise HTTPException(status_code=422, detail="At least one STL file is required.")
     if len(files) > 50:
         raise HTTPException(status_code=422, detail="Maximum 50 STL files per request.")
+
+    qty_list: Optional[list[int]] = None
+    if items is not None:
+        qty_list = _parse_pack_items(items, [f.filename or "" for f in files])
 
     # Validate STL filenames, deduplicating repeats within the batch with a numeric
     # suffix so two uploads named e.g. "bracket.stl" don't overwrite one another on disk.
@@ -1743,11 +1785,38 @@ async def pack_stls(
             with open(template_path, "wb") as buf:
                 buf.write(_build_bed_template_bytes(area, bed_z))
 
+        elif machine_uuid and not process_uuid and not filament_uuids:
+            # machine_uuid alone: shortcut for geometry mode using that machine's bed
+            if catalog is None:
+                background_tasks.add_task(cleanup_directory, job_dir)
+                raise HTTPException(status_code=503, detail="Profile catalog not yet ready.")
+            cache_key = f"{machine_uuid}|bed"
+            cached_bytes = _template_cache.get(cache_key)
+            if cached_bytes is None:
+                machine_entry = catalog.get_by_uuid(machine_uuid)
+                if machine_entry is None or machine_entry.get("type") != "machine":
+                    background_tasks.add_task(cleanup_directory, job_dir)
+                    raise HTTPException(status_code=422, detail=f"Machine UUID '{machine_uuid}' not found.")
+                machine_cfg = await asyncio.to_thread(catalog.resolved, machine_entry["uuid"])
+                printable_area = machine_cfg.get("printable_area")
+                printable_height = machine_cfg.get("printable_height")
+                if not printable_area or not printable_height:
+                    background_tasks.add_task(cleanup_directory, job_dir)
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Machine UUID '{machine_uuid}' is missing bed dimensions (printable_area/printable_height).",
+                    )
+                cached_bytes = await asyncio.to_thread(_build_bed_template_bytes, printable_area, printable_height)
+                _template_cache[cache_key] = cached_bytes
+            template_path = os.path.join(input_dir, "settings_template.3mf")
+            with open(template_path, "wb") as buf:
+                buf.write(cached_bytes)
+
         else:
             background_tasks.add_task(cleanup_directory, job_dir)
             raise HTTPException(
                 status_code=422,
-                detail="Provide 'template' (a .3mf file) OR 'machine_uuid'/'process_uuid'/'filament_uuids' OR 'bed_x'/'bed_y'/'bed_z'.",
+                detail="Provide 'template' (a .3mf file) OR 'machine_uuid' (alone, or with 'process_uuid'/'filament_uuids') OR 'bed_x'/'bed_y'/'bed_z'.",
             )
 
         # Write uploaded STLs
@@ -1761,7 +1830,7 @@ async def pack_stls(
         # Inject STL geometry into the template (preserves project_settings.config)
         combined_3mf = os.path.join(input_dir, "combined.3mf")
         try:
-            await asyncio.to_thread(_inject_stls_into_3mf, template_path, stl_paths, combined_3mf)
+            await asyncio.to_thread(_inject_stls_into_3mf, template_path, stl_paths, combined_3mf, qty_list)
         except ValueError as e:
             background_tasks.add_task(cleanup_directory, job_dir)
             raise HTTPException(status_code=422, detail=str(e))
@@ -1775,7 +1844,7 @@ async def pack_stls(
             "orcaslicer",
             "--datadir", ORCA_DATADIR,
             "--arrange", "1",
-            "--orient", "1",
+            "--orient", "0",  # --orient tilts parts about X/Y, changing layer-line direction
             "--export-3mf", out_file,
             combined_3mf,
         ]
@@ -1808,6 +1877,21 @@ async def pack_stls(
                     detail=f"Slicer pack failed (exit {exit_code}). Check server logs.",
                 )
 
+            # Orca re-seats every part at min Z = 0; put each back at its input STL's min Z.
+            min_zs = await asyncio.to_thread(lambda: [_stl_min_z(p) for p in stl_paths])
+            if any(min_zs):
+                per_instance = [z for z, q in zip(min_zs, qty_list or [1] * len(min_zs)) for _ in range(q)]
+                await asyncio.to_thread(_restore_build_item_z, out_file, per_instance)
+
+            # BIZ-359: per-plate manifest. `item` = index in `items` (upload order without it).
+            item_of = {e["file"]: i for i, e in enumerate(json.loads(items))} if items is not None else {}
+            per_input = [{"item": item_of.get(f.filename or "", u), "source": f.filename or name,
+                          "part": f.filename or name}
+                         for u, (f, name, q) in enumerate(zip(files, safe_names, qty_list or [1] * len(files)))
+                         for _ in range(q)]
+            await _embed_manifest(out_file, {"pack": per_input},
+                                  await asyncio.to_thread(_manifest.pack_origin, out_file, per_input))
+
             stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_packed.3mf")
             shutil.copy2(out_file, stable_out)
             background_tasks.add_task(cleanup_directory, job_dir)
@@ -1827,19 +1911,19 @@ async def pack_stls(
 
 
 @app.post(
-    "/api/arrange",
+    "/api/v1/arrange",
     tags=["arrange"],
     summary="Auto-arrange and orient objects in a 3MF (synchronous)",
     description=(
-        "Runs OrcaSlicer's plate-packing (`--arrange 1`) and auto-orientation "
-        "(`--orient 1`) on an existing `.3mf` and returns the rearranged `.3mf` directly "
+        "Runs OrcaSlicer's plate-packing (`--arrange 1`) and, only if `orient=true`, "
+        "auto-orientation (`--orient 1`, which may tilt parts about X/Y) on an existing `.3mf` and returns the rearranged `.3mf` directly "
         "as `application/octet-stream`.\n\n"
         "**Blocking:** waits up to `ARRANGE_TIMEOUT_SECONDS` (default 120 s) for OrcaSlicer "
         "to finish. No job tracking — call completes synchronously.\n\n"
-        "**When to use this vs `POST /api/pack`:**\n"
-        "- Use `POST /api/arrange` when you already have a `.3mf` with the correct geometry "
+        "**When to use this vs `POST /api/v1/pack`:**\n"
+        "- Use `POST /api/v1/arrange` when you already have a `.3mf` with the correct geometry "
         "and want to repack it (e.g., after hand-editing or re-importing).\n"
-        "- Use `POST /api/pack` when starting from STL files that need to be combined into "
+        "- Use `POST /api/v1/pack` when starting from STL files that need to be combined into "
         "a 3MF first.\n\n"
         "**Settings preservation:** the input 3MF's `Metadata/project_settings.config` is "
         "passed to OrcaSlicer via `--datadir`, which means OrcaSlicer may load its own "
@@ -1860,7 +1944,7 @@ async def pack_stls(
         408: {"description": "OrcaSlicer arrange timed out — reduce model complexity or increase ARRANGE_TIMEOUT_SECONDS"},
         500: {"description": "Unexpected system error — check server logs"},
     },
-)
+    operation_id="v1_auto_arrange_3mf")
 async def auto_arrange_3mf(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -1868,7 +1952,8 @@ async def auto_arrange_3mf(
     orient: Optional[str] = Form(None),
 ):
     arrange = _form_default_true(arrange)
-    orient = _form_default_true(orient)
+    # Opt-in: --orient tilts parts about X/Y, changing layer-line direction.
+    orient = orient is not None and _form_default_true(orient)
     # Fix R1: _safe_filename now guards against None before any attribute access
     try:
         safe_name = _safe_filename(file.filename)
@@ -1906,7 +1991,20 @@ async def auto_arrange_3mf(
         if orient:
             cmd.extend(["--orient", "1"])
 
-        cmd.append(in_file)
+        # Orca on Linux segfaults (exit 139) on 3MFs carrying its own version metadata, which
+        # includes anything Orca wrote (e.g. a /pack output). Hand it a stripped copy.
+        orca_in = in_file
+        try:
+            stripped = os.path.join(input_dir, f"stripped_{safe_name}")
+            await asyncio.to_thread(_strip_app_version, in_file, stripped, False)
+            orca_in = stripped
+        except ValueError as e:  # decompression-bomb guard
+            background_tasks.add_task(cleanup_directory, job_dir)
+            raise HTTPException(status_code=422, detail=str(e))
+        except Exception:
+            logger.warning("Could not strip version metadata from arrange input", exc_info=True)
+
+        cmd.append(orca_in)
         logger.info(f"Running arrange command: {' '.join(cmd)}")
 
         try:
@@ -1937,6 +2035,13 @@ async def auto_arrange_3mf(
                     detail=f"Slicer auto-arrange process failed (exit code {exit_code}). Check server logs for details.",
                 )
 
+            if not orient:
+                # Orca re-seats every object at min Z = 0; restore each object's input min Z.
+                try:
+                    await asyncio.to_thread(_restore_z_from_source, in_file, out_file)
+                except Exception:
+                    logger.exception("Could not restore input Z positions; returning Orca's output as-is")
+
             stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_output.3mf")
             shutil.copy2(out_file, stable_out)
 
@@ -1958,16 +2063,16 @@ async def auto_arrange_3mf(
 
 
 @app.post(
-    "/api/3mf/objects",
+    "/api/v1/projects/inspect",
     tags=["arrange"],
     summary="List the objects in an OrcaSlicer/Bambu .3mf",
     description=(
         "Returns each object's `id`, `name`, extruder, per-object override keys, part "
         "subtypes (e.g. `modifier_part`) and current instance count. Use the names/ids in "
-        "`POST /api/arrange/subset`. Names are not unique in a project; ids are."
+        "`POST /api/v1/projects/subset`. Names are not unique in a project; ids are."
     ),
     responses={400: {"description": "Not a readable .3mf"}},
-)
+    operation_id="v1_list_3mf_objects")
 async def list_3mf_objects(file: UploadFile = File(...)):
     job_dir = os.path.join(ARRANGE_DIR, f"objs_{uuid.uuid4()}")
     os.makedirs(job_dir, exist_ok=True)
@@ -1983,10 +2088,38 @@ async def list_3mf_objects(file: UploadFile = File(...)):
         shutil.rmtree(job_dir, ignore_errors=True)
 
 
+async def _embed_manifest(path: str, origins: dict[str, list[dict]],
+                          origin: Optional[_manifest.Origin] = None) -> None:
+    """Embed the BIZ-359 manifest; *origins* = {output object id: [origin per instance]}."""
+    def _do():
+        m = _manifest.build_manifest(path, origin or _manifest.keyed_origin(origins),
+                                     _manifest.requested_from(origins))
+        _manifest.embed_manifest(path, m)
+    try:
+        await asyncio.to_thread(_do)
+    except Exception as e:
+        logger.exception("Plate manifest failed for %s", path)
+        raise HTTPException(status_code=500, detail=f"Could not build the plate manifest: {e}")
+
+
 async def _oracle_arrange_and_transplant(sub_file: str, oracle_in: str, out_file: str,
                                          final_file: str, allow_rotations: bool) -> int:
     """Run OrcaSlicer --arrange on the expanded oracle copy and transplant the layout into
     ``sub_file`` -> ``final_file``. Returns the plate count; raises HTTPException."""
+    await _orca_arrange(oracle_in, out_file, allow_rotations)
+
+    # Orca's own export of the arranged file is lossy (clones objects, drops overrides),
+    # so only its layout is used; it is transplanted into the byte-intact subset.
+    try:
+        plates = await asyncio.to_thread(_subset.transplant_layout, sub_file, out_file, final_file)
+    except Exception as e:
+        logger.exception("Layout transplant failed")
+        raise HTTPException(status_code=500, detail=f"Could not apply arranged layout: {e}")
+    return plates
+
+
+async def _orca_arrange(oracle_in: str, out_file: str, allow_rotations: bool) -> None:
+    """``orcaslicer --arrange 1 --export-3mf out_file oracle_in``; raises HTTPException."""
     cmd = ["xvfb-run", "-a", "--server-args=-screen 0 1024x768x24", "orcaslicer",
            "--datadir", ORCA_DATADIR, "--arrange", "1"]
     if allow_rotations:
@@ -2012,18 +2145,9 @@ async def _oracle_arrange_and_transplant(sub_file: str, oracle_in: str, out_file
                      stdout.decode("utf-8", errors="replace") if stdout else "(no output)")
         raise HTTPException(status_code=400, detail=f"Slicer arrange failed (exit {process.returncode}). Check server logs.")
 
-    # Orca's own export of the arranged file is lossy (clones objects, drops overrides),
-    # so only its layout is used; it is transplanted into the byte-intact subset.
-    try:
-        plates = await asyncio.to_thread(_subset.transplant_layout, sub_file, out_file, final_file)
-    except Exception as e:
-        logger.exception("Layout transplant failed")
-        raise HTTPException(status_code=500, detail=f"Could not apply arranged layout: {e}")
-    return plates
-
 
 @app.post(
-    "/api/3mf/previews",
+    "/api/v1/projects/previews",
     tags=["arrange"],
     summary="List a .3mf's objects with plate names and a preview image of each object",
     description=(
@@ -2032,7 +2156,7 @@ async def _oracle_arrange_and_transplant(sub_file: str, oracle_in: str, out_file
         "`preview` is a rendering of **the object itself** (not the plate): a 3/4-view PNG, "
         "transparent background, tinted with the object's filament colour, modifier/negative "
         "parts omitted; `{mime, width, height, data_base64}`, or `null` when the object has "
-        "nothing printable. Use the `id`s with `/api/arrange/subset` or `/api/arrange/merge`.\n\n"
+        "nothing printable. Use the `id`s with `/api/v1/projects/subset` or `/api/v1/projects/merge`.\n\n"
         "`size` is the square image edge in px (32-1024, default 256). Set `images=false` for "
         "names/plates only (fast). Rendering is CPU-bound: roughly 0.5 s per object for typical "
         "models, so a 20-object project takes ~10 s."
@@ -2041,7 +2165,7 @@ async def _oracle_arrange_and_transplant(sub_file: str, oracle_in: str, out_file
         400: {"description": "Not a readable .3mf"},
         422: {"description": "size out of range"},
     },
-)
+    operation_id="v1_preview_3mf_objects")
 async def preview_3mf_objects(
     file: UploadFile = File(...),
     size: int = Form(256),
@@ -2066,7 +2190,7 @@ async def preview_3mf_objects(
 
 
 @app.post(
-    "/api/arrange/subset",
+    "/api/v1/projects/subset",
     tags=["arrange"],
     summary="Keep only chosen objects (x quantity) from a .3mf and arrange them on the fewest plates",
     description=(
@@ -2089,6 +2213,8 @@ async def preview_3mf_objects(
         "`X-Plate-Count` reports the result; `X-Warnings` lists any object not resting on "
         "the bed (empty when fine). Selector names matching several objects are "
         "rejected (422) — use `id`.\n\n"
+        "**Manifest:** embeds `Metadata/laminus_manifest.json`: per plate, which `selection` "
+        "entry and source object each instance came from (feature `pack.manifest`).\n\n"
         "Blocking; limited by `ARRANGE_TIMEOUT_SECONDS`."
     ),
     responses={
@@ -2097,7 +2223,7 @@ async def preview_3mf_objects(
         422: {"description": "Bad selection, unknown/ambiguous object, unknown machine_uuid"},
         503: {"description": "machine_uuid given but catalog not ready"},
     },
-)
+    operation_id="v1_arrange_subset")
 async def arrange_subset(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -2135,9 +2261,11 @@ async def arrange_subset(
         with open(in_file, "wb") as buf:
             await asyncio.to_thread(shutil.copyfileobj, file.file, buf)
 
+        origins: dict[int, list[int]] = {}
+
         def _build():
             want = _subset.resolve_selection(_subset.list_objects(in_file), sel,
-                                             _subset.plate_members(in_file))
+                                             _subset.plate_members(in_file), origins)
             summary = _subset.build_subset(in_file, sub_file, want, **target.kwargs)
             summary["remap"] += target.compat_warnings(sub_file)
             _subset.expand_instances(sub_file, oracle_in)
@@ -2152,6 +2280,9 @@ async def arrange_subset(
 
         plates = await _oracle_arrange_and_transplant(
             sub_file, oracle_in, out_file, final_file, allow_rotations)
+        await _embed_manifest(final_file, {
+            str(oid): [{"item": i, "source": safe_name, "part": str(oid)} for i in items]
+            for oid, items in origins.items()})
         stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_subset.3mf")
         shutil.copy2(final_file, stable_out)
         background_tasks.add_task(cleanup_file, stable_out)
@@ -2179,7 +2310,7 @@ class _Retarget:
         """Warn when an embedded (not overridden) preset lists printers excluding the target."""
         if self.machine is None or catalog is None:
             return []
-        with zipfile.ZipFile(path) as z:
+        with _subset.open_zip(path) as z:
             cfg = json.loads(z.read(_subset.PROJECT_SETTINGS))
         wanted = []
         if self.process_cfg is None:
@@ -2227,7 +2358,7 @@ async def _resolve_retarget(machine_uuid, process_uuid, filament_uuids) -> _Reta
 
 
 @app.post(
-    "/api/arrange/merge",
+    "/api/v1/projects/merge",
     tags=["arrange"],
     summary="Combine selections from several .3mf files into one .3mf, arranged on the fewest plates",
     description=(
@@ -2240,7 +2371,9 @@ async def _resolve_retarget(machine_uuid, process_uuid, filament_uuids) -> _Reta
         "each object. **Project-wide settings (process, filament, printer, thumbnails) come from "
         "the first uploaded file** (the base); differences in the other sources are listed in "
         "the `X-Merge-Warnings` header, which also reports any object that ends up not resting on the bed (floating/sunk). A non-base object using a filament slot the base does not "
-        "have is rejected (422). `machine_uuid` retargets the bed/printer as in `/api/arrange/subset`.\n\n"
+        "have is rejected (422). `machine_uuid` retargets the bed/printer as in `/api/v1/projects/subset`.\n\n"
+        "Embeds `Metadata/laminus_manifest.json`: per plate, which `selection` entry and source "
+        "object each instance came from (feature `pack.manifest`).\n\n"
         "Headers: `X-Plate-Count`, `X-Instance-Count`, `X-Merge-Warnings`. Blocking; limited by "
         "`ARRANGE_TIMEOUT_SECONDS`."
     ),
@@ -2250,7 +2383,7 @@ async def _resolve_retarget(machine_uuid, process_uuid, filament_uuids) -> _Reta
         422: {"description": "Bad selection, unknown/ambiguous object, unknown file, unknown machine_uuid, incompatible sources"},
         503: {"description": "machine_uuid given but catalog not ready"},
     },
-)
+    operation_id="v1_arrange_merge")
 async def arrange_merge(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
@@ -2277,7 +2410,8 @@ async def arrange_merge(
         names.append(n)
     # group selectors per source file
     per_file: dict[int, list[dict]] = {}
-    for item in sel:
+    per_file_idx: dict[int, list[int]] = {}    # global selection index of each per-file entry
+    for sel_idx, item in enumerate(sel):
         ref = item["file"]
         if isinstance(ref, int):
             if not 0 <= ref < len(files):
@@ -2290,6 +2424,7 @@ async def arrange_merge(
                     f"selection file {ref!r} matches {len(hits)} uploads; use the 0-based index."))
             idx = hits[0]
         per_file.setdefault(idx, []).append({k: v for k, v in item.items() if k != "file"})
+        per_file_idx.setdefault(idx, []).append(sel_idx)
     order = sorted(per_file, key=lambda i: (i != 0, i))  # base (first upload) first if selected
     if 0 not in per_file:
         raise HTTPException(status_code=422, detail=(
@@ -2311,21 +2446,29 @@ async def arrange_merge(
         final_file = os.path.join(job_dir, "final.3mf")
 
         remap: list[str] = []
+        merged_origins: dict[str, list[dict]] = {}
 
         def _build():
-            subs = []
+            subs, file_origins = [], []
             for i in order:
                 src = os.path.join(job_dir, f"in_{i}.3mf")
+                origins: dict[int, list[int]] = {}
                 try:
                     want = _subset.resolve_selection(_subset.list_objects(src), per_file[i],
-                                                     _subset.plate_members(src))
+                                                     _subset.plate_members(src), origins,
+                                                     per_file_idx[i])
                 except _subset.SubsetError as e:
                     raise _subset.SubsetError(f"{names[i]}: {e}")
                 dst = os.path.join(job_dir, f"sub_{i}.3mf")
                 r = _subset.build_subset(src, dst, want, **target.kwargs)
                 remap.extend(f"{names[i]}: {w}" for w in r["remap"] + target.compat_warnings(dst))
                 subs.append(dst)
+                file_origins.append(origins)
             summary = _subset.merge_subsets(subs, merged, labels=[names[i] for i in order])
+            for i, origins, id_map in zip(order, file_origins, summary["id_maps"]):
+                for oid, items in origins.items():
+                    merged_origins[id_map[str(oid)]] = [
+                        {"item": s, "source": names[i], "part": str(oid)} for s in items]
             _subset.expand_instances(merged, oracle_in)
             return summary
 
@@ -2338,6 +2481,7 @@ async def arrange_merge(
 
         plates = await _oracle_arrange_and_transplant(
             merged, oracle_in, out_file, final_file, allow_rotations)
+        await _embed_manifest(final_file, merged_origins)
         stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_merge.3mf")
         shutil.copy2(final_file, stable_out)
         background_tasks.add_task(cleanup_file, stable_out)
@@ -2351,14 +2495,472 @@ async def arrange_merge(
                             media_type="application/octet-stream", headers=headers)
 
 
+def _mixed_selection(files: List[UploadFile], selection: str, solo_ok: bool
+                     ) -> tuple[list[dict], list[str], dict[int, list[tuple[int, dict]]]]:
+    """Validate a ``/pack/next``-shaped selection over .3mf/.stl uploads.
+
+    Returns (entries, upload names, {upload index: [(entry index, selector without file)]}).
+    """
+    try:
+        sel = json.loads(selection)
+        if not isinstance(sel, list) or not sel or not all(isinstance(x, dict) and "file" in x for x in sel):
+            raise ValueError
+    except ValueError:
+        raise HTTPException(status_code=422, detail='selection must be a non-empty JSON list of objects, each with a "file".')
+    names: list[str] = []
+    for f in files:
+        try:
+            n = _safe_filename(f.filename)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if not n.lower().endswith((".3mf", ".stl")):
+            raise HTTPException(status_code=400, detail="Only .3mf and .stl files are supported.")
+        names.append(n)
+    per_file: dict[int, list[tuple[int, dict]]] = {}
+    for g, item in enumerate(sel):
+        rule = item.get("rule", "split")
+        if rule not in _pack_next.RULES:
+            raise HTTPException(status_code=422, detail=f"selection[{g}]: rule must be one of {list(_pack_next.RULES)}.")
+        if rule == "solo" and not solo_ok:
+            raise HTTPException(status_code=422, detail=(
+                f"selection[{g}]: rule 'solo' is not packed with other parts; slice it as its own job."))
+        qty = item.get("qty", 1)
+        if isinstance(qty, bool) or not isinstance(qty, int) or not 1 <= qty <= PACK_MAX_INSTANCES:
+            raise HTTPException(status_code=422, detail=(
+                f"selection[{g}]: qty must be an integer from 1 to {PACK_MAX_INSTANCES}."))
+        ref = item["file"]
+        if isinstance(ref, int) and not isinstance(ref, bool):
+            if not 0 <= ref < len(files):
+                raise HTTPException(status_code=422, detail=f"selection[{g}]: file index {ref} out of range.")
+            idx = ref
+        else:
+            hits = [i for i, n in enumerate(names) if n == os.path.basename(str(ref))]
+            if len(hits) != 1:
+                raise HTTPException(status_code=422, detail=(
+                    f"selection[{g}]: file {ref!r} matches {len(hits)} uploads; use the 0-based index."))
+            idx = hits[0]
+        if names[idx].lower().endswith(".stl") and any(k in item for k in ("id", "name", "plate")):
+            raise HTTPException(status_code=422, detail=f"selection[{g}]: an STL entry takes only file and qty.")
+        per_file.setdefault(idx, []).append((g, {k: v for k, v in item.items() if k != "file"}))
+    return sel, names, per_file
+
+
+async def _mixed_project(job_dir: str, files: List[UploadFile], names: list[str],
+                         per_file: dict[int, list[tuple[int, dict]]], bed_cfg: dict,
+                         target: "_Retarget") -> tuple[str, _pack_next.Origins, dict]:
+    """Save the uploads into *job_dir* and merge the selection into one project on
+    *bed_cfg*'s bed (``printable_area`` / ``printable_height``).
+
+    Returns (merged path, {object id: [origin per instance]}, merge_subsets summary).
+    """
+    # 3MFs first so a project (with its filament slots) is the merge base, then STLs
+    order = sorted(per_file, key=lambda i: (names[i].lower().endswith(".stl"), i))
+    p = lambda n: os.path.join(job_dir, n)  # noqa: E731
+    for i in order:
+        with open(p(f"in_{i}{os.path.splitext(names[i])[1].lower()}"), "wb") as buf:
+            await asyncio.to_thread(shutil.copyfileobj, files[i].file, buf)
+
+    def _build():
+        subs, file_origins, used = [], [], 0
+        for i in order:
+            stl = names[i].lower().endswith(".stl")
+            src = p(f"in_{i}.stl" if stl else f"in_{i}.3mf")
+            if stl:
+                proj = p(f"stl_{i}.3mf")
+                _pack_next.stl_project(src, proj, names[i], {
+                    k: bed_cfg[k] for k in ("printable_area", "printable_height") if k in bed_cfg})
+                src = proj
+            # cap checked inside, before any per-instance allocation (incl. bundle x qty)
+            want, origins = _pack_next.entry_origins(src, per_file[i], names[i], stl,
+                                                     PACK_MAX_INSTANCES - used)
+            used += sum(want.values())
+            dst = p(f"sub_{i}.3mf")
+            _subset.build_subset(src, dst, want, **target.kwargs)
+            subs.append(dst)
+            file_origins.append(origins)
+        summary = _subset.merge_subsets(subs, p("merged.3mf"), labels=[names[i] for i in order])
+        _pack_next.set_bed(p("merged.3mf"), bed_cfg)
+        merged: _pack_next.Origins = {}
+        for origins, id_map in zip(file_origins, summary["id_maps"]):
+            for oid, lst in origins.items():
+                merged[id_map[str(oid)]] = lst
+        return merged, summary
+
+    try:
+        origins, summary = await asyncio.to_thread(_build)
+    except _subset.SubsetError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot process input: {e}")
+    return p("merged.3mf"), origins, summary
+
+
 @app.post(
-    "/api/profiles/upload",
+    "/api/v1/pack/next",
+    tags=["arrange"],
+    summary="The fullest single plate a machine can print from the remaining parts",
+    description=(
+        "Upload the remaining parts' sources as repeated `files` (`.3mf` and/or `.stl`) and a "
+        "`selection` JSON list shaped like `/api/v1/projects/merge`: each entry names its `file` "
+        "(uploaded filename or 0-based upload index) plus, for a 3MF, one of `id` / `name` / "
+        "`plate`, and a `qty` (default 1); an STL entry is just `{file, qty}`. Optional `rule` "
+        "per entry: `split` (default: instances may land anywhere), `together` (each copy of the "
+        "entry, e.g. a `plate` bundle, is all-or-nothing on the returned plate; Orca chooses its "
+        "layout) or `solo` (rejected with 422: send those as their own jobs).\n\n"
+        "The selection is arranged by OrcaSlicer for `machine_uuid`'s bed and plate 1 is taken "
+        "(no scoring of our own). A `together` copy Orca split across plates is dropped from the "
+        "plate; if plate 1 holds more than `max_parts` instances, whole units are dropped, last "
+        "placed first. Whenever anything is dropped, the kept instances are arranged again.\n\n"
+        "**200:** a single-plate `.3mf`, footprint centred on the bed, ready for "
+        "`POST /api/v1/jobs` with `plate=1`. It embeds `Metadata/laminus_manifest.json` (schema "
+        "as for `/pack`, feature `pack.manifest`) whose `items` also carry `consumed`. Header "
+        "`X-Consumed`: JSON array of instances taken per selection entry, by entry index.\n\n"
+        "**422 `nothing_fits`** (`error.code`): nothing in the selection fits this bed; "
+        "`error.details` lists the entries whose parts are too big. Every other failure uses "
+        "another status or code. Blocking; each arrange is limited by `ARRANGE_TIMEOUT_SECONDS`."
+    ),
+    responses={
+        400: {"description": "Unreadable 3MF/STL or Orca arrange failed"},
+        408: {"description": "Arrange timed out"},
+        422: {"description": "`nothing_fits`, or bad selection / rule / max_parts / machine_uuid"},
+        503: {"description": "Catalog not ready"},
+    },
+    operation_id="v1_pack_next")
+async def pack_next(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    selection: str = Form(..., description='JSON: [{"file": "a.3mf", "plate": 2, "qty": 1, "rule": "together"}, {"file": "b.stl", "qty": 4}]'),
+    machine_uuid: str = Form(...),
+    max_parts: Optional[int] = Form(None, description="Most instances on the returned plate"),
+):
+    if max_parts is not None and max_parts < 1:
+        raise HTTPException(status_code=422, detail="max_parts must be >= 1.")
+    sel, names, per_file = _mixed_selection(files, selection, solo_ok=False)
+
+    target = await _resolve_retarget(machine_uuid, None, None)
+    bed_rect = _plate_extract.bed_rect(target.printer_cfg)
+    if bed_rect is None:
+        raise HTTPException(status_code=422, detail=f"Machine UUID '{machine_uuid}' has no usable printable_area.")
+    bed = (bed_rect[2] - bed_rect[0], bed_rect[3] - bed_rect[1],
+           _plate_extract._printable_height(target.printer_cfg))
+
+    job_id = str(uuid.uuid4())
+    with _track_inflight_arrange(job_id):
+        job_dir = os.path.join(ARRANGE_DIR, f"next_{job_id}")
+        os.makedirs(job_dir, exist_ok=True)
+        background_tasks.add_task(cleanup_directory, job_dir)
+        p = lambda n: os.path.join(job_dir, n)  # noqa: E731
+        cur, origins, _ = await _mixed_project(job_dir, files, names, per_file, target.printer_cfg, target)
+        requested = _pack_next.consumed(origins, len(sel))
+
+        def _nothing_fits(msg: str, details: list[dict]):
+            return _api_v1.DetailedHTTPException(422, msg, "nothing_fits", details)
+
+        # parts that can never fit this bed (and the together copies they belong to) are left out
+        big = await asyncio.to_thread(_pack_next.oversize, cur, bed)
+        if big:
+            dropped_units = {o["unit"] for oid in big for o in origins.get(oid, [])}
+            keep = {x for x in _pack_next.all_instances(origins)
+                    if origins[x[0]][x[1]]["unit"] not in dropped_units}
+            details = sorted({(o["item"], o["source"], o["part"], tuple(big[oid]))
+                              for oid in big for o in origins.get(oid, [])})
+            if not keep:
+                bed_txt = " × ".join(f"{v:g}" for v in bed if v is not None)
+                raise _nothing_fits(
+                    f"Nothing in the selection fits the {bed_txt} mm bed of this machine",
+                    [{"loc": ["body", "selection", it], "type": "nothing_fits",
+                      "msg": f"{src} part {part} is {' × '.join(f'{v:g}' for v in dims)} mm"}
+                     for it, src, part, dims in details])
+            origins = await asyncio.to_thread(_pack_next.subset_instances, cur, p("fit.3mf"), origins, keep)
+            cur = p("fit.3mf")
+
+        final = None
+        for rnd in range(_pack_next.MAX_ROUNDS):
+            oracle, arranged = p(f"oracle_{rnd}.3mf"), p(f"arranged_{rnd}.3mf")
+            await asyncio.to_thread(_subset.expand_instances, cur, oracle)
+            await _orca_arrange(oracle, arranged, False)
+            try:
+                _, plates = await asyncio.to_thread(_subset._arranged_layout, arranged)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Could not read the arranged layout: {e}")
+            keep = _pack_next.choose(plates[0] if plates else [], origins, max_parts)
+            if not keep:
+                raise _nothing_fits("Nothing in the selection fits one plate of this machine "
+                                    "(together bundles larger than the bed, or max_parts too small)", [])
+            if len(plates) == 1 and len(keep) == len(_pack_next.all_instances(origins)):
+                final = p(f"layout_{rnd}.3mf")
+                try:
+                    await asyncio.to_thread(_subset.transplant_layout, cur, arranged, final)
+                except Exception as e:
+                    raise HTTPException(status_code=500, detail=f"Could not apply arranged layout: {e}")
+                break
+            nxt = p(f"keep_{rnd}.3mf")
+            origins = await asyncio.to_thread(_pack_next.subset_instances, cur, nxt, origins, set(keep))
+            cur = nxt
+        if final is None:
+            raise HTTPException(status_code=500, detail=(
+                f"Arrange did not settle on one plate after {_pack_next.MAX_ROUNDS} rounds."))
+
+        out = p("next.3mf")
+
+        def _finish():
+            with _subset.open_zip(final) as z:
+                cfg = json.loads(z.read(_subset.PROJECT_SETTINGS))
+            _plate_extract.retarget_plate(final, out, 1, None, cfg, centre_footprint=True)
+            taken = _pack_next.consumed(origins, len(sel))
+            m = _manifest.build_manifest(
+                out, _manifest.keyed_origin(origins),
+                [{"item": i, "source": names[per_item_file[i]], "requested": n}
+                 for i, n in enumerate(taken) if n])
+            m["items"] = [{"item": i, "source": names[per_item_file[i]], "requested": requested[i],
+                           "consumed": taken[i]} for i in range(len(sel))]
+            _manifest.embed_manifest(out, m)
+            return taken
+
+        per_item_file = {g: i for i, entries in per_file.items() for g, _ in entries}
+        try:
+            taken = await asyncio.to_thread(_finish)
+        except Exception as e:
+            logger.exception("pack/next finishing failed")
+            raise HTTPException(status_code=500, detail=f"Could not finish the plate: {e}")
+        stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_next.3mf")
+        shutil.copy2(out, stable_out)
+        background_tasks.add_task(cleanup_file, stable_out)
+        headers = {"X-Consumed": json.dumps(taken, separators=(",", ":")),
+                   "X-Instance-Count": str(sum(taken))}
+        return FileResponse(path=stable_out, filename="next_plate.3mf",
+                            media_type="application/octet-stream", headers=headers)
+
+
+@app.post(
+    "/api/v1/pack/mixed",
+    tags=["arrange"],
+    summary="Arrange a mixed STL / 3MF selection on the fewest plates of one bed",
+    description=(
+        "Same `files` and `selection` as `/api/v1/pack/next` (`.3mf` entries `{file, id|name|plate, "
+        "qty, rule}`, `.stl` entries `{file, qty, rule}`), for a bed given either as `bed_x` + "
+        "`bed_y` + `bed_z` (mm; the projects' printer settings are kept, only the bed is replaced) "
+        "or as `machine_uuid` (bed and printer retargeted as in `/api/v1/projects/subset`), not "
+        "both.\n\n"
+        "Rules: `split` (default) instances go wherever OrcaSlicer's arrange puts them; "
+        "`together`: each copy of the entry (one `plate` bundle) lands on a single plate, Orca "
+        "choosing its layout (a copy Orca split is taken off and arranged again with the other "
+        "split copies); `solo`: every instance gets a plate of its own, footprint centred, after "
+        "the arranged plates.\n\n"
+        "**200:** one multi-plate `.3mf`; each plate slices with `POST /api/v1/jobs` `plate=N`. "
+        "Per-object overrides, modifiers and paint of 3MF objects are kept (as for "
+        "`/projects/merge`, whose base-project rules apply). Embeds `Metadata/laminus_manifest.json` "
+        "(feature `pack.manifest`): `item` = selection index, `part` = source object id (3MF) or "
+        "filename (STL), `requested` = qty x parts. Headers `X-Plate-Count`, `X-Instance-Count`, "
+        "`X-Merge-Warnings`.\n\n"
+        "**422 `part_too_large`** (`error.code`): a part larger than the bed, or a `together` copy "
+        "that does not fit one plate; `error.details[].loc` is `[\"body\", \"selection\", <entry>]` "
+        "per offending entry. Other input errors are 422 `unprocessable`. Blocking; each arrange "
+        "is limited by `ARRANGE_TIMEOUT_SECONDS`."
+    ),
+    responses={
+        400: {"description": "Unreadable 3MF/STL or Orca arrange failed"},
+        408: {"description": "Arrange timed out"},
+        422: {"description": "`part_too_large`, or bad selection / rule / bed / machine_uuid"},
+        503: {"description": "machine_uuid given but catalog not ready"},
+    },
+    operation_id="v1_pack_mixed")
+async def pack_mixed(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    selection: str = Form(..., description='JSON: [{"file": "a.3mf", "plate": 2, "qty": 2, "rule": "together"}, {"file": "b.stl", "qty": 4, "rule": "solo"}]'),
+    machine_uuid: Optional[str] = Form(None),
+    bed_x: Optional[float] = Form(None, description="Bed X in mm (with bed_y, bed_z; instead of machine_uuid)"),
+    bed_y: Optional[float] = Form(None, description="Bed Y in mm"),
+    bed_z: Optional[float] = Form(None, description="Printable height in mm"),
+):
+    sel, names, per_file = _mixed_selection(files, selection, solo_ok=True)
+    dims = (bed_x, bed_y, bed_z)
+    if machine_uuid and any(v is not None for v in dims):
+        raise HTTPException(status_code=422, detail="Give machine_uuid or bed_x/bed_y/bed_z, not both.")
+    if machine_uuid:
+        target = await _resolve_retarget(machine_uuid, None, None)
+        bed_cfg = target.printer_cfg
+    elif all(v is not None for v in dims):
+        if not all(v > 0 for v in dims):
+            raise HTTPException(status_code=422, detail="bed_x, bed_y and bed_z must all be positive.")
+        target = _Retarget()
+        bed_cfg = {"printable_area": ["0x0", f"{bed_x:g}x0", f"{bed_x:g}x{bed_y:g}", f"0x{bed_y:g}"],
+                   "printable_height": bed_z}
+    else:
+        raise HTTPException(status_code=422, detail="Give machine_uuid or all of bed_x, bed_y, bed_z.")
+    rect = _plate_extract.bed_rect(bed_cfg)
+    if rect is None:
+        raise HTTPException(status_code=422, detail=f"Machine UUID '{machine_uuid}' has no usable printable_area.")
+    w, d = rect[2] - rect[0], rect[3] - rect[1]
+    bed = (w, d, _plate_extract._printable_height(bed_cfg))
+    bed_txt = " × ".join(f"{v:g}" for v in bed if v is not None)
+    solo_items = {g for g, item in enumerate(sel) if item.get("rule") == "solo"}
+
+    def _too_large(details: list[dict]):
+        return _api_v1.DetailedHTTPException(
+            422, f"Some of the selection does not fit one {bed_txt} mm plate", "part_too_large", details)
+
+    job_id = str(uuid.uuid4())
+    with _track_inflight_arrange(job_id):
+        job_dir = os.path.join(ARRANGE_DIR, f"mixed_{job_id}")
+        os.makedirs(job_dir, exist_ok=True)
+        background_tasks.add_task(cleanup_directory, job_dir)
+        p = lambda n: os.path.join(job_dir, n)  # noqa: E731
+        merged, origins, summary = await _mixed_project(job_dir, files, names, per_file, bed_cfg, target)
+
+        big = await asyncio.to_thread(_pack_next.oversize, merged, bed)
+        if big:
+            raise _too_large([
+                {"loc": ["body", "selection", it], "type": "part_too_large",
+                 "msg": f"{src} part {part} is {' × '.join(f'{v:g}' for v in size)} mm"}
+                for it, src, part, size in sorted({(o["item"], o["source"], o["part"], tuple(big[oid]))
+                                                   for oid in big for o in origins.get(oid, [])})])
+
+        unit_of = lambda i: origins[i[0]][i[1]]["unit"]  # noqa: E731
+        n_arranges = 0
+
+        async def _arrange(pool: set) -> list[_pack_mixed.Placed]:
+            """Orca's plates for just the *pool* instances of the merged project, plate-1 coordinates."""
+            nonlocal n_arranges
+            n_arranges += 1
+            sub, oracle, arranged = (p(f"{s}_{n_arranges}.3mf") for s in ("pool", "oracle", "arranged"))
+            back = _pack_mixed.renumber(pool)
+            await asyncio.to_thread(_pack_next.subset_instances, merged, sub, origins, pool)
+            await asyncio.to_thread(_subset.expand_instances, sub, oracle)
+            await _orca_arrange(oracle, arranged, False)
+            try:
+                tfs, plates = await asyncio.to_thread(_subset._arranged_layout, arranged)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Could not read the arranged layout: {e}")
+            return _pack_mixed.to_local({back[i]: t for i, t in tfs.items()},
+                                        [[back[i] for i in pl] for pl in plates], w, d)
+
+        done: list[_pack_mixed.Placed] = []
+        pool = {i for i in _pack_next.all_instances(origins) if origins[i[0]][i[1]]["item"] not in solo_items}
+        for _ in range(_pack_next.MAX_ROUNDS):
+            if not pool:
+                break
+            plates = await _arrange(pool)
+            split = _pack_mixed.split_units(plates, origins)
+            done += [kept for pl in plates if (kept := [x for x in pl if unit_of(x[0]) not in split])]
+            left = {i for pl in plates for i, _ in pl if unit_of(i) in split}
+            if left == pool:
+                break                   # nothing settled: arrange those copies one by one below
+            pool = left
+        # still split: arrange one copy per entry on its own and reuse its layout for the
+        # entry's other copies (identical), so the arrange count is bounded by entries
+        copies: dict[int, list[set]] = {}
+        for members in _pack_next.units(origins).values():
+            if members & pool:
+                copies.setdefault(origins[min(members)[0]][min(members)[1]]["item"], []).append(members)
+        if len(copies) > _pack_mixed.MAX_COPY_ARRANGES:
+            raise HTTPException(status_code=422, detail=(
+                f"{len(copies)} together entries do not settle on single plates; "
+                f"at most {_pack_mixed.MAX_COPY_ARRANGES} are re-arranged per request."))
+        too_large: set[tuple[int, str]] = set()
+        for item, units_ in sorted(copies.items()):
+            plates = await _arrange(units_[0])
+            if len(plates) != 1:
+                too_large.add((item, origins[min(units_[0])[0]][min(units_[0])[1]]["source"]))
+                continue
+            done += [_pack_mixed.relabel(plates[0], units_[0], u) for u in units_]
+        if too_large:
+            raise _too_large([{"loc": ["body", "selection", it], "type": "part_too_large",
+                               "msg": f"a together copy from {src} does not fit one plate"}
+                              for it, src in sorted(too_large)])
+
+        solo = sorted((i for i in _pack_next.all_instances(origins)
+                       if origins[i[0]][i[1]]["item"] in solo_items),
+                      key=lambda i: (origins[i[0]][i[1]]["item"], i))
+        final = p("final.3mf")
+
+        def _finish():
+            plates = done + _pack_mixed.solo_plates(merged, solo, rect)
+            tfs, lists = _pack_mixed.compose(plates, w, d)
+            return _subset.apply_layout(merged, tfs, lists, final)
+
+        try:
+            n_plates = await asyncio.to_thread(_finish)
+        except Exception as e:
+            logger.exception("pack/mixed layout failed")
+            raise HTTPException(status_code=500, detail=f"Could not apply the arranged layout: {e}")
+        await _embed_manifest(final, origins)
+        stable_out = os.path.join(ARRANGE_DIR, f"{job_id}_mixed.3mf")
+        shutil.copy2(final, stable_out)
+        background_tasks.add_task(cleanup_file, stable_out)
+        warnings = summary["warnings"] + await asyncio.to_thread(_preview.bed_clearance_warnings, final)
+        headers = {"X-Plate-Count": str(n_plates),
+                   "X-Instance-Count": str(len(_pack_next.all_instances(origins))),
+                   "X-Merge-Warnings": " | ".join(warnings).encode("ascii", "replace").decode()}
+        return FileResponse(path=stable_out, filename="mixed.3mf",
+                            media_type="application/octet-stream", headers=headers)
+
+
+@app.post(
+    "/api/v1/projects/measure",
+    tags=["arrange"],
+    summary="Bounding-box sizes of 3MF objects / plates, or of an STL",
+    description=(
+        "Multipart `file` (`.3mf` or `.stl`) and optional `selection`, a JSON list of "
+        "`{\"id\": n}` / `{\"name\": s}` (one object) or `{\"plate\": n}` (one plate); `[]` or "
+        "omitted measures the whole file.\n\n"
+        "**200:** `{\"items\": [{\"size_mm\": [x, y, z]}, ...]}`, one per selection entry in order "
+        "(one for the whole file). Sizes are the axis-aligned bounding box of printed parts "
+        "(modifier/negative/blocker/enforcer parts ignored), after the build transform:\n"
+        "- object: its first instance as placed (a rotated object reports its placed size);\n"
+        "- plate: every instance on that plate as authored;\n"
+        "- whole 3MF: every build item; a multi-plate project needs `plate` selectors;\n"
+        "- STL: mesh extents (no selection).\n\n"
+        "**422** (`unprocessable`): unreadable file, bad selection, unknown/ambiguous object, "
+        "missing or empty plate."
+    ),
+    responses={422: {"description": "Unreadable file or bad selection"}},
+    operation_id="v1_measure")
+async def measure_project(
+    file: UploadFile = File(...),
+    selection: Optional[str] = Form(None, description='JSON: [{"id": 8}, {"plate": 2}]; omit for the whole file'),
+):
+    sel = None
+    if selection not in (None, ""):
+        try:
+            sel = json.loads(selection)
+            if not isinstance(sel, list) or not all(isinstance(x, dict) for x in sel):
+                raise ValueError
+        except ValueError:
+            raise HTTPException(status_code=422, detail="selection must be a JSON list of objects.")
+    try:
+        safe_name = _safe_filename(file.filename)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    stl = safe_name.lower().endswith(".stl")
+    if not stl and not safe_name.lower().endswith(".3mf"):
+        raise HTTPException(status_code=422, detail="Only .3mf and .stl files are supported.")
+    job_dir = os.path.join(ARRANGE_DIR, f"measure_{uuid.uuid4()}")
+    os.makedirs(job_dir, exist_ok=True)
+    try:
+        path = os.path.join(job_dir, "in.stl" if stl else "in.3mf")
+        with open(path, "wb") as buf:
+            await asyncio.to_thread(shutil.copyfileobj, file.file, buf)
+        try:
+            sizes = await asyncio.to_thread(_measure.measure, path, stl, sel)
+        except _measure.MeasureError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Cannot read {'STL' if stl else '3MF'}: {e}")
+        return {"items": [{"size_mm": s} for s in sizes]}
+    finally:
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+
+@app.post(
+    "/api/v1/profiles/upload",
     tags=["profiles"],
     summary="Upload a user profile JSON",
     description=(
         "Upload a flat OrcaSlicer preset JSON into the user config volume at "
         "`/config/user/default/{type}/`. A catalog rebuild is triggered in the background "
-        "automatically — wait ~5 s and call `GET /api/profiles` to confirm the profile "
+        "automatically — wait ~5 s and call `GET /api/v1/profiles` to confirm the profile "
         "appears before using it in a slice job.\n\n"
         "**Requirements for the JSON file:**\n"
         "- Must have a `.json` extension\n"
@@ -2370,7 +2972,7 @@ async def arrange_merge(
         "(no `inherits`) is frozen at the version it was flattened from and silently misses "
         "every later vendor fix — use it only when you want a permanent fork.\n\n"
         "If the base is renamed or removed by a later OrcaSlicer release the profile is "
-        "dropped from the catalog rather than served half-resolved; `GET /api/profiles/broken` "
+        "dropped from the catalog rather than served half-resolved; `GET /api/v1/profiles/broken` "
         "reports it.\n\n"
         "**Profile persistence:** the uploaded file is written to a Docker volume "
         "(`/config/user/`). It survives container restarts but is not baked into the image. "
@@ -2387,7 +2989,7 @@ async def arrange_merge(
             ),
         },
     },
-)
+    operation_id="v1_upload_profile")
 async def upload_profile(
     type: str = Form(...),
     file: UploadFile = File(...),
@@ -2419,7 +3021,7 @@ async def upload_profile(
 
 
 @app.post(
-    "/api/profiles/rescan",
+    "/api/v1/profiles/rescan",
     tags=["profiles"],
     summary="Rescan profiles and rebuild the catalog",
     description=(
@@ -2430,11 +3032,11 @@ async def upload_profile(
         "preset change voids it. Use this endpoint to force the work anyway: after editing "
         "profiles in place on a bind mount, or to re-check which profiles are broken after "
         "an OrcaSlicer upgrade.\n\n"
-        "Returns immediately; the rebuild runs in the background. Poll `GET /api/health` "
-        "until `catalog_building` is `false`, then call `GET /api/profiles/broken` for "
+        "Returns immediately; the rebuild runs in the background. Poll `GET /api/v1/health` "
+        "until `catalog_building` is `false`, then call `GET /api/v1/profiles/broken` for "
         "profiles whose inheritance no longer resolves."
     ),
-)
+    operation_id="v1_rescan_profiles")
 async def rescan_profiles():
     already = _catalog_building
     _trigger_catalog_rebuild(force=True)
@@ -2443,7 +3045,7 @@ async def rescan_profiles():
         "message": (
             "A catalog rebuild was already in progress; not queuing another."
             if already else
-            "Catalog rescan started. Poll /api/health until catalog_building is false."
+            "Catalog rescan started. Poll /api/v1/health until catalog_building is false."
         ),
     }
 
@@ -2462,7 +3064,7 @@ def _orca_version() -> Optional[str]:
 
 
 @app.get(
-    "/api/health",
+    "/api/v1/health",
     tags=["health"],
     summary="Service health check",
     description=(
@@ -2487,10 +3089,10 @@ def _orca_version() -> Optional[str]:
         "otherwise `null`\n"
         "- `catalog_skipped_count` — number of profiles excluded from the catalog on the "
         "last build (unresolvable `inherits` parent, unparseable JSON, etc.) — call "
-        "`GET /api/profiles/broken` for which profiles and why; `null` if not yet built\n"
+        "`GET /api/v1/profiles/broken` for which profiles and why; `null` if not yet built\n"
         "- `active_jobs` — number of jobs currently in `slicing` status"
     ),
-)
+    operation_id="v1_health_check")
 async def health_check():
     active = sum(1 for j in list(jobs.values()) if j["status"] == "slicing")
     return {
@@ -2508,29 +3110,6 @@ async def health_check():
     }
 
 
-@app.get(
-    "/api/jobs",
-    tags=["jobs"],
-    summary="List job history",
-    description=(
-        "Returns every slice job created during this container's lifetime, newest first — "
-        "including jobs already evicted from the active job table (downloaded, or expired "
-        "after `JOB_TTL_SECONDS`). Backs the Web UI's job status/history view.\n\n"
-        "**Response fields per job:** `id`, `filename` (original upload name), `status` "
-        "(`pending`/`slicing`/`completed`/`failed`), `output_format`, `sliced_file`, `error`, "
-        "`created_at` / `updated_at` (Unix timestamps), and `evicted` (`true` once the sliced "
-        "file has been deleted from disk — `GET /api/slice/download/{id}` will 404).\n\n"
-        "History is capped at `JOB_HISTORY_LIMIT` (default 200) entries; oldest entries are "
-        "dropped first. Persisted to `/data/job_history.json`, so it survives restarts."
-    ),
-)
-async def list_jobs(limit: int = 100, status: Optional[str] = None):
-    records = list(job_history.values())
-    if status:
-        records = [r for r in records if r.get("status") == status]
-    records.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
-    limit = max(1, min(limit, JOB_HISTORY_LIMIT))
-    return {"jobs": records[:limit]}
 
 
 def _dir_size(path: str) -> int:
@@ -2585,14 +3164,14 @@ def _scan_stale_temp(min_age_seconds: int) -> List[str]:
 
 
 @app.post(
-    "/api/cleanup",
+    "/api/v1/cleanup",
     tags=["maintenance"],
     summary="Remove stale temp files from failed/interrupted jobs",
     description=(
         "Scans `/tmp/jobs` and `/tmp/arrange` for leftover directories/files not accounted "
         "for by any currently active job, and removes the ones older than `min_age_seconds`. "
         "This catches clutter that the normal job-eviction sweep can't see — e.g. scratch "
-        "dirs from an `/api/arrange`, `/api/pack`, or `/api/slice/thumbnail` request that "
+        "dirs from an `/api/v1/arrange`, `/api/v1/pack`, or `/api/v1/slice/thumbnail` request that "
         "never finished because the container was killed mid-request, or `/tmp/jobs` entries "
         "left behind by a slice job that existed before a restart.\n\n"
         "**`dry_run=true`** reports what would be removed (path count + total bytes) without "
@@ -2604,7 +3183,7 @@ def _scan_stale_temp(min_age_seconds: int) -> List[str]:
     responses={
         422: {"description": "min_age_seconds must be >= 0"},
     },
-)
+    operation_id="v1_cleanup_temp")
 async def cleanup_temp(min_age_seconds: int = 300, dry_run: bool = False):
     if min_age_seconds < 0:
         raise HTTPException(status_code=422, detail="min_age_seconds must be >= 0.")
@@ -2638,7 +3217,7 @@ async def cleanup_temp(min_age_seconds: int = 300, dry_run: bool = False):
     }
 
 
-@app.get("/api/test/known-profile", include_in_schema=False)
+@app.get("/api/v1/test/known-profile", include_in_schema=False)
 async def test_known_profile(machine_name: str | None = None):
     """Return a machine/process/filament UUID triple from the loaded catalog.
 

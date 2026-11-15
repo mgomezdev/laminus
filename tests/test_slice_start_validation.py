@@ -1,4 +1,4 @@
-"""Validation-failure edge cases for POST /api/slice/start that must return 422,
+"""Validation-failure edge cases for POST /api/v1/jobs that must return 422,
 not an unhandled 500, before any OrcaSlicer subprocess is ever launched.
 
 TestClient(app) without a `with` block does not run the FastAPI lifespan (see
@@ -32,7 +32,7 @@ def test_slice_start_rejects_malformed_stl(profile_tree):
     main_mod.catalog = cat
     client = TestClient(main_mod.app)
     resp = client.post(
-        "/api/slice/start",
+        "/api/v1/jobs",
         files={"file": ("bad.stl", b"", "application/octet-stream")},
         data={
             "machine_uuid": machine_uuid,
@@ -42,7 +42,7 @@ def test_slice_start_rejects_malformed_stl(profile_tree):
         },
     )
     assert resp.status_code == 422
-    assert "STL" in resp.json()["detail"]
+    assert "STL" in resp.json()["error"]["message"]
 
 
 def test_slice_start_rejects_malformed_3mf(profile_tree):
@@ -52,7 +52,7 @@ def test_slice_start_rejects_malformed_3mf(profile_tree):
     main_mod.catalog = cat
     client = TestClient(main_mod.app)
     resp = client.post(
-        "/api/slice/start",
+        "/api/v1/jobs",
         files={"file": ("bad.3mf", b"not a zip file", "application/octet-stream")},
         data={
             "machine_uuid": machine_uuid,
@@ -62,7 +62,7 @@ def test_slice_start_rejects_malformed_3mf(profile_tree):
         },
     )
     assert resp.status_code == 422
-    assert "3MF" in resp.json()["detail"]
+    assert "3MF" in resp.json()["error"]["message"]
 
 
 def test_slice_start_rejects_zero_byte_3mf(profile_tree):
@@ -70,7 +70,7 @@ def test_slice_start_rejects_zero_byte_3mf(profile_tree):
     main_mod.catalog = cat
     client = TestClient(main_mod.app)
     resp = client.post(
-        "/api/slice/start",
+        "/api/v1/jobs",
         files={"file": ("empty.3mf", b"", "application/octet-stream")},
         data={
             "machine_uuid": machine_uuid,
@@ -98,7 +98,7 @@ def test_slice_start_rejects_escaping_export_3mf(profile_tree, export_name):
     main_mod.catalog = cat
     client = TestClient(main_mod.app)
     resp = client.post(
-        "/api/slice/start",
+        "/api/v1/jobs",
         files={"file": ("model.3mf", b"not a zip file", "application/octet-stream")},
         data={
             "machine_uuid": machine_uuid,
@@ -110,17 +110,54 @@ def test_slice_start_rejects_escaping_export_3mf(profile_tree, export_name):
     )
     # Rejected before the upload is even parsed, so this cannot be the 3MF-parse 422.
     assert resp.status_code == 422
-    assert "3MF" not in resp.json()["detail"]
+    assert "3MF" not in resp.json()["error"]["message"]
 
 
 @pytest.mark.parametrize("export_name", ESCAPING_EXPORT_NAMES)
 def test_slice_prepared_rejects_escaping_export_3mf(export_name):
-    """/api/slice/prepared takes the same export_3mf field and needs the same guard."""
+    """/api/v1/slice/prepared takes the same export_3mf field and needs the same guard."""
     client = TestClient(main_mod.app)
     resp = client.post(
-        "/api/slice/prepared",
+        "/api/v1/slice/prepared",
         files={"file": ("model.3mf", b"not a zip file", "application/octet-stream")},
         data={"plate": "1", "export_3mf": export_name},
     )
     assert resp.status_code == 422
-    assert "export_3mf" in resp.json()["detail"] or "Filename" in resp.json()["detail"]
+    assert "export_3mf" in resp.json()["error"]["message"] or "Filename" in resp.json()["error"]["message"]
+
+
+def test_slice_start_rewrites_bambu_auto_values_that_arrive_through_extra_config(profile_tree, tmp_path, monkeypatch):
+    """A client carrying a Bambu 3MF's own changes (Themis) can send Bambu's "-1 = auto"; Orca rejects it (BIZ-352), so it
+    is rewritten to Orca's default after the extra_config merge, like the file's own settings are."""
+    import io
+    import json
+    import struct
+    import zipfile as _zip
+    cat, machine_uuid, process_uuid, filament_uuid = _catalog_and_uuids(profile_tree)
+    original_catalog = main_mod.catalog
+    main_mod.catalog = cat
+    before = set(main_mod.jobs)
+    monkeypatch.setattr(main_mod, "JOBS_DIR", str(tmp_path / "jobs"))
+    monkeypatch.setattr(main_mod, "run_orcaslicer_task", lambda **kw: None)     # never launch the slicer
+    stl = io.BytesIO()
+    stl.write(b"t".ljust(80))
+    stl.write(struct.pack("<I", 1))
+    for f in (0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0, 0.0):
+        stl.write(struct.pack("<f", f))
+    stl.write(struct.pack("<H", 0))
+    try:
+        resp = TestClient(main_mod.app).post(
+            "/api/v1/jobs",
+            files={"file": ("m.stl", stl.getvalue(), "application/octet-stream")},
+            data={"machine_uuid": machine_uuid, "process_uuid": process_uuid, "filament_uuids": f'["{filament_uuid}"]',
+                  "plate": "1", "extra_config": json.dumps({"raft_first_layer_expansion": "-1", "brim_type": "no_brim"})},
+        )
+        assert resp.status_code == 202, resp.text
+        (prepared,) = (tmp_path / "jobs").glob("*/input/prepared.3mf")
+        with _zip.ZipFile(prepared) as zf:
+            cfg = json.loads(zf.read("Metadata/project_settings.config"))
+        assert (cfg["raft_first_layer_expansion"], cfg["brim_type"]) == ("2", "no_brim")
+    finally:
+        main_mod.catalog = original_catalog
+        for jid in set(main_mod.jobs) - before:
+            main_mod.jobs.pop(jid, None)
