@@ -18,7 +18,7 @@ from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPExcept
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from app.profile_catalog import ProfileCatalog
-from app.project_config_builder import build_project_settings, embed_project_settings
+from app.project_config_builder import build_project_settings, embed_project_settings, replace_bambu_auto_sentinels
 from app import preview_3mf as _preview
 from app import subset_3mf as _subset
 from app import manifest as _manifest
@@ -1173,6 +1173,9 @@ async def start_slice(
             project_cfg.update(overrides)
         except (ValueError, TypeError):
             raise HTTPException(status_code=422, detail="extra_config must be a JSON object.")
+        # A client may carry a Bambu-made 3MF's own setting changes in extra_config (Themis does): rewrite the
+        # Bambu "-1 = auto" values Orca rejects, as the 3MF path does for the file's own settings (BIZ-352).
+        replace_bambu_auto_sentinels(project_cfg)
     # STL: no plate layout to preserve, embed now. 3MF: the slice task extracts the plate with
     # the upload's own bed before embedding project_cfg (BIZ-355), so only validate it here.
     target_settings = None

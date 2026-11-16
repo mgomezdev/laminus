@@ -121,6 +121,9 @@ def remap_for_target(cfg: dict, printer_cfg: dict, process_cfg: Optional[dict] =
                 cfg[k] = v
         cfg["print_settings_id"] = process_cfg.get("name", cfg.get("print_settings_id"))
         warnings.append(f"process preset replaced by '{cfg['print_settings_id']}'")
+        # The file's recorded process changes belonged to the replaced preset: with them left in place a client (Themis)
+        # would re-apply the new preset's values as if the author had changed them.
+        forget_process_changes(cfg)
     if filament_cfgs is not None:
         for i, fc in enumerate(filament_cfgs):
             for k, v in fc.items():
@@ -479,6 +482,16 @@ def _filament_count(cfg: dict) -> int:
     return len(fc) if isinstance(fc, list) else 1
 
 
+def forget_process_changes(cfg: dict) -> dict:
+    """Clear the process entry of ``different_settings_to_system`` (the file author's own process changes), in place.
+    Clients (Themis) re-apply that entry onto whatever preset a project is sliced with, so it must only ever describe
+    the project as it now is."""
+    diffs = cfg.get("different_settings_to_system")
+    if isinstance(diffs, list) and diffs and diffs[0]:
+        cfg["different_settings_to_system"] = [""] + diffs[1:]
+    return cfg
+
+
 def merge_subsets(parts: list[str], dst: str, labels: Optional[list[str]] = None) -> dict:
     """Merge subset files (build_subset output) into ``dst``; ``parts[0]`` is the base.
 
@@ -648,6 +661,10 @@ def merge_subsets(parts: list[str], dst: str, labels: Optional[list[str]] = None
                 data = rels_text.encode("utf-8")
             elif n in side:
                 data = ser(side[n])
+            elif n == PROJECT_SETTINGS and len(parts) > 1:
+                # One source's recorded process changes (e.g. its author enabled supports) don't describe the other
+                # sources' parts on the same plate: drop them rather than let a client apply them to everything.
+                data = json.dumps(forget_process_changes(dict(base_cfg)), ensure_ascii=False).encode("utf-8")
             else:
                 data = zb.read(n)
             zout.writestr(n, data, zipfile.ZIP_DEFLATED)

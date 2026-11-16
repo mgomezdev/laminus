@@ -406,6 +406,23 @@ def test_merge_warns_when_process_presets_differ(src, tmp_path):
     assert any("other.3mf" in w and "print_settings_id" in w for w in summary["warnings"])
 
 
+def test_a_multi_source_merge_drops_the_base_files_recorded_process_changes(src, tmp_path):
+    """The base author enabled supports; the other source's parts share the plate, so a client must not re-apply that
+    change to everything. Filament/printer entries and a single-source subset keep theirs."""
+    base = str(tmp_path / "base.3mf")
+    make_3mf(base, {"enable_support": "1", "different_settings_to_system": ["enable_support", "", "host_type"]})
+    sa, sb, out, solo = (str(tmp_path / n) for n in ("sa.3mf", "sb.3mf", "m.3mf", "solo.3mf"))
+    s.build_subset(base, sa, {2: 1})
+    s.build_subset(src, sb, {4: 1})
+    s.merge_subsets([sa, sb], out, ["base.3mf", "other.3mf"])
+    with zipfile.ZipFile(out) as z:
+        cfg = json.loads(z.read("Metadata/project_settings.config"))
+    assert cfg["different_settings_to_system"] == ["", "", "host_type"] and cfg["enable_support"] == "1"
+    s.merge_subsets([sa], solo)
+    with zipfile.ZipFile(solo) as z:
+        assert json.loads(z.read("Metadata/project_settings.config"))["different_settings_to_system"][0] == "enable_support"
+
+
 def test_merge_rejects_extruder_the_base_does_not_have(src, tmp_path):
     sa, sb, out = (str(tmp_path / n) for n in ("sa.3mf", "sb.3mf", "m.3mf"))
     one = str(tmp_path / "one.3mf")
@@ -721,6 +738,21 @@ def test_v1_projects_subset_supports_remap_and_enveloped_errors(tmp_path):
     bad = _post_subset(srcp, _url=url, machine_uuid="m1", filament_uuids='["f1","f1"]')
     assert bad.status_code == 422
     assert bad.json()["error"]["code"] == "unprocessable" and "slot" in bad.json()["error"]["message"]
+
+
+def test_replacing_the_process_preset_clears_its_recorded_changes_only():
+    """different_settings_to_system[0] belonged to the replaced process preset; a client re-applying the file's
+    recorded changes (Themis) must not mistake the new preset's values for the author's. Filament/printer entries stay."""
+    cfg = {"layer_height": "0.12", "different_settings_to_system": ["layer_height;enable_support", "nozzle_temperature", "host_type"],
+           "filament_colour": ["#FFFFFF"], "nozzle_diameter": ["0.4"]}
+    s.remap_for_target(cfg, _ONE_EXTRUDER, process_cfg={"name": "0.20mm Mono", "layer_height": "0.2"})
+    assert cfg["layer_height"] == "0.2"
+    assert cfg["different_settings_to_system"] == ["", "nozzle_temperature", "host_type"]
+
+    kept = {"different_settings_to_system": ["layer_height", "", ""], "filament_colour": ["#FFFFFF"], "nozzle_diameter": ["0.4"]}
+    s.remap_for_target(kept, _ONE_EXTRUDER)                       # no process replacement: the author's changes stay
+    assert kept["different_settings_to_system"] == ["layer_height", "", ""]
+
 
 
 def test_parse_rejects_utf16_entity_declaration():

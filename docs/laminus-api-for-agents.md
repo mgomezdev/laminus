@@ -17,7 +17,10 @@ version aliases. Feature-detect using `GET /api/v1` rather than version strings.
    and filament profiles the same way. Follow `page.next_cursor` until null;
    listings return `{data: [...], page: {limit, next_cursor}}`.
 3. `POST /api/v1/jobs` with multipart `file`, `machine_uuid`, `process_uuid`,
-   `filament_uuids` (a JSON array string), and `plate`. A machine may alternatively
+   `filament_uuids` (a JSON array string), and `plate`; optional `extra_config` (a JSON object merged into the
+   resolved project settings — Bambu "-1 = auto" values Orca rejects are then rewritten to Orca's defaults, BIZ-352).
+   Themis sends the bed type + its job and printer overrides + the uploaded 3MF's own process changes here, merged.
+   A machine may alternatively
    be identified with `manufacturer`, `model`, and `nozzle` together. Return:
    **202**, a job view with `id`, and `Location: /api/v1/jobs/{id}`.
 4. Poll `GET /api/v1/jobs/{id}` or connect to
