@@ -161,3 +161,34 @@ def test_slice_start_rewrites_bambu_auto_values_that_arrive_through_extra_config
         main_mod.catalog = original_catalog
         for jid in set(main_mod.jobs) - before:
             main_mod.jobs.pop(jid, None)
+
+
+def test_slice_start_3mf_path_hands_the_rewritten_settings_to_the_slice_task(profile_tree, tmp_path, monkeypatch):
+    """The 3MF path (the one Themis sends carried settings on) embeds `target_settings` later, in the slice task: the
+    Bambu "-1 = auto" rewrite must already be in what it is handed."""
+    import io
+    import json
+    import zipfile as _zip
+    cat, machine_uuid, process_uuid, filament_uuid = _catalog_and_uuids(profile_tree)
+    original_catalog = main_mod.catalog
+    main_mod.catalog = cat
+    before = set(main_mod.jobs)
+    seen = {}
+    monkeypatch.setattr(main_mod, "JOBS_DIR", str(tmp_path / "jobs"))
+    monkeypatch.setattr(main_mod, "run_orcaslicer_task", lambda **kw: seen.update(kw))
+    buf = io.BytesIO()
+    with _zip.ZipFile(buf, "w") as zf:
+        zf.writestr("3D/3dmodel.model", "<model/>")
+    try:
+        resp = TestClient(main_mod.app).post(
+            "/api/v1/jobs",
+            files={"file": ("m.3mf", buf.getvalue(), "application/octet-stream")},
+            data={"machine_uuid": machine_uuid, "process_uuid": process_uuid, "filament_uuids": f'["{filament_uuid}"]',
+                  "plate": "1", "extra_config": json.dumps({"tree_support_wall_count": "-1", "brim_type": "no_brim"})},
+        )
+        assert resp.status_code == 202, resp.text
+        assert (seen["target_settings"]["tree_support_wall_count"], seen["target_settings"]["brim_type"]) == ("0", "no_brim")
+    finally:
+        main_mod.catalog = original_catalog
+        for jid in set(main_mod.jobs) - before:
+            main_mod.jobs.pop(jid, None)
