@@ -56,11 +56,13 @@ COPY --chmod=755 entrypoint.sh /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 
 FROM base AS orca-desktop
-RUN apt-get update && apt-get install -y --no-install-recommends x11vnc \
+RUN apt-get update && apt-get install -y --no-install-recommends locales x11vnc \
+    && localedef -i en_US -f UTF-8 en_US.UTF-8 \
     && rm -rf /var/lib/apt/lists/*
 COPY --chmod=755 scripts/orca-desktop.sh /usr/local/bin/orca-desktop
 COPY --chmod=755 scripts/orca-desktop.py /usr/local/bin/orca-diagnostics
 ENV ORCA_VERSION=2.5.1
+ENV LANG=en_US.UTF-8
 # The AppImage's bundled OpenSSL path is absent in the image. Provide the
 # installed trust store explicitly so Orca does not pause for a desktop prompt.
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
