@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(
 )
 REPO = Path(__file__).resolve().parents[1]
 SERVICE = "orca-desktop"
-PLUGIN_SUCCESS = "SUCCESS plugin=laminus_ci"
+PLUGIN_SUCCESS = "[load_plugin_impl] SUCCESS plugin=laminus_ci"
 
 
 @pytest.fixture
@@ -67,7 +67,9 @@ def wait_for_load(compose, state, runs):
                 assert [entry["cap_config"] for entry in settings] == [{"runs": runs}]
                 return
         time.sleep(2)
-    pytest.fail(compose("exec", "-T", SERVICE, "orca-diagnostics", "logs", check=False))
+    logs = compose("exec", "-T", SERVICE, "orca-diagnostics", "logs", "--match", "plugin",
+                   check=False)
+    pytest.fail(f"Orca did not load the plugin for run {runs}\n{logs[-8000:]}")
 
 
 def test_orca_loads_plugin_and_keeps_settings_on_recreation(desktop):
