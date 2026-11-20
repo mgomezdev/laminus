@@ -6,6 +6,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: laminus
+    init: true
     ports:
       - "5000:5000"
     volumes:
@@ -15,13 +16,12 @@ services:
       - ./data:/data
       # Mount the app code for live reload / dev simplicity
       - ./app:/workspace/app
-      # Named volume caches the OrcaSlicer install across restarts.
-      # Re-downloaded only when ORCA_VERSION changes.
+      # Named volume caches both API engines and the v2 JSON preset sources.
       - laminus-slicer:/opt/orcaslicer
     environment:
       - TZ=Etc/UTC
       - PYTHONUNBUFFERED=1
-      - ORCA_VERSION=${ORCA_VERSION:-2.4.2}
+      - ORCA_V2_VERSION=${ORCA_V2_VERSION:-2.5.1}
     shm_size: "1gb"
     restart: unless-stopped
 

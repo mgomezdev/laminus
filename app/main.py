@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+from app.api_version import API_PREFIX, API_VERSION, api_docs
 from app.profile_catalog import ProfileCatalog
 from app.project_config_builder import build_project_settings, embed_project_settings, replace_bambu_auto_sentinels
 from app import preview_3mf as _preview
@@ -86,6 +87,7 @@ THUMBNAIL_TIMEOUT = 120
 
 SYSTEM_PROFILES_DIR = os.environ.get("SYSTEM_PROFILES_DIR", "/opt/orcaslicer/resources/profiles")
 # entrypoint.sh writes the extracted AppImage's version to <install dir>/.version
+ORCA_BINARY = os.environ.get("ORCA_BINARY", "orcaslicer")
 ORCA_VERSION_FILE = os.environ.get("ORCA_VERSION_FILE", "/opt/orcaslicer/.version")
 SLICE_TIMEOUT = int(os.environ.get("SLICE_TIMEOUT_SECONDS", "600"))
 ARRANGE_TIMEOUT = int(os.environ.get("ARRANGE_TIMEOUT_SECONDS", "120"))
@@ -111,7 +113,7 @@ async def lifespan(app: FastAPI):
     _load_history_on_startup()
     try:
         proc = await asyncio.create_subprocess_exec(
-            "orcaslicer", "--version",
+            ORCA_BINARY, "--version",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
         try:
@@ -208,7 +210,7 @@ app = FastAPI(
         "Retry after `GET /api/v1/health` reports `catalog_loaded: true`.\n"
         "- **400 / 408 / 500** — OrcaSlicer-side failures; check server logs for details."
     ),
-    version="0.12.0",
+    version="0.12.0" if API_VERSION == "v1" else "2.0.0",
     lifespan=lifespan,
     openapi_tags=[
         {
@@ -263,6 +265,10 @@ app = FastAPI(
         },
     ],
 )
+
+app.description = api_docs(app.description)
+for tag in app.openapi_tags:
+    tag["description"] = api_docs(tag["description"])
 
 app.add_middleware(
     CORSMiddleware,
@@ -362,7 +368,7 @@ _JOBS_FILE = os.path.join(DATA_DIR, "jobs.json")
 # vendor bundle signature + user profile mtimes — see _catalog_cache_key), not durable
 # state. Keeping it off the durable volume means DATA_DIR only ever holds jobs.json and
 # job_history.json, both worth backing up in full.
-_CATALOG_CACHE_FILE = "/tmp/laminus_catalog_cache.json"
+_CATALOG_CACHE_FILE = os.environ.get("CATALOG_CACHE_FILE", "/tmp/laminus_catalog_cache.json")
 
 
 def _vendor_bundle_signature() -> list[tuple]:
@@ -583,13 +589,13 @@ async def get_dashboard():
         raise HTTPException(status_code=404, detail="Frontend template index.html not found.")
     with open(template_path, "r", encoding="utf-8") as f:
         html_content = f.read()
-    return HTMLResponse(content=html_content)
+    return HTMLResponse(content=api_docs(html_content))
 
 
 
 
 @app.post(
-    "/api/v1/profiles/merged-config",
+    API_PREFIX + "/profiles/merged-config",
     tags=["profiles"],
     summary="Get merged project_settings.config for a profile set",
     description=(
@@ -616,7 +622,7 @@ async def get_dashboard():
         },
         503: {"description": "Catalog not yet ready — retry after /api/v1/health reports catalog_loaded: true"},
     },
-    operation_id="v1_get_merged_config")
+    operation_id=f"{API_VERSION}_get_merged_config")
 async def get_merged_config(body: MergedConfigRequest):
     if catalog is None:
         return JSONResponse(
@@ -647,7 +653,7 @@ async def get_merged_config(body: MergedConfigRequest):
 
 
 @app.get(
-    "/api/v1/profiles/broken",
+    API_PREFIX + "/profiles/broken",
     tags=["profiles"],
     summary="List profiles excluded from the catalog",
     description=(
@@ -660,7 +666,7 @@ async def get_merged_config(body: MergedConfigRequest):
         "Returns **503** while the catalog is still building."
     ),
     responses={503: {"description": "Catalog not yet ready"}},
-    operation_id="v1_get_broken_profiles")
+    operation_id=f"{API_VERSION}_get_broken_profiles")
 async def get_broken_profiles():
     if catalog is None or not catalog.is_built:
         return JSONResponse(
@@ -714,7 +720,7 @@ def _catalog_unavailable() -> JSONResponse:
 
 
 @app.post(
-    "/api/v1/profiles/machines/suggest",
+    API_PREFIX + "/profiles/machines/suggest",
     tags=["profiles"],
     summary="Suggest machine presets for a printer model",
     description=(
@@ -725,7 +731,7 @@ def _catalog_unavailable() -> JSONResponse:
         "when served from a cached catalog while a fresh one is pending."
     ),
     responses=_NEUTRAL_RESPONSES,
-    operation_id="v1_suggest_machines")
+    operation_id=f"{API_VERSION}_suggest_machines")
 async def suggest_machines(body: NeutralModelQuery):
     cat, stale = _neutral_catalog()
     if cat is None:
@@ -735,7 +741,7 @@ async def suggest_machines(body: NeutralModelQuery):
 
 
 @app.post(
-    "/api/v1/profiles/models/variants",
+    API_PREFIX + "/profiles/models/variants",
     tags=["profiles"],
     summary="List nozzle variants of a printer model",
     description=(
@@ -744,7 +750,7 @@ async def suggest_machines(body: NeutralModelQuery):
         "the smallest standard variant). Empty `variants` when the model is unknown."
     ),
     responses=_NEUTRAL_RESPONSES,
-    operation_id="v1_model_variants")
+    operation_id=f"{API_VERSION}_model_variants")
 async def model_variants(body: NeutralModelQuery):
     cat, stale = _neutral_catalog()
     if cat is None:
@@ -754,7 +760,7 @@ async def model_variants(body: NeutralModelQuery):
 
 
 @app.get(
-    "/api/v1/profiles/machines/{machine_ref}/presets",
+    API_PREFIX + "/profiles/machines/{machine_ref}/presets",
     tags=["profiles"],
     summary="Process/filament presets compatible with a machine",
     description=(
@@ -763,7 +769,7 @@ async def model_variants(body: NeutralModelQuery):
         "universal presets. 404 `{\"error\": \"unknown_machine_ref\"}`, 422 `{\"error\": \"invalid_kind\"}`."
     ),
     responses={**_NEUTRAL_RESPONSES, 404: {"description": "unknown_machine_ref"}, 422: {"description": "invalid_kind"}},
-    operation_id="v1_machine_presets")
+    operation_id=f"{API_VERSION}_machine_presets")
 async def machine_presets(machine_ref: str, kind: Optional[str] = None):
     cat, stale = _neutral_catalog()
     if cat is None:
@@ -780,7 +786,7 @@ async def machine_presets(machine_ref: str, kind: Optional[str] = None):
 
 
 @app.get(
-    "/api/v1/profiles/machines/{machine_ref}/supports",
+    API_PREFIX + "/profiles/machines/{machine_ref}/supports",
     tags=["profiles"],
     summary="Can this machine ref (and bed) be sliced for?",
     description=(
@@ -789,7 +795,7 @@ async def machine_presets(machine_ref: str, kind: Optional[str] = None):
         "ruled out). `reason` is null when supported."
     ),
     responses=_NEUTRAL_RESPONSES,
-    operation_id="v1_machine_supports")
+    operation_id=f"{API_VERSION}_machine_supports")
 async def machine_supports(machine_ref: str, bed_x: Optional[float] = None, bed_y: Optional[float] = None):
     cat, stale = _neutral_catalog()
     if cat is None:
@@ -889,7 +895,7 @@ async def run_orcaslicer_task(
     async def _attempt(slice_input: str, label: str) -> bool:
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-            "orcaslicer", "--slice", str(slice_plate),
+            ORCA_BINARY, "--slice", str(slice_plate),
             "--outputdir", output_dir, "--arrange", arrange,
         ]
         if export_3mf:
@@ -1221,7 +1227,7 @@ async def start_slice(
 
 
 @app.post(
-    "/api/v1/slice/prepared",
+    API_PREFIX + "/slice/prepared",
     tags=["slice"],
     summary="Slice a pre-configured 3MF (no profile resolution)",
     description=(
@@ -1254,7 +1260,7 @@ async def start_slice(
             ),
         },
     },
-    operation_id="v1_slice_prepared")
+    operation_id=f"{API_VERSION}_slice_prepared")
 async def slice_prepared(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -1322,7 +1328,7 @@ async def slice_prepared(
 
 
 @app.post(
-    "/api/v1/slice/thumbnail",
+    API_PREFIX + "/slice/thumbnail",
     tags=["slice"],
     summary="Render a plate thumbnail PNG (synchronous)",
     description=(
@@ -1347,7 +1353,7 @@ async def slice_prepared(
             ),
         },
     },
-    operation_id="v1_slice_thumbnail")
+    operation_id=f"{API_VERSION}_slice_thumbnail")
 async def slice_thumbnail(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -1378,7 +1384,7 @@ async def slice_thumbnail(
 
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-            "orcaslicer", "--slice", str(plate), "--arrange", "0",
+            ORCA_BINARY, "--slice", str(plate), "--arrange", "0",
             "--export-3mf", out_3mf, in_file,
         ]
 
@@ -1575,7 +1581,7 @@ def _parse_pack_items(raw: str, filenames: list[str]) -> list[int]:
 
 
 @app.post(
-    "/api/v1/pack",
+    API_PREFIX + "/pack",
     tags=["arrange"],
     summary="Pack N STLs onto as many plates as needed (synchronous)",
     description=(
@@ -1643,7 +1649,7 @@ def _parse_pack_items(raw: str, filenames: list[str]) -> list[int]:
         500: {"description": "Unexpected system error — check server logs"},
         503: {"description": "Profile catalog not yet ready (UUID mode only)"},
     },
-    operation_id="v1_pack_stls")
+    operation_id=f"{API_VERSION}_pack_stls")
 async def pack_stls(
     background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
@@ -1841,7 +1847,7 @@ async def pack_stls(
         out_file = os.path.join(output_dir, "packed.3mf")
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-            "orcaslicer",
+            ORCA_BINARY,
             "--datadir", ORCA_DATADIR,
             "--arrange", "1",
             "--orient", "0",  # --orient tilts parts about X/Y, changing layer-line direction
@@ -1911,7 +1917,7 @@ async def pack_stls(
 
 
 @app.post(
-    "/api/v1/arrange",
+    API_PREFIX + "/arrange",
     tags=["arrange"],
     summary="Auto-arrange and orient objects in a 3MF (synchronous)",
     description=(
@@ -1944,7 +1950,7 @@ async def pack_stls(
         408: {"description": "OrcaSlicer arrange timed out — reduce model complexity or increase ARRANGE_TIMEOUT_SECONDS"},
         500: {"description": "Unexpected system error — check server logs"},
     },
-    operation_id="v1_auto_arrange_3mf")
+    operation_id=f"{API_VERSION}_auto_arrange_3mf")
 async def auto_arrange_3mf(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -1981,7 +1987,7 @@ async def auto_arrange_3mf(
 
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-            "orcaslicer",
+            ORCA_BINARY,
             "--datadir", ORCA_DATADIR,
             "--export-3mf", out_file,
         ]
@@ -2063,7 +2069,7 @@ async def auto_arrange_3mf(
 
 
 @app.post(
-    "/api/v1/projects/inspect",
+    API_PREFIX + "/projects/inspect",
     tags=["arrange"],
     summary="List the objects in an OrcaSlicer/Bambu .3mf",
     description=(
@@ -2072,7 +2078,7 @@ async def auto_arrange_3mf(
         "`POST /api/v1/projects/subset`. Names are not unique in a project; ids are."
     ),
     responses={400: {"description": "Not a readable .3mf"}},
-    operation_id="v1_list_3mf_objects")
+    operation_id=f"{API_VERSION}_list_3mf_objects")
 async def list_3mf_objects(file: UploadFile = File(...)):
     job_dir = os.path.join(ARRANGE_DIR, f"objs_{uuid.uuid4()}")
     os.makedirs(job_dir, exist_ok=True)
@@ -2120,7 +2126,7 @@ async def _oracle_arrange_and_transplant(sub_file: str, oracle_in: str, out_file
 
 async def _orca_arrange(oracle_in: str, out_file: str, allow_rotations: bool) -> None:
     """``orcaslicer --arrange 1 --export-3mf out_file oracle_in``; raises HTTPException."""
-    cmd = ["xvfb-run", "-a", "--server-args=-screen 0 1024x768x24", "orcaslicer",
+    cmd = ["xvfb-run", "-a", "--server-args=-screen 0 1024x768x24", ORCA_BINARY,
            "--datadir", ORCA_DATADIR, "--arrange", "1"]
     if allow_rotations:
         cmd.append("--allow-rotations")
@@ -2147,7 +2153,7 @@ async def _orca_arrange(oracle_in: str, out_file: str, allow_rotations: bool) ->
 
 
 @app.post(
-    "/api/v1/projects/previews",
+    API_PREFIX + "/projects/previews",
     tags=["arrange"],
     summary="List a .3mf's objects with plate names and a preview image of each object",
     description=(
@@ -2165,7 +2171,7 @@ async def _orca_arrange(oracle_in: str, out_file: str, allow_rotations: bool) ->
         400: {"description": "Not a readable .3mf"},
         422: {"description": "size out of range"},
     },
-    operation_id="v1_preview_3mf_objects")
+    operation_id=f"{API_VERSION}_preview_3mf_objects")
 async def preview_3mf_objects(
     file: UploadFile = File(...),
     size: int = Form(256),
@@ -2190,7 +2196,7 @@ async def preview_3mf_objects(
 
 
 @app.post(
-    "/api/v1/projects/subset",
+    API_PREFIX + "/projects/subset",
     tags=["arrange"],
     summary="Keep only chosen objects (x quantity) from a .3mf and arrange them on the fewest plates",
     description=(
@@ -2223,7 +2229,7 @@ async def preview_3mf_objects(
         422: {"description": "Bad selection, unknown/ambiguous object, unknown machine_uuid"},
         503: {"description": "machine_uuid given but catalog not ready"},
     },
-    operation_id="v1_arrange_subset")
+    operation_id=f"{API_VERSION}_arrange_subset")
 async def arrange_subset(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -2358,7 +2364,7 @@ async def _resolve_retarget(machine_uuid, process_uuid, filament_uuids) -> _Reta
 
 
 @app.post(
-    "/api/v1/projects/merge",
+    API_PREFIX + "/projects/merge",
     tags=["arrange"],
     summary="Combine selections from several .3mf files into one .3mf, arranged on the fewest plates",
     description=(
@@ -2383,7 +2389,7 @@ async def _resolve_retarget(machine_uuid, process_uuid, filament_uuids) -> _Reta
         422: {"description": "Bad selection, unknown/ambiguous object, unknown file, unknown machine_uuid, incompatible sources"},
         503: {"description": "machine_uuid given but catalog not ready"},
     },
-    operation_id="v1_arrange_merge")
+    operation_id=f"{API_VERSION}_arrange_merge")
 async def arrange_merge(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
@@ -2596,7 +2602,7 @@ async def _mixed_project(job_dir: str, files: List[UploadFile], names: list[str]
 
 
 @app.post(
-    "/api/v1/pack/next",
+    API_PREFIX + "/pack/next",
     tags=["arrange"],
     summary="The fullest single plate a machine can print from the remaining parts",
     description=(
@@ -2625,7 +2631,7 @@ async def _mixed_project(job_dir: str, files: List[UploadFile], names: list[str]
         422: {"description": "`nothing_fits`, or bad selection / rule / max_parts / machine_uuid"},
         503: {"description": "Catalog not ready"},
     },
-    operation_id="v1_pack_next")
+    operation_id=f"{API_VERSION}_pack_next")
 async def pack_next(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
@@ -2733,7 +2739,7 @@ async def pack_next(
 
 
 @app.post(
-    "/api/v1/pack/mixed",
+    API_PREFIX + "/pack/mixed",
     tags=["arrange"],
     summary="Arrange a mixed STL / 3MF selection on the fewest plates of one bed",
     description=(
@@ -2764,7 +2770,7 @@ async def pack_next(
         422: {"description": "`part_too_large`, or bad selection / rule / bed / machine_uuid"},
         503: {"description": "machine_uuid given but catalog not ready"},
     },
-    operation_id="v1_pack_mixed")
+    operation_id=f"{API_VERSION}_pack_mixed")
 async def pack_mixed(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
@@ -2898,7 +2904,7 @@ async def pack_mixed(
 
 
 @app.post(
-    "/api/v1/projects/measure",
+    API_PREFIX + "/projects/measure",
     tags=["arrange"],
     summary="Bounding-box sizes of 3MF objects / plates, or of an STL",
     description=(
@@ -2916,7 +2922,7 @@ async def pack_mixed(
         "missing or empty plate."
     ),
     responses={422: {"description": "Unreadable file or bad selection"}},
-    operation_id="v1_measure")
+    operation_id=f"{API_VERSION}_measure")
 async def measure_project(
     file: UploadFile = File(...),
     selection: Optional[str] = Form(None, description='JSON: [{"id": 8}, {"plate": 2}]; omit for the whole file'),
@@ -2954,7 +2960,7 @@ async def measure_project(
 
 
 @app.post(
-    "/api/v1/profiles/upload",
+    API_PREFIX + "/profiles/upload",
     tags=["profiles"],
     summary="Upload a user profile JSON",
     description=(
@@ -2989,7 +2995,7 @@ async def measure_project(
             ),
         },
     },
-    operation_id="v1_upload_profile")
+    operation_id=f"{API_VERSION}_upload_profile")
 async def upload_profile(
     type: str = Form(...),
     file: UploadFile = File(...),
@@ -3021,7 +3027,7 @@ async def upload_profile(
 
 
 @app.post(
-    "/api/v1/profiles/rescan",
+    API_PREFIX + "/profiles/rescan",
     tags=["profiles"],
     summary="Rescan profiles and rebuild the catalog",
     description=(
@@ -3036,7 +3042,7 @@ async def upload_profile(
         "until `catalog_building` is `false`, then call `GET /api/v1/profiles/broken` for "
         "profiles whose inheritance no longer resolves."
     ),
-    operation_id="v1_rescan_profiles")
+    operation_id=f"{API_VERSION}_rescan_profiles")
 async def rescan_profiles():
     already = _catalog_building
     _trigger_catalog_rebuild(force=True)
@@ -3064,7 +3070,7 @@ def _orca_version() -> Optional[str]:
 
 
 @app.get(
-    "/api/v1/health",
+    API_PREFIX + "/health",
     tags=["health"],
     summary="Service health check",
     description=(
@@ -3072,8 +3078,7 @@ def _orca_version() -> Optional[str]:
         "slice endpoints return **503** while `catalog_loading` is `true`.\n\n"
         "**Response fields:**\n"
         "- `status` — always `\"healthy\"` when the process is running\n"
-        "- `orcaslicer_installed` — whether the OrcaSlicer binary exists at "
-        "`/usr/local/bin/orcaslicer`\n"
+        "- `orcaslicer_installed` — whether the configured OrcaSlicer binary is executable\n"
         "- `orcaslicer_version` — version string from `orcaslicer --version`, or `null` "
         "if the binary is not installed or timed out\n"
         "- `orca_version` — installed OrcaSlicer release (e.g. `\"2.4.2\"`), read from the "
@@ -3092,12 +3097,12 @@ def _orca_version() -> Optional[str]:
         "`GET /api/v1/profiles/broken` for which profiles and why; `null` if not yet built\n"
         "- `active_jobs` — number of jobs currently in `slicing` status"
     ),
-    operation_id="v1_health_check")
+    operation_id=f"{API_VERSION}_health_check")
 async def health_check():
     active = sum(1 for j in list(jobs.values()) if j["status"] == "slicing")
     return {
         "status": "healthy",
-        "orcaslicer_installed": os.path.exists("/usr/local/bin/orcaslicer"),
+        "orcaslicer_installed": shutil.which(ORCA_BINARY) is not None,
         "orcaslicer_version": _orcaslicer_version,
         "orca_version": _orca_version(),
         "config_mounted": os.path.exists(CONFIG_DIR),
@@ -3164,7 +3169,7 @@ def _scan_stale_temp(min_age_seconds: int) -> List[str]:
 
 
 @app.post(
-    "/api/v1/cleanup",
+    API_PREFIX + "/cleanup",
     tags=["maintenance"],
     summary="Remove stale temp files from failed/interrupted jobs",
     description=(
@@ -3183,7 +3188,7 @@ def _scan_stale_temp(min_age_seconds: int) -> List[str]:
     responses={
         422: {"description": "min_age_seconds must be >= 0"},
     },
-    operation_id="v1_cleanup_temp")
+    operation_id=f"{API_VERSION}_cleanup_temp")
 async def cleanup_temp(min_age_seconds: int = 300, dry_run: bool = False):
     if min_age_seconds < 0:
         raise HTTPException(status_code=422, detail="min_age_seconds must be >= 0.")
@@ -3217,7 +3222,7 @@ async def cleanup_temp(min_age_seconds: int = 300, dry_run: bool = False):
     }
 
 
-@app.get("/api/v1/test/known-profile", include_in_schema=False)
+@app.get(API_PREFIX + "/test/known-profile", include_in_schema=False)
 async def test_known_profile(machine_name: str | None = None):
     """Return a machine/process/filament UUID triple from the loaded catalog.
 
@@ -3261,5 +3266,14 @@ async def test_known_profile(machine_name: str | None = None):
     }
 
 
-from app import api_v1 as _api_v1  # noqa: E402  (installs /api/v1 once every legacy route exists)
+from app import api_v1 as _api_v1  # noqa: E402  (register profile catch-all after specific routes)
 _api_v1.install(app, sys.modules[__name__])
+
+for route in app.routes:
+    if route.path.startswith(API_PREFIX):
+        if route.description:
+            route.description = api_docs(route.description)
+        for response in route.responses.values():
+            if "description" in response:
+                response["description"] = api_docs(response["description"])
+        route.deprecated = API_VERSION == "v1"

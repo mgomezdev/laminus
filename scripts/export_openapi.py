@@ -1,27 +1,43 @@
-"""Export the Laminus OpenAPI spec to openapi.json at the repo root.
+"""Generate the combined and per-version OpenAPI contracts."""
 
-Run from the repo root:
-    python scripts/export_openapi.py
-
-CI uses this + `git diff --exit-code openapi.json` to enforce spec freshness.
-"""
 import json
-import sys
+import os
 from pathlib import Path
+import subprocess
+import sys
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app.main import app  # noqa: E402
+ROOT = Path(__file__).resolve().parents[1]
 
-spec = app.openapi()
-out = Path(__file__).parent.parent / "openapi.json"
-out.write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
-print(f"Written {out}")
 
-# v1 slice of the same spec: the stable, versioned contract (docs/api-versioning.md).
-v1 = dict(spec)
-v1["paths"] = {p: v for p, v in spec["paths"].items() if p == "/api/v1" or p.startswith("/api/v1/")}
-v1["info"] = {**spec["info"], "title": f"{spec['info']['title']} (API v1)"}
-out_v1 = Path(__file__).parent.parent / "openapi-v1.json"
-out_v1.write_text(json.dumps(v1, indent=2) + "\n", encoding="utf-8")
-print(f"Written {out_v1}")
+def export(version):
+    worker = "import json; from app.main import app; print(json.dumps(app.openapi()))"
+    output = subprocess.check_output(
+        [sys.executable, "-c", worker], cwd=ROOT, text=True,
+        env={**os.environ, "LAMINUS_API_VERSION": version},
+    )
+    return json.loads(output)
+
+
+def write(name, spec):
+    path = ROOT / name
+    path.write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
+    print(f"Written {path}")
+
+
+v1 = export("v1")
+v2 = export("v2")
+write("openapi-v1.json", v1)
+write("openapi-v2.json", v2)
+
+components = {kind: entries.copy() for kind, entries in v2["components"].items()}
+for kind, entries in v1["components"].items():
+    shared = components.setdefault(kind, {})
+    for name, definition in entries.items():
+        if name in shared and shared[name] != definition:
+            raise ValueError(f"Conflicting OpenAPI component: {kind}/{name}")
+        shared[name] = definition
+write("openapi.json", {
+    **v2, "paths": {**v2["paths"], **v1["paths"]},
+    "components": components, "tags": [*v2["tags"], *v1["tags"]],
+})

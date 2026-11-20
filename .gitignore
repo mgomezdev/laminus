@@ -7,6 +7,8 @@ __pycache__/
 config/cache/
 config/log/
 config/orca-desktop/
+config/v1/
+config/v2/
 app/cache/
 app/log/
 app/user/

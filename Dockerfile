@@ -70,6 +70,9 @@ CMD ["orca-desktop"]
 
 FROM base AS laminus
 
+RUN apt-get update && apt-get install -y --no-install-recommends nginx-light \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Python requirements (using --break-system-packages for Ubuntu 24.04 system python pip)
 COPY requirements.txt /requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages -r /requirements.txt
@@ -77,9 +80,11 @@ RUN pip3 install --no-cache-dir --break-system-packages -r /requirements.txt
 # Set up working directory for the application
 WORKDIR /workspace
 COPY app /workspace/app
-ENV ORCA_VERSION=2.4.2
+COPY --chmod=755 scripts/laminus-bridge.sh /usr/local/bin/laminus-bridge
+COPY scripts/laminus-nginx.conf /etc/laminus/nginx.conf
+COPY openapi.json /etc/laminus/openapi.json
 
 # Expose port for FastAPI server
 EXPOSE 5000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000"]
+CMD ["laminus-bridge"]

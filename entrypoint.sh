@@ -1,9 +1,13 @@
 #!/bin/bash
-set -e
+set -eo pipefail
+
+if [ "${1:-}" = "laminus-bridge" ]; then
+    exec "$@"
+fi
 
 ORCA_VERSION="${ORCA_VERSION:-2.4.2}"
-ORCA_INSTALL_DIR="/opt/orcaslicer"
-ORCA_VERSION_FILE="${ORCA_INSTALL_DIR}/.version"
+ORCA_INSTALL_DIR="${ORCA_INSTALL_DIR:-/opt/orcaslicer}"
+export ORCA_VERSION_FILE="${ORCA_INSTALL_DIR}/.version"
 
 # Install OrcaSlicer only when the version on disk doesn't match the requested one.
 # The install dir is expected to be a named volume so the download is cached across restarts.
@@ -31,12 +35,33 @@ else
     echo "[laminus] OrcaSlicer v${ORCA_VERSION} installed."
 fi
 
-# Symlink may be absent if the volume was freshly mounted; always (re)create it.
-ln -sf "${ORCA_INSTALL_DIR}/AppRun" /usr/local/bin/orcaslicer
-
 # The desktop command manages its own persistent datadir.
 if [ "${1:-}" = "orca-desktop" ]; then
+    ln -sf "${ORCA_INSTALL_DIR}/AppRun" /usr/local/bin/orcaslicer
     exec "$@"
+fi
+
+export ORCA_BINARY="${ORCA_INSTALL_DIR}/AppRun"
+export SYSTEM_PROFILES_DIR="${SYSTEM_PROFILES_DIR:-${ORCA_INSTALL_DIR}/resources/profiles}"
+if compgen -G "$SYSTEM_PROFILES_DIR/*.opc" > /dev/null; then
+    # Orca reads its binary bundles directly. Laminus builds its catalog from
+    # the JSON sources for the same release, cached beside that AppImage.
+    json_profiles="${ORCA_INSTALL_DIR}/json-profiles"
+    if [ ! -f "$json_profiles/.ready" ]; then
+        staging=$(mktemp -d)
+        trap 'rm -rf "$staging"' EXIT
+        curl --retry 3 -fsSL -o "$staging/source.tar.gz" \
+            "https://codeload.github.com/OrcaSlicer/OrcaSlicer/tar.gz/refs/tags/v${ORCA_VERSION}"
+        mkdir -p "$staging/profiles"
+        tar -xzf "$staging/source.tar.gz" --wildcards --strip-components=3 \
+            -C "$staging/profiles" '*/resources/profiles/*.json'
+        rm -rf "$json_profiles"
+        mv "$staging/profiles" "$json_profiles"
+        touch "$json_profiles/.ready"
+        rm -rf "$staging"
+        trap - EXIT
+    fi
+    export SYSTEM_PROFILES_DIR="$json_profiles"
 fi
 
 # OrcaSlicer is given its own --datadir (ORCA_DATADIR, read by main.py), not the
@@ -46,9 +71,10 @@ fi
 # gets a disposable datadir instead, and only the two subtrees worth keeping are
 # symlinked back into /config, so the durable volume never contains anything but
 # user presets and installed plugins.
-export ORCA_DATADIR="/var/lib/laminus/orca-scratch"
-mkdir -p "$ORCA_DATADIR" /config/user /config/plugins
-ln -sfn /config/user "$ORCA_DATADIR/user"
-ln -sfn /config/plugins "$ORCA_DATADIR/plugins"
+config_dir="${CONFIG_DIR:-/config}"
+export ORCA_DATADIR="${ORCA_DATADIR:-/var/lib/laminus/orca-scratch}"
+mkdir -p "$ORCA_DATADIR" "$config_dir/user" "$config_dir/plugins"
+ln -sfn "$config_dir/user" "$ORCA_DATADIR/user"
+ln -sfn "$config_dir/plugins" "$ORCA_DATADIR/plugins"
 
 exec "$@"

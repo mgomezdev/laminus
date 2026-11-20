@@ -25,8 +25,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-API_VERSION = "v1"
-PREFIX = "/api/v1"
+from app.api_version import API_PREFIX as PREFIX, API_VERSION, V1_DEPRECATED_AT
 IDEMPOTENCY_TTL_SECONDS = 24 * 3600
 _MAX_PAGE = 200
 
@@ -71,7 +70,7 @@ def _envelope(request: Request, status: int, detail, headers: Optional[dict] = N
     return JSONResponse(status_code=status, content=body, headers=headers)
 
 
-def _is_v1(request: Request) -> bool:
+def _is_versioned(request: Request) -> bool:
     return request.url.path == PREFIX or request.url.path.startswith(PREFIX + "/")
 
 
@@ -106,7 +105,7 @@ def paginate(records: list[dict], key_fn, limit: int, cursor: Optional[str], rev
 # ------------------------------------------------------------------ install
 
 def install(app: FastAPI, m) -> None:
-    """Register v1 routes, error envelope, request ids and legacy deprecation headers."""
+    """Register shared API routes, error envelopes, and version headers."""
     idem: dict[str, dict] = {}
 
     # ---- cross-cutting: request id, version header, deprecation of legacy routes
@@ -115,13 +114,16 @@ def install(app: FastAPI, m) -> None:
         request.state.request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
         response = await call_next(request)
         response.headers["X-Request-ID"] = request.state.request_id
-        if _is_v1(request):
+        if _is_versioned(request):
             response.headers["API-Version"] = API_VERSION
+            if API_VERSION == "v1":
+                response.headers["Deprecation"] = V1_DEPRECATED_AT
+                response.headers["Link"] = '</api/v2>; rel="successor-version"'
         return response
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_exc(request: Request, exc: StarletteHTTPException):
-        if _is_v1(request):
+        if _is_versioned(request):
             detail = exc.detail
             if isinstance(exc, DetailedHTTPException):
                 detail = {"code": exc.code, "message": exc.detail, "details": exc.details}
@@ -130,7 +132,7 @@ def install(app: FastAPI, m) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def _validation_exc(request: Request, exc: RequestValidationError):
-        if _is_v1(request):
+        if _is_versioned(request):
             return _envelope(request, 422, json.loads(json.dumps(exc.errors(), default=str)))
         return await request_validation_exception_handler(request, exc)
 
@@ -141,13 +143,14 @@ def install(app: FastAPI, m) -> None:
         return m.catalog
 
     # ---- discovery
-    @app.get(PREFIX, tags=["v1"], summary="API capability discovery",
+    @app.get(PREFIX, tags=[API_VERSION], summary="API capability discovery",
              description="Version, engine, readiness, feature flags and limits. Clients should "
                          "feature-detect from `features` rather than parsing versions.")
     async def capabilities():
         return {
             "api_version": API_VERSION,
-            "supported_versions": [API_VERSION],
+            "supported_versions": os.environ.get("LAMINUS_SUPPORTED_API_VERSIONS", API_VERSION).split(","),
+            "deprecated": API_VERSION == "v1",
             "legacy": {"prefix": "/api", "deprecated": True, "retired": True, "sunset": "2026-10-24",
                        "policy": "docs/api-versioning.md"},
             "engine": {"name": "orcaslicer", "version": m._orca_version(),
@@ -190,7 +193,7 @@ def install(app: FastAPI, m) -> None:
             "links": _links(job_id),
         }
 
-    @app.post(f"{PREFIX}/jobs", tags=["v1 jobs"], status_code=202, summary="Create a slice job",
+    @app.post(f"{PREFIX}/jobs", tags=[f"{API_VERSION} jobs"], status_code=202, summary="Create a slice job",
               description="Upload an STL/3MF and resolved profile UUIDs. Send an "
                           "`Idempotency-Key` header to make retries safe: the same key with the "
                           "same body returns the original job (`Idempotent-Replay: true`); the same "
@@ -260,7 +263,7 @@ def install(app: FastAPI, m) -> None:
         view = _view(job_id)
         return JSONResponse(status_code=202, content=view, headers={"Location": view["links"]["self"]})
 
-    @app.get(f"{PREFIX}/jobs", tags=["v1 jobs"], summary="List jobs (newest first, cursor-paginated)")
+    @app.get(f"{PREFIX}/jobs", tags=[f"{API_VERSION} jobs"], summary="List jobs (newest first, cursor-paginated)")
     async def list_jobs(limit: int = Query(50, ge=1, le=_MAX_PAGE), cursor: Optional[str] = None,
                         status: Optional[str] = None):
         records = [r for r in m.job_history.values() if not status or r.get("status") == status]
@@ -268,7 +271,7 @@ def install(app: FastAPI, m) -> None:
                               limit, cursor, reverse=True)
         return {"data": [_view(r["id"]) for r in page], "page": meta}
 
-    @app.get(f"{PREFIX}/jobs/{{job_id}}", tags=["v1 jobs"], summary="Get a job",
+    @app.get(f"{PREFIX}/jobs/{{job_id}}", tags=[f"{API_VERSION} jobs"], summary="Get a job",
              responses={404: {"description": "Unknown job"}})
     async def get_job(job_id: str):
         view = _view(job_id)
@@ -276,7 +279,7 @@ def install(app: FastAPI, m) -> None:
             raise _err(404, "job_not_found", "Job not found.")
         return view
 
-    @app.get(f"{PREFIX}/jobs/{{job_id}}/events", tags=["v1 jobs"], response_class=StreamingResponse,
+    @app.get(f"{PREFIX}/jobs/{{job_id}}/events", tags=[f"{API_VERSION} jobs"], response_class=StreamingResponse,
              summary="Stream job events (SSE)",
              description="Typed server-sent events with sequential `id`s: `log` ({message}), "
                          "`dropped` ({message}), and one terminal `completed` or `failed` "
@@ -312,7 +315,7 @@ def install(app: FastAPI, m) -> None:
 
         return StreamingResponse(stream(), media_type="text/event-stream")
 
-    @app.get(f"{PREFIX}/jobs/{{job_id}}/artifact", tags=["v1 jobs"], summary="Download the sliced artifact",
+    @app.get(f"{PREFIX}/jobs/{{job_id}}/artifact", tags=[f"{API_VERSION} jobs"], summary="Download the sliced artifact",
              description="One-time download: the job's files are deleted afterwards (its record stays "
                          "listed with `artifact.available: false`).",
              responses={404: {"description": "Unknown job or artifact gone"},
@@ -330,7 +333,7 @@ def install(app: FastAPI, m) -> None:
         return await m.download_sliced_file(job_id, background_tasks)
 
     # ---- profiles
-    @app.get(f"{PREFIX}/profiles", tags=["v1 profiles"], summary="List profiles (cursor-paginated)",
+    @app.get(f"{PREFIX}/profiles", tags=[f"{API_VERSION} profiles"], summary="List profiles (cursor-paginated)",
              description="Flat list across machine/process/filament presets. `manufacturer`, `model` "
                          "and `nozzle` must be given together (compatibility filter).",
              responses={503: {"description": "Catalog not ready (see Retry-After)"}})
@@ -351,7 +354,7 @@ def install(app: FastAPI, m) -> None:
         page, meta = paginate(records, lambda r: [r.get("name") or "", r["uuid"]], limit, cursor, reverse=False)
         return {"data": page, "page": meta}
 
-    @app.get(f"{PREFIX}/profiles/{{profile_uuid}}", tags=["v1 profiles"], summary="Get one profile",
+    @app.get(f"{PREFIX}/profiles/{{profile_uuid}}", tags=[f"{API_VERSION} profiles"], summary="Get one profile",
              responses={404: {"description": "Unknown profile"}, 503: {"description": "Catalog not ready"}})
     async def get_profile(profile_uuid: str):
         cat = _catalog()

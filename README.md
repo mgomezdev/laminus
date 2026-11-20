@@ -5,27 +5,25 @@ A Dockerized REST API wrapping the [OrcaSlicer](https://github.com/OrcaSlicer/Or
 ## Quick Start
 
 ```bash
-docker-compose up -d
+docker compose up --build -d
 ```
 
-The API is available at `http://localhost:5000`. Drop your OrcaSlicer preset JSON files into `./config/user/default/{machine,process,filament}/` and they will be picked up automatically.
+The API and dashboard are available at `http://localhost:5000`. New integrations use `/api/v2`. Drop preset JSON files into `./config/v2/user/default/{machine,process,filament}/`. Bridge tests can use `/api/v1` and `./config/v1/user/default/`.
 
 ## Configuration
 
-### `ORCA_VERSION`
+### OrcaSlicer releases
 
-The OrcaSlicer AppImage is **not baked into the Docker image**. On first container start, `entrypoint.sh` downloads the AppImage for the version specified by `ORCA_VERSION`, extracts it, and caches it in the `laminus-slicer` named volume. Subsequent restarts skip the download as long as the version on disk matches `ORCA_VERSION`.
-
-To upgrade OrcaSlicer without rebuilding the image, set `ORCA_VERSION` to the new version and restart the container. The entrypoint detects the version mismatch, downloads the new release, and replaces the cached install.
+The container downloads and caches both OrcaSlicer AppImages on first start. Deprecated `/api/v1` is pinned to 2.4.2. `/api/v2` defaults to 2.5.1 and accepts another 2.5.x release through `ORCA_V2_VERSION`. Recreate the container after changing that setting. Each API version owns its own presets, jobs, and artifacts.
 
 ```bash
 # .env or shell export
-ORCA_VERSION=2.4.2   # default
+ORCA_V2_VERSION=2.5.1
 ```
 
 ### Orca desktop and plugins
 
-Use the opt-in `orca-desktop` service for the Orca 2.5 plugin manager. It defaults to OrcaSlicer 2.5.1 and keeps its own AppImage cache and desktop settings. The Laminus API continues to slice using its own `ORCA_VERSION`. Export any presets you want the API to use and place them in the Laminus preset directories described above.
+Use the opt-in `orca-desktop` service for the Orca 2.5 plugin manager. It defaults to OrcaSlicer 2.5.1 and keeps its own AppImage cache and desktop settings. Export presets created by desktop plugins into the target API version’s preset directory.
 
 ```bash
 # Build the desktop image and set a VNC password when prompted.
@@ -56,26 +54,26 @@ The inventory shows which packages are installed and enabled. Use the native log
 
 | Source | Container path | Purpose |
 |--------|---------------|---------|
-| `./config` | `/config` | OrcaSlicer preset profiles |
-| `./data` | `/data` | Input models and output files |
+| `./config` | `/config` | OrcaSlicer presets for each API version |
+| `./data` | `/data` | Job state for each API version |
 | `./app` | `/workspace/app` | Application code (live reload in dev) |
-| `laminus-slicer` (named) | `/opt/orcaslicer` | Cached OrcaSlicer install — persists across restarts |
+| `laminus-slicer` (named) | `/opt/orcaslicer` | Cached v1 and v2 engines and matching JSON presets |
 | `./config/orca-desktop` | `/config/orca-desktop` in `orca-desktop` | Local plugin packages, desktop settings and native logs |
 | `laminus-orca-desktop-slicer` (named) | `/opt/orcaslicer` in `orca-desktop` | Cached desktop OrcaSlicer install |
 
 ## API Reference
 
-New integrations should use `/api/v1` and [`openapi-v1.json`](openapi-v1.json). Versionless routes were retired immediately on October 24, 2026 under the pre-alpha exception; see [migration mapping and policy](docs/api-versioning.md).
+New integrations should use `/api/v2` and [`openapi-v2.json`](openapi-v2.json). Use [`openapi-v1.json`](openapi-v1.json) for bridge testing with the deprecated API. [Versioning policy](docs/api-versioning.md)
 
 See [`openapi.json`](openapi.json) for the full OpenAPI 3.0 spec (CI-regenerated, so it always matches the running code), or [`docs/laminus-api-for-agents.md`](docs/laminus-api-for-agents.md) for a walked-through guide to the full slice workflow, including profile discovery and UUID stability.
 
 ### Slice a model
 
-Profiles are referenced by UUID, resolved via `GET /api/v1/profiles` (or `machine_uuid` directly if you already have it — see the agent doc above):
+Profiles are referenced by UUID, resolved via `GET /api/v2/profiles` (or `machine_uuid` directly if you already have it — see the agent doc above):
 
 ```bash
 # Start job (202; response.id is the job ID)
-curl -X POST http://localhost:5000/api/v1/jobs \
+curl -X POST http://localhost:5000/api/v2/jobs \
   -F "file=@model.stl" \
   -F "machine_uuid=<uuid-from-catalog>" \
   -F "process_uuid=<uuid-from-catalog>" \
@@ -83,19 +81,19 @@ curl -X POST http://localhost:5000/api/v1/jobs \
   -F "plate=1"
 
 # Poll status
-curl http://localhost:5000/api/v1/jobs/<job_id>
+curl http://localhost:5000/api/v2/jobs/<job_id>
 
 # Stream logs (SSE)
-curl http://localhost:5000/api/v1/jobs/<job_id>/events
+curl http://localhost:5000/api/v2/jobs/<job_id>/events
 
 # Download result
-curl -O http://localhost:5000/api/v1/jobs/<job_id>/artifact
+curl -O http://localhost:5000/api/v2/jobs/<job_id>/artifact
 ```
 
 ### Arrange a 3MF
 
 ```bash
-curl -X POST http://localhost:5000/api/v1/arrange \
+curl -X POST http://localhost:5000/api/v2/arrange \
   -F "file=@project.3mf" \
   -F "arrange=true" \
   -F "orient=true" \
@@ -105,28 +103,28 @@ curl -X POST http://localhost:5000/api/v1/arrange \
 ### List profiles
 
 ```bash
-curl http://localhost:5000/api/v1/profiles
+curl http://localhost:5000/api/v2/profiles
 ```
 
 ## Loading Profiles
 
-Prefer a thin user preset: drop a JSON file into `./config/user/default/{machine,process,filament}/` with `"inherits": "<vendor profile name>"` plus only the keys you're overriding. Laminus resolves the inheritance chain itself at catalog-build and slice time, so this rolls forward with vendor OrcaSlicer updates automatically — no reflattening needed.
+Prefer a thin user preset: drop a JSON file into `./config/v2/user/default/{machine,process,filament}/` with `"inherits": "<vendor profile name>"` plus only the keys you're overriding. Laminus resolves the inheritance chain itself at catalog-build and slice time, so this rolls forward with vendor OrcaSlicer updates automatically — no reflattening needed.
 
 Use `flatten_profiles.py` only as a last resort, for a permanent fork (the vendor profile is being removed, or you need to diverge for good). A flattened profile is frozen at the OrcaSlicer version it was flattened from and won't pick up later vendor fixes:
 
 ```bash
 docker exec laminus python3 /workspace/flatten_profiles.py \
-  "/opt/orcaslicer/resources/profiles/Creality/machine/Creality Ender-3 0.4 nozzle.json" \
-  "/config/user/default/machine/Creality Ender-3 0.4 nozzle.json" \
+  "/opt/orcaslicer/v2/json-profiles/Creality/machine/Creality Ender-3 0.4 nozzle.json" \
+  "/config/v2/user/default/machine/Creality Ender-3 0.4 nozzle.json" \
   "machine"
 ```
 
-Built-in profiles are located at `/opt/orcaslicer/resources/profiles/` inside the container. The script accepts `machine`, `process`, or `filament` as the third argument.
+Built-in profiles are located at `/opt/orcaslicer/v2/json-profiles/` inside the container. The script accepts `machine`, `process`, or `filament` as the third argument.
 
 You can also upload profile JSON files directly via the API:
 
 ```bash
-curl -X POST http://localhost:5000/api/v1/profiles/upload \
+curl -X POST http://localhost:5000/api/v2/profiles/upload \
   -F "type=filament" \
   -F "file=@MyFilament.json"
 ```
@@ -134,7 +132,7 @@ curl -X POST http://localhost:5000/api/v1/profiles/upload \
 ## Health Check
 
 ```bash
-curl http://localhost:5000/api/v1/health
+curl http://localhost:5000/api/v2/health
 ```
 
 ## Notes
