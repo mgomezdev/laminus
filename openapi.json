@@ -4063,30 +4063,6 @@
     {
       "name": "maintenance",
       "description": "On-demand disk cleanup for temp files left behind by failed or interrupted slice/arrange/pack runs (e.g., after a container crash mid-request)."
-    },
-    {
-      "name": "health",
-      "description": "Service readiness and version information. Always check `/api/v1/health` first \u2014 profile and slice endpoints return **503** while `catalog_loading` is `true`."
-    },
-    {
-      "name": "profiles",
-      "description": "Machine, process, and filament preset catalog derived from the OrcaSlicer AppImage's bundled profiles plus any user-uploaded profiles in `/config/user/`. Profiles are identified by stable UUIDs derived from their (manufacturer, model, nozzle) tuple (machine) or (source, rel_path) (process/filament), so UUIDs remain constant across catalog rebuilds as long as the profile files don't move."
-    },
-    {
-      "name": "slice",
-      "description": "Asynchronous slice job lifecycle: **start \u2192 poll \u2192 download**. Jobs are kept in memory and evicted after download or after `JOB_TTL_SECONDS` (default 3600). A maximum of `MAX_CONCURRENT_JOBS` (default 4) jobs may slice simultaneously; additional requests receive **503** until a slot opens."
-    },
-    {
-      "name": "arrange",
-      "description": "Synchronous plate arrangement and STL packing. No job tracking \u2014 responses block until OrcaSlicer finishes (up to `ARRANGE_TIMEOUT_SECONDS`, default 120). Use `POST /api/v1/pack` to combine multiple STLs into a single multi-plate `.3mf`, and `POST /api/v1/arrange` to re-pack an existing `.3mf`."
-    },
-    {
-      "name": "jobs",
-      "description": "Job history across the lifetime of the container \u2014 every slice job ever created, including ones already evicted from the active `jobs` table. Backs the Web UI's status/history view."
-    },
-    {
-      "name": "maintenance",
-      "description": "On-demand disk cleanup for temp files left behind by failed or interrupted slice/arrange/pack runs (e.g., after a container crash mid-request)."
     }
   ]
 }

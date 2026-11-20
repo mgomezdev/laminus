@@ -39,5 +39,5 @@ for kind, entries in v1["components"].items():
         shared[name] = definition
 write("openapi.json", {
     **v2, "paths": {**v2["paths"], **v1["paths"]},
-    "components": components, "tags": [*v2["tags"], *v1["tags"]],
+    "components": components,
 })

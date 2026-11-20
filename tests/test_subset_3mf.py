@@ -734,7 +734,9 @@ def test_v1_projects_subset_supports_remap_and_enveloped_errors(tmp_path):
     r = _post_subset(srcp, _url=url, machine_uuid="m1", process_uuid="p1", filament_uuids='["f1"]')
     assert r.status_code == 200, r.text
     assert "extruder 2 -> 1" in r.headers["X-Remap-Warnings"]
-    assert r.headers["API-Version"] == "v1" and "Deprecation" not in r.headers
+    assert r.headers["API-Version"] == "v1"
+    assert r.headers["Link"] == '</api/v2>; rel="successor-version"'
+    assert r.headers["Deprecation"].startswith("@")
     bad = _post_subset(srcp, _url=url, machine_uuid="m1", filament_uuids='["f1","f1"]')
     assert bad.status_code == 422
     assert bad.json()["error"]["code"] == "unprocessable" and "slot" in bad.json()["error"]["message"]

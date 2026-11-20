@@ -12,7 +12,11 @@ from tests.test_pack_quantities_live import analyse, cube_stl
 
 BASE = os.environ.get("LAMINUS_BRIDGE_URL", "").rstrip("/")
 pytestmark = pytest.mark.skipif(not BASE, reason="requires both real Orca engines")
-MACHINE = "Elegoo Centauri Carbon 0.4 nozzle"
+PRESETS = {
+    "machine": "Elegoo Centauri Carbon 0.4 nozzle",
+    "process": "0.20mm Standard @Elegoo CC 0.4 nozzle",
+    "filament": "Elegoo PLA Basic @ECC",
+}
 
 
 @pytest.fixture(scope="module")
@@ -56,12 +60,16 @@ def test_real_engines_keep_jobs_isolated(bridge, version, other, release):
     assert packed.status_code == 200, packed.text
     assert analyse(packed.content) == ({20: 1}, 1)
 
-    profiles = bridge.get(f"{prefix}/test/known-profile", params={"machine_name": MACHINE})
-    assert profiles.status_code == 200, profiles.text
-    profile = profiles.json()
+    uuids = {}
+    for kind, name in PRESETS.items():
+        profiles = bridge.get(f"{prefix}/profiles", params={"type": kind, "q": name})
+        assert profiles.status_code == 200, profiles.text
+        matches = [item["uuid"] for item in profiles.json()["data"] if item["name"] == name]
+        assert len(matches) == 1, (version, name, matches)
+        uuids[kind] = matches[0]
     job = bridge.post(f"{prefix}/jobs", files={"file": cube}, data={
-        "machine_uuid": profile["machine_uuid"], "process_uuid": profile["process_uuid"],
-        "filament_uuids": json.dumps([profile["filament_uuid"]]), "plate": 1,
+        "machine_uuid": uuids["machine"], "process_uuid": uuids["process"],
+        "filament_uuids": json.dumps([uuids["filament"]]), "plate": 1,
     })
     assert job.status_code == 202, job.text
     location = job.headers["Location"]
@@ -76,6 +84,9 @@ def test_real_engines_keep_jobs_isolated(bridge, version, other, release):
         time.sleep(1)
     assert status["status"] == "completed", status
     assert status["links"]["artifact"] == f"{location}/artifact"
+    with bridge.stream("GET", status["links"]["events"], timeout=10) as events:
+        assert events.headers["content-type"].startswith("text/event-stream")
+        assert any(line == "event: completed" for line in events.iter_lines())
     artifact = bridge.get(status["links"]["artifact"])
     assert artifact.status_code == 200, artifact.text
     assert b"G1 " in artifact.content

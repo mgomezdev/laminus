@@ -1,11 +1,11 @@
-"""Laminus API v1: stable, resource-oriented routes under ``/api/v1``.
+"""Resource-oriented routes shared by the Laminus API versions.
 
 Contract (see docs/api-versioning.md):
-  * every v1 error uses one envelope: ``{"error": {"code", "message", "status", "details"?},
+  * every versioned error uses one envelope: ``{"error": {"code", "message", "status", "details"?},
     "request_id"}``
   * list endpoints use opaque keyset cursors: ``{"data": [...], "page": {"limit", "next_cursor"}}``
-  * ``POST /api/v1/jobs`` honours ``Idempotency-Key``
-  * ``GET /api/v1`` is the capability-discovery document
+  * job creation honours ``Idempotency-Key``
+  * each version prefix serves its capability-discovery document
   * versionless API routes are retired (pre-alpha exception, BIZ-335)
 
 The module is installed by ``main.py`` (``install(app, main_module)``) so handlers read the

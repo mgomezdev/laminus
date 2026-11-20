@@ -15,6 +15,8 @@ start_worker() {
     LAMINUS_API_VERSION="$api_version" ORCA_VERSION="$orca_version" \
         ORCA_INSTALL_DIR="/opt/orcaslicer/$api_version" \
         CONFIG_DIR="/config/$api_version" DATA_DIR="/data/$api_version" \
+        USER_CONFIG_DIR="/config/$api_version/user" \
+        SYSTEM_PROFILES_DIR="/opt/orcaslicer/$api_version/resources/profiles" \
         ORCA_DATADIR="/var/lib/laminus/$api_version" JOBS_DIR="/tmp/jobs/$api_version" \
         ARRANGE_DIR="/tmp/arrange/$api_version" CATALOG_CACHE_FILE="/tmp/laminus-$api_version-catalog.json" \
         /entrypoint.sh uvicorn app.main:app --host 127.0.0.1 --port "$port" &
