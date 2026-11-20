@@ -74,6 +74,20 @@ jobs:
           DATA_DIR: /tmp/laminus-test-data
         run: pytest tests/ -v -ra
 
+  orca-desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest pytest-asyncio httpx
+      - name: Verify plugins against the real OrcaSlicer desktop
+        env:
+          LAMINUS_TEST_ORCA_DESKTOP: "1"
+        run: pytest -v tests/test_orca_desktop_live.py
+
   # Browser e2e for the dashboard: the real app (uvicorn) against mock/orca_cli.py,
   # driven through Chromium. e2e/conftest.py shims orcaslicer + xvfb-run itself.
   e2e-ui:
@@ -148,7 +162,7 @@ jobs:
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
   publish:
-    needs: [spec, test, e2e-ui, mock-image, e2e-core]
+    needs: [spec, test, orca-desktop, e2e-ui, mock-image, e2e-core]
     # develop pushes run the checks but don't publish images
     if: github.event_name == 'push' && github.ref != 'refs/heads/develop'
     runs-on: ubuntu-latest
