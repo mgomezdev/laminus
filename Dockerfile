@@ -61,6 +61,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends x11vnc \
 COPY --chmod=755 scripts/orca-desktop.sh /usr/local/bin/orca-desktop
 COPY --chmod=755 scripts/orca-desktop.py /usr/local/bin/orca-diagnostics
 ENV ORCA_VERSION=2.5.1
+# The AppImage's bundled OpenSSL path is absent in the image. Provide the
+# installed trust store explicitly so Orca does not pause for a desktop prompt.
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 CMD ["orca-desktop"]
 
 FROM base AS laminus

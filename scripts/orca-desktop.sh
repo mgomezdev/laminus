@@ -4,7 +4,7 @@ set -euo pipefail
 case "${1:-}" in
     session)
         if [[ "${ORCA_DESKTOP_VNC:-0}" == 1 ]]; then
-            x11vnc -rfbauth "${ORCA_DESKTOP_ROOT}/vnc.pass" -forever -shared &
+            x11vnc -quiet -rfbport 5900 -rfbauth "${ORCA_DESKTOP_ROOT}/vnc.pass" -forever -shared &
             vnc_pid=$!
             trap 'kill "$vnc_pid" 2>/dev/null || true' EXIT
             orcaslicer --datadir "${ORCA_DESKTOP_ROOT}/state" --debug 3
