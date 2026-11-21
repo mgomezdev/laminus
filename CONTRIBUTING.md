@@ -167,7 +167,7 @@ xvfb-run -a --server-args="-screen 0 1024x768x24" \
   orcaslicer --slice {plate} --arrange 0 --export-3mf thumb.3mf in.3mf
 ```
 
-OrcaSlicer is not in the Docker image. `entrypoint.sh` downloads the AppImage at container start (keyed by `ORCA_VERSION`) and extracts it into the `laminus-slicer` named volume at `/opt/orcaslicer`. This only happens once; subsequent restarts reuse the extracted volume.
+The entrypoint downloads the OrcaSlicer AppImage on first start and caches it in the `laminus-slicer` volume at `/opt/orcaslicer`. For releases with packed vendor profiles, Laminus builds its API catalog from the matching JSON sources in `/opt/orcaslicer/json-profiles`. Both caches are reused until `ORCA_VERSION` changes.
 
 ---
 
@@ -266,7 +266,7 @@ POST /api/pack
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ORCA_VERSION` | `2.4.2` | OrcaSlicer AppImage version to download |
+| `ORCA_VERSION` | `2.5.1` | OrcaSlicer 2.5.x AppImage version to download |
 | `SYSTEM_PROFILES_DIR` | `/opt/orcaslicer/resources/profiles` | System OrcaSlicer profiles |
 | `USER_CONFIG_DIR` | `/config/user` | User OrcaSlicer profiles |
 | `SLICE_TIMEOUT_SECONDS` | `600` | SIGKILL timeout for slice subprocess |

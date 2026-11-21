@@ -5,23 +5,52 @@ A Dockerized REST API wrapping the [OrcaSlicer](https://github.com/OrcaSlicer/Or
 ## Quick Start
 
 ```bash
-docker-compose up -d
+docker compose up --build -d
 ```
 
-The API is available at `http://localhost:5000`. Drop your OrcaSlicer preset JSON files into `./config/user/default/{machine,process,filament}/` and they will be picked up automatically.
+The API and dashboard are available at `http://localhost:5000`. Use `/api/v1` for Laminus requests. Drop custom OrcaSlicer preset JSON files into `./config/user/default/{machine,process,filament}/`.
 
 ## Configuration
 
 ### `ORCA_VERSION`
 
-The OrcaSlicer AppImage is **not baked into the Docker image**. On first container start, `entrypoint.sh` downloads the AppImage for the version specified by `ORCA_VERSION`, extracts it, and caches it in the `laminus-slicer` named volume. Subsequent restarts skip the download as long as the version on disk matches `ORCA_VERSION`.
+Laminus v1 runs OrcaSlicer 2.5.x and defaults to 2.5.1. The first container start downloads and caches the AppImage and its matching upstream JSON presets in the `laminus-slicer` volume. Restarts reuse that cache.
 
-To upgrade OrcaSlicer without rebuilding the image, set `ORCA_VERSION` to the new version and restart the container. The entrypoint detects the version mismatch, downloads the new release, and replaces the cached install.
+To switch to another 2.5.x release, set `ORCA_VERSION` and recreate the container. The entrypoint downloads the requested release and updates the cache.
 
 ```bash
 # .env or shell export
-ORCA_VERSION=2.4.2   # default
+ORCA_VERSION=2.5.1
 ```
+
+### Orca desktop and plugins
+
+Use the opt-in `orca-desktop` service for the Orca 2.5 plugin manager. It defaults to OrcaSlicer 2.5.1 and keeps its own AppImage cache and desktop settings. The Laminus API continues to slice using its own `ORCA_VERSION`. Export any presets you want the API to use and place them in the Laminus preset directories described above.
+
+```bash
+# Build the desktop image and set a VNC password when prompted.
+docker compose build orca-desktop
+mkdir -p config/orca-desktop
+docker compose run --rm --no-deps --entrypoint x11vnc orca-desktop \
+  -storepasswd /config/orca-desktop/vnc.pass
+
+# Start OrcaSlicer and connect a VNC client to 127.0.0.1:5900.
+ORCA_DESKTOP_VNC=1 docker compose up -d orca-desktop
+```
+
+The VNC port is published only on the Docker host's loopback interface. For a remote Docker host, forward the port over SSH. The desktop can also run without VNC by leaving `ORCA_DESKTOP_VNC` at its default of `0`.
+
+- Install and update plugins through Orca's **Plugins** dialog. Use its settings and permission prompts to configure each plugin.
+- To seed trusted local `.py` or `.whl` packages on startup, put them in `config/orca-desktop/packages/`. The filename identifies the install. Startup installs new packages and preserves existing installs, enabled flags and permissions. Use Orca's plugin manager to replace a package. Remove a package from the startup directory before uninstalling it in Orca.
+- The desktop keeps installed packages, plugin settings and native logs in `config/orca-desktop/state/`. Set `ORCA_DESKTOP_CONFIG_DIR` to move the desktop's bind mount and `ORCA_DESKTOP_VNC_PORT` to choose a different host port.
+- If a plugin requires Orca to restart, run `docker compose restart orca-desktop`. To switch the desktop release, set `ORCA_DESKTOP_VERSION` and run `docker compose up -d orca-desktop` again with your VNC setting.
+
+```bash
+docker compose exec orca-desktop orca-diagnostics plugins
+docker compose exec orca-desktop orca-diagnostics logs --match spoolman
+```
+
+The inventory shows which packages are installed and enabled. Use the native logs to confirm which plugins loaded successfully or to investigate load failures. Spoolman runs from inside the desktop container, so configure it with an endpoint the container can reach.
 
 ## Volumes
 
@@ -31,6 +60,8 @@ ORCA_VERSION=2.4.2   # default
 | `./data` | `/data` | Input models and output files |
 | `./app` | `/workspace/app` | Application code (live reload in dev) |
 | `laminus-slicer` (named) | `/opt/orcaslicer` | Cached OrcaSlicer install — persists across restarts |
+| `./config/orca-desktop` | `/config/orca-desktop` in `orca-desktop` | Local plugin packages, desktop settings and native logs |
+| `laminus-orca-desktop-slicer` (named) | `/opt/orcaslicer` in `orca-desktop` | Cached desktop OrcaSlicer install |
 
 ## API Reference
 
@@ -85,7 +116,7 @@ Use `flatten_profiles.py` only as a last resort, for a permanent fork (the vendo
 
 ```bash
 docker exec laminus python3 /workspace/flatten_profiles.py \
-  "/opt/orcaslicer/resources/profiles/Creality/machine/Creality Ender-3 0.4 nozzle.json" \
+  "/opt/orcaslicer/json-profiles/Creality/machine/Creality Ender-3 0.4 nozzle.json" \
   "/config/user/default/machine/Creality Ender-3 0.4 nozzle.json" \
   "machine"
 ```

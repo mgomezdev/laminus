@@ -36,7 +36,7 @@ def cube_stl(size: float) -> bytes:
     return buf.getvalue()
 
 
-def pack(stls, qty=None, bed=(100, 100, 100), timeout=150, path="/api/v1/pack", items=None):
+def pack(stls, qty=None, bed=(100, 100, 100), timeout=150, path=f"{BASE}/api/v1/pack", items=None):
     """stls: list of (filename, bytes); qty: copy counts aligned with stls (sent as `items`).
 
     Pass `items` (raw str) to send an arbitrary manifest. Returns the httpx.Response.
@@ -47,7 +47,7 @@ def pack(stls, qty=None, bed=(100, 100, 100), timeout=150, path="/api/v1/pack", 
         items = json.dumps([{"file": n, "quantity": q} for (n, _), q in zip(stls, qty)])
     if items is not None:
         data["items"] = items
-    return httpx.post(f"{BASE}{path}", files=files, data=data, timeout=timeout)
+    return httpx.post(path, files=files, data=data, timeout=timeout)
 
 
 def analyse(content: bytes):
@@ -88,11 +88,11 @@ def analyse(content: bytes):
 
 @pytest.fixture(scope="module", autouse=True)
 def _live():
-    try:
-        r = httpx.get(f"{BASE}/api/v1/health", timeout=5)
-        assert r.json().get("orcaslicer_installed")
-    except Exception as e:  # pragma: no cover
-        pytest.skip(f"Laminus not reachable at {BASE}: {e}")
+    response = httpx.get(f"{BASE}/api/v1/health", timeout=5).raise_for_status()
+    assert response.headers["API-Version"] == "v1"
+    health = response.json()
+    assert health["orcaslicer_installed"]
+    assert str(health["orca_version"]).startswith("2.5.")
 
 
 A, B = ("a.stl", cube_stl(40)), ("b.stl", cube_stl(20))
@@ -175,7 +175,7 @@ BAD = {
 
 
 @pytest.mark.parametrize("items", BAD.values(), ids=BAD.keys())
-@pytest.mark.parametrize("path", ["/api/v1/pack", "/api/v1/pack"])
+@pytest.mark.parametrize("path", [f"{BASE}/api/v1/pack", f"{BASE}/api/v1/pack"])
 def test_bad_items_rejected_422(items, path):
     raw = items if isinstance(items, str) else json.dumps(items)
     r = pack([A, B], items=raw, path=path)
@@ -189,7 +189,7 @@ def test_duplicate_upload_filenames_rejected_when_items_given():
 
 def test_v1_error_details_point_at_each_problem():
     r = pack([A, B], items=json.dumps([_it("a.stl", 0), _it("zzz.stl", 2), _it("b.stl", 1.5)]),
-             path="/api/v1/pack")
+             path=f"{BASE}/api/v1/pack")
     assert r.status_code == 422
     err = r.json()["error"]
     assert err["code"] == "validation_error"
@@ -201,7 +201,7 @@ def test_v1_error_details_point_at_each_problem():
 
 
 def test_v1_pack_with_items_works():
-    r = pack([A, B], [2, 1], path="/api/v1/pack")
+    r = pack([A, B], [2, 1], path=f"{BASE}/api/v1/pack")
     assert r.status_code == 200, r.text
     assert analyse(r.content)[0] == {40: 2, 20: 1}
 

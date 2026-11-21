@@ -17,6 +17,18 @@ def _filament():
             "filament_colour": "#FFFFFF", "nozzle_temperature": 220, "bed_temperature": 35}
 
 
+def test_generated_project_selects_a_bed_supported_by_all_filaments():
+    machine = {**_machine(), "support_multi_bed_types": "1", "default_bed_type": "Textured PEI Plate"}
+    plain = {**_filament(), "textured_plate_temp": ["55"], "hot_plate_temp": ["55"]}
+    smooth_only = {**_filament(), "textured_plate_temp": ["0"], "hot_plate_temp": ["55"]}
+    assert build_project_settings(machine, _process(), [plain])["curr_bed_type"] == "Textured PEI Plate"
+    numeric = {**machine, "default_bed_type": "4"}
+    assert build_project_settings(numeric, _process(), [plain])["curr_bed_type"] == "Textured PEI Plate"
+    assert build_project_settings(machine, _process(), [plain, smooth_only])["curr_bed_type"] == "High Temp Plate"
+    explicit = {**_process(), "curr_bed_type": "Engineering Plate"}
+    assert build_project_settings(machine, explicit, [smooth_only])["curr_bed_type"] == "Engineering Plate"
+
+
 # BIZ-350: Orca 2.4.2 (Print.cpp) -51s when extrusion is relative - `use_relative_e_distances`,
 # default true - on a marlin/marlin2 flavor and neither before_layer_change_gcode nor
 # layer_change_gcode has an exact "G92 E0". It skips that for BBL printers, but never

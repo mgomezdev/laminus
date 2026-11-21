@@ -86,6 +86,7 @@ THUMBNAIL_TIMEOUT = 120
 
 SYSTEM_PROFILES_DIR = os.environ.get("SYSTEM_PROFILES_DIR", "/opt/orcaslicer/resources/profiles")
 # entrypoint.sh writes the extracted AppImage's version to <install dir>/.version
+ORCA_BINARY = os.environ.get("ORCA_BINARY", "orcaslicer")
 ORCA_VERSION_FILE = os.environ.get("ORCA_VERSION_FILE", "/opt/orcaslicer/.version")
 SLICE_TIMEOUT = int(os.environ.get("SLICE_TIMEOUT_SECONDS", "600"))
 ARRANGE_TIMEOUT = int(os.environ.get("ARRANGE_TIMEOUT_SECONDS", "120"))
@@ -111,7 +112,7 @@ async def lifespan(app: FastAPI):
     _load_history_on_startup()
     try:
         proc = await asyncio.create_subprocess_exec(
-            "orcaslicer", "--version",
+            ORCA_BINARY, "--version",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
         try:
@@ -576,6 +577,11 @@ class JobLogger:
             await self._new_entry.wait()
 
 
+@app.get("/openapi-v1.json", include_in_schema=False)
+async def get_versioned_openapi():
+    return app.openapi()
+
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def get_dashboard():
     template_path = os.path.join(os.path.dirname(__file__), "templates", "index.html")
@@ -889,7 +895,7 @@ async def run_orcaslicer_task(
     async def _attempt(slice_input: str, label: str) -> bool:
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-            "orcaslicer", "--slice", str(slice_plate),
+            ORCA_BINARY, "--slice", str(slice_plate),
             "--outputdir", output_dir, "--arrange", arrange,
         ]
         if export_3mf:
@@ -1378,7 +1384,7 @@ async def slice_thumbnail(
 
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-            "orcaslicer", "--slice", str(plate), "--arrange", "0",
+            ORCA_BINARY, "--slice", str(plate), "--arrange", "0",
             "--export-3mf", out_3mf, in_file,
         ]
 
@@ -1841,7 +1847,7 @@ async def pack_stls(
         out_file = os.path.join(output_dir, "packed.3mf")
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-            "orcaslicer",
+            ORCA_BINARY,
             "--datadir", ORCA_DATADIR,
             "--arrange", "1",
             "--orient", "0",  # --orient tilts parts about X/Y, changing layer-line direction
@@ -1981,7 +1987,7 @@ async def auto_arrange_3mf(
 
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-            "orcaslicer",
+            ORCA_BINARY,
             "--datadir", ORCA_DATADIR,
             "--export-3mf", out_file,
         ]
@@ -2120,7 +2126,7 @@ async def _oracle_arrange_and_transplant(sub_file: str, oracle_in: str, out_file
 
 async def _orca_arrange(oracle_in: str, out_file: str, allow_rotations: bool) -> None:
     """``orcaslicer --arrange 1 --export-3mf out_file oracle_in``; raises HTTPException."""
-    cmd = ["xvfb-run", "-a", "--server-args=-screen 0 1024x768x24", "orcaslicer",
+    cmd = ["xvfb-run", "-a", "--server-args=-screen 0 1024x768x24", ORCA_BINARY,
            "--datadir", ORCA_DATADIR, "--arrange", "1"]
     if allow_rotations:
         cmd.append("--allow-rotations")
@@ -3051,7 +3057,7 @@ async def rescan_profiles():
 
 
 def _orca_version() -> Optional[str]:
-    """Installed OrcaSlicer release (e.g. "2.4.2"): the version entrypoint.sh actually
+    """Installed OrcaSlicer release (e.g. "2.5.1"): the version entrypoint.sh actually
     extracted, falling back to the ORCA_VERSION env var; None if neither is known."""
     try:
         with open(ORCA_VERSION_FILE, encoding="utf-8") as f:
@@ -3072,11 +3078,10 @@ def _orca_version() -> Optional[str]:
         "slice endpoints return **503** while `catalog_loading` is `true`.\n\n"
         "**Response fields:**\n"
         "- `status` — always `\"healthy\"` when the process is running\n"
-        "- `orcaslicer_installed` — whether the OrcaSlicer binary exists at "
-        "`/usr/local/bin/orcaslicer`\n"
+        "- `orcaslicer_installed` — whether the configured OrcaSlicer binary is executable\n"
         "- `orcaslicer_version` — version string from `orcaslicer --version`, or `null` "
         "if the binary is not installed or timed out\n"
-        "- `orca_version` — installed OrcaSlicer release (e.g. `\"2.4.2\"`), read from the "
+        "- `orca_version` — installed OrcaSlicer release (e.g. `\"2.5.1\"`), read from the "
         "install's `.version` marker, falling back to the `ORCA_VERSION` env var; `null` if "
         "neither is available\n"
         "- `config_mounted` — whether `/config` exists (volume mount check)\n"
@@ -3097,7 +3102,7 @@ async def health_check():
     active = sum(1 for j in list(jobs.values()) if j["status"] == "slicing")
     return {
         "status": "healthy",
-        "orcaslicer_installed": os.path.exists("/usr/local/bin/orcaslicer"),
+        "orcaslicer_installed": shutil.which(ORCA_BINARY) is not None,
         "orcaslicer_version": _orcaslicer_version,
         "orca_version": _orca_version(),
         "config_mounted": os.path.exists(CONFIG_DIR),

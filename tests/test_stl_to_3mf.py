@@ -228,10 +228,10 @@ def test_stl_min_z_and_restore_build_item_z(tmp_path):
              '<item objectid="2" transform="1 0 0 0 1 0 0 0 1 10 20 0"/>'
              '<item objectid="4" printable="1" transform="0 1 0 -1 0 0 0 0 1 30 40 0.5"/>'
              '</build></model>')
-    # Orca reorders objects: item 4 came from input instance 0, item 2 from instance 1
+    # Orca reorders objects and 2.5 adds attributes to the object element.
     cfg = ('<config>'
-           '<object id="4"><part id="1"><metadata key="source_object_id" value="0"/></part></object>'
-           '<object id="2"><part id="1"><metadata key="source_object_id" value="1"/></part></object>'
+           '<object id="4" name="Object"><part id="1"><metadata value="0" key="source_object_id"/></part></object>'
+           '<object name="Other" id="2"><part id="1"><metadata key="source_object_id" value="1"/></part></object>'
            '</config>')
     packed = tmp_path / "packed.3mf"
     with zipfile.ZipFile(packed, "w") as z:

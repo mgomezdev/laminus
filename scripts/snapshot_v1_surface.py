@@ -1,7 +1,7 @@
 """Regenerate tests/fixtures/api_v1_surface.json (the v1 compatibility baseline).
 
 Only run this when INTENTIONALLY adding to v1 (additions are compatible). Removing or
-tightening anything the baseline lists is a breaking change and needs /api/v2
+tightening anything the baseline lists is a breaking change and needs a new API major
 (see docs/api-versioning.md).
 """
 import json

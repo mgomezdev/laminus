@@ -4,10 +4,14 @@
 
 | Version | Prefix | Status |
 |---|---|---|
-| v1 | `/api/v1` | Stable. The contract is `openapi-v1.json` (CI-regenerated) |
+| v1 | `/api/v1` | Stable. Runs OrcaSlicer 2.5.x and defaults to 2.5.1. See `openapi-v1.json`. |
 | legacy | `/api/*` (no version) | Retired October 24, 2026 (pre-alpha exception); returns 404 |
 
 `GET /api/v1` is the discovery document: supported versions, engine, readiness, `features` flags and limits. Feature-detect from `features`; don't parse version strings.
+
+CI runs the v1 HTTP contract, packing, slicing, and export suites on the real OrcaSlicer AppImage. To check a running deployment, run `LAMINUS_URL=http://localhost:5000 pytest tests/test_api_live.py`.
+
+The catalog accepts a former stock process or filament UUID when the installed Orca release declares an unambiguous rename in the same vendor directory. For printers with multiple plate types, Laminus uses the printer default when the selected materials support it. Otherwise, it selects an available plate supported by all the selected materials. To select the installed plate explicitly, set `extra_config.curr_bed_type` when submitting a job.
 
 ## What v1 guarantees
 
@@ -16,7 +20,7 @@ Within a major version, only **compatible** changes ship:
 * new endpoints, new optional request params, new response fields, new enum values in *responses*, new error `code`s
 * clients must ignore unknown response fields
 
-These need a new major (`/api/v2`):
+These changes require a new major API version:
 
 * removing/renaming an endpoint, field or error code
 * new **required** request param or body field
