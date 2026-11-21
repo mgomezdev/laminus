@@ -12,7 +12,9 @@
 
 Both versions start with the same routes and request shapes. Orca releases can ship different presets and produce different outputs. Discover presets on the version where you submit the job. Follow job and artifact links returned by that version.
 
-Run the bridge check with `LAMINUS_BRIDGE_URL=http://localhost:5000 pytest tests/test_api_bridge_live.py` after starting the Compose app. For deeper packing and export comparisons, run the existing live suites with `LAMINUS_URL=http://localhost:5000` and `LAMINUS_TEST_API_VERSION=v1` or `v2`.
+CI runs the same API contract, packing, slicing, export, and browser tests for each version. Live engine checks use the real AppImages. Run the live suites with `LAMINUS_URL=http://localhost:5000` and `LAMINUS_API_VERSION=v1` or `v2` after starting the Compose app.
+
+The v2 catalog accepts a former stock process or filament UUID when the installed Orca release declares an unambiguous rename in the same vendor directory. For printers with multiple plate types, Laminus uses the machine default when the selected materials support it. If the default is incompatible and a compatible plate is available, Laminus selects a plate supported by all selected materials. Use `extra_config.curr_bed_type` when slicing through `/jobs` to select the installed plate explicitly.
 
 ## What v1 guarantees
 
@@ -28,7 +30,7 @@ These need a new major (`/api/v2`):
 * removing a documented response status
 * changing a field's type or meaning, or changing pagination/envelope shape
 
-`tests/test_api_v1_compat.py` enforces this against the committed baseline `tests/fixtures/api_v1_surface.json`. If it fails you are making a breaking change. To add to v1 deliberately, run `python scripts/snapshot_v1_surface.py` and commit the updated baseline.
+`tests/test_api_v1_compat.py` checks both versions against the committed v1 baseline `tests/fixtures/api_v1_surface.json`. To add to v1 deliberately, run `python scripts/snapshot_v1_surface.py` and commit the updated baseline.
 
 ## Conventions (v1)
 

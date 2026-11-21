@@ -14,8 +14,10 @@ import xml.etree.ElementTree as ET
 import pytest
 import httpx
 
+from tests.api_target import API_PREFIX, API_VERSION
+
 BASE = os.environ.get("LAMINUS_URL", "").rstrip("/")
-API = f"{BASE}/api/{os.environ.get('LAMINUS_TEST_API_VERSION', 'v1')}"
+API = BASE + API_PREFIX
 pytestmark = pytest.mark.skipif(not BASE, reason="LAMINUS_URL not set (needs a live Laminus + OrcaSlicer)")
 
 _CUBE_TRIS = [(0, 1, 3), (0, 3, 2), (4, 6, 7), (4, 7, 5), (0, 4, 5), (0, 5, 1),
@@ -89,11 +91,12 @@ def analyse(content: bytes):
 
 @pytest.fixture(scope="module", autouse=True)
 def _live():
-    try:
-        r = httpx.get(f"{API}/health", timeout=5)
-        assert r.json().get("orcaslicer_installed")
-    except Exception as e:  # pragma: no cover
-        pytest.skip(f"Laminus not reachable at {BASE}: {e}")
+    response = httpx.get(f"{API}/health", timeout=5).raise_for_status()
+    assert response.headers["API-Version"] == API_VERSION
+    health = response.json()
+    assert health["orcaslicer_installed"]
+    expected_release = {"v1": "2.4.2", "v2": "2.5."}[API_VERSION]
+    assert str(health["orca_version"]).startswith(expected_release)
 
 
 A, B = ("a.stl", cube_stl(40)), ("b.stl", cube_stl(20))

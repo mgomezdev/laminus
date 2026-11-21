@@ -14,6 +14,7 @@ import time
 import uuid
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -32,7 +33,8 @@ def _load_mock() -> object:
     p = _ROOT / "mock" / "server.py"
     spec = importlib.util.spec_from_file_location("laminus_mock_server", p)
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    with patch.dict(os.environ, {"LAMINUS_API_VERSION": API_VERSION}):
+        spec.loader.exec_module(mod)
     return mod
 
 

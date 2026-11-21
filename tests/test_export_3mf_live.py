@@ -16,8 +16,10 @@ import zipfile
 import httpx
 import pytest
 
+from tests.api_target import API_PREFIX
+
 BASE = os.environ.get("LAMINUS_URL", "").rstrip("/")
-API = f"{BASE}/api/{os.environ.get('LAMINUS_TEST_API_VERSION', 'v1')}"
+API = BASE + API_PREFIX
 pytestmark = pytest.mark.skipif(not BASE, reason="LAMINUS_URL not set (needs a live Laminus + OrcaSlicer)")
 
 _CUBE_TRIS = [(0, 1, 3), (0, 3, 2), (4, 6, 7), (4, 7, 5), (0, 4, 5), (0, 5, 1),

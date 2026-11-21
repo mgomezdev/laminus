@@ -110,6 +110,14 @@ def make_machine_uuid(manufacturer: str, model: str, nozzle: str) -> str:
     return str(uuid.uuid5(_CATALOG_NS, f"{manufacturer}|{model}|{nozzle}"))
 
 
+def _previous_profile_uuids(rel_path: str, renamed_from: str):
+    """Translate upstream rename metadata into UUIDs for the former filenames."""
+    parent = rel_path.rsplit("/", 1)[0]
+    for old_name in filter(None, map(str.strip, renamed_from.split(";"))):
+        for stem in _fs_safe_names(old_name) or [old_name]:
+            yield make_profile_uuid("system", f"{parent}/{stem}.json")
+
+
 _MACHINE_NAME_RE = re.compile(
     r"^(?P<mfr>\S.*?)\s+(?P<model>\S+(?:\s+\S+)*?)\s+(?P<nozzle>\d+\.\d+)\s+nozzle\s*$",
     re.IGNORECASE,
@@ -181,6 +189,8 @@ def resolve_inheritance(
         )
         merged = {**parent_data, **data}
         merged.pop("inherits", None)
+        if "renamed_from" not in data:
+            merged.pop("renamed_from", None)
         result = merged
     else:
         result = dict(data)
@@ -193,7 +203,7 @@ def resolve_inheritance(
 
 # Bump when catalog entries gain/change fields, so a cache written by older code is rebuilt
 # rather than served without them (the cache key only tracks profile *files*).
-_CACHE_SCHEMA = 4  # 3: vendor-scoped name index (BIZ-350); 4: machine bed_size_z (BIZ-363)
+_CACHE_SCHEMA = 5  # 5: lookup aliases for vendor-declared preset renames
 
 SYSTEM_PROFILE_TYPES = ("machine", "process", "filament")
 
@@ -245,6 +255,7 @@ class ProfileCatalog:
         self._system_dir = system_dir
         self._user_dir = user_dir
         self._by_uuid: dict[str, dict] = {}
+        self._aliases: dict[str, str] = {}
         self._catalog: dict[str, list[dict]] = {"machine": [], "process": [], "filament": []}
         self._built = False
         self._dict_cache: dict | None = None
@@ -259,6 +270,7 @@ class ProfileCatalog:
     def build(self) -> None:
         catalog: dict[str, list[dict]] = {"machine": [], "process": [], "filament": []}
         by_uuid: dict[str, dict] = {}
+        alias_targets: dict[str, set[str]] = {}
         search_roots = [self._system_dir, self._user_dir]
         broken: list[dict] = []
 
@@ -301,9 +313,18 @@ class ProfileCatalog:
                         continue
                     catalog[ptype].append(entry)
                     by_uuid[entry["uuid"]] = entry
+                    renamed_from = resolved.get("renamed_from")
+                    if source == "system" and ptype != "machine" and isinstance(renamed_from, str):
+                        for alias in _previous_profile_uuids(rel_path, renamed_from):
+                            alias_targets.setdefault(alias, set()).add(entry["uuid"])
 
         self._catalog = catalog
         self._by_uuid = by_uuid
+        self._aliases = {
+            alias: next(iter(targets))
+            for alias, targets in alias_targets.items()
+            if alias not in by_uuid and len(targets) == 1
+        }
         self._name_index = name_index
         self._resolved_memo.clear()
         self._dict_cache = None  # invalidate on rebuild
@@ -369,7 +390,7 @@ class ProfileCatalog:
         }
 
     def get_by_uuid(self, uid: str) -> Optional[dict]:
-        return self._by_uuid.get(uid)
+        return self._by_uuid.get(self._aliases.get(uid, uid))
 
     # ---- lazy full-preset resolution ----
 
@@ -393,6 +414,7 @@ class ProfileCatalog:
         as it exists *now*, an updated vendor base rolls through into user profiles
         that inherit from it without any reflattening step.
         """
+        uid = self._aliases.get(uid, uid)
         memo = self._resolved_memo
         hit = memo.get(uid)
         if hit is not None:
@@ -482,6 +504,7 @@ class ProfileCatalog:
             json.dump({
                 "cache_key": cache_key, "schema": _CACHE_SCHEMA, "catalog": self._catalog,
                 "broken": self._broken, "name_index": self._name_index,
+                "aliases": self._aliases,
             }, f)
         os.replace(tmp, path)
 
@@ -508,6 +531,7 @@ class ProfileCatalog:
         cat._built = True
         cat._broken = data.get("broken", [])
         cat._name_index = data.get("name_index", {})
+        cat._aliases = data.get("aliases", {})
         return cat
 
     @staticmethod

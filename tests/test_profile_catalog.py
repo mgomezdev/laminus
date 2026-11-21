@@ -122,6 +122,24 @@ def test_parse_machine_name_no_match_returns_none():
 
 from app.profile_catalog import ProfileCatalog
 
+
+def test_vendor_renamed_uuid_resolves_current_preset_after_cache_reload(tmp_path):
+    root = tmp_path / "system"
+    write_json(f"{root}/Vendor/filament/New PLA.json",
+               {"name": "New PLA", "renamed_from": "Old PLA; Earlier PLA", "nozzle_temperature": [220]})
+    write_json(f"{root}/Vendor/filament/Derived PLA.json",
+               {"name": "Derived PLA", "inherits": "New PLA", "nozzle_temperature": [230]})
+    catalog = ProfileCatalog(str(root), str(tmp_path / "user"))
+    catalog.build()
+    cache = str(tmp_path / "cache.json")
+    catalog.save_to_cache(cache, "key")
+    reloaded = ProfileCatalog.load_from_cache(cache, "key", str(root), str(tmp_path / "user"))
+    for current in (catalog, reloaded):
+        old = make_profile_uuid("system", "Vendor/filament/Old PLA.json")
+        assert current.get_by_uuid(old)["name"] == "New PLA"
+        assert current.resolved(old)["nozzle_temperature"] == [220]
+        assert current.counts["filament"] == 2
+
 def test_catalog_build_counts(profile_tree):
     cat = ProfileCatalog(system_dir=profile_tree["system_dir"], user_dir=profile_tree["user_dir"])
     cat.build()
