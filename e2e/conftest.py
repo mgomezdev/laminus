@@ -8,6 +8,7 @@ Mock slicer knobs (see mock/orca_cli.py): plate 2 fails, plate 3 slices slowly.
 Slicing extracts the requested plate from the project (BIZ-349), so an STL only has
 plate 1; tests that need plates 2/3 upload PROJECT_3MF, a 3-plate project.
 """
+from tests.api_target import API_PREFIX
 import io
 import json
 import os
@@ -143,7 +144,7 @@ def server(tmp_path):
         deadline = time.time() + 30
         while True:
             try:
-                with urllib.request.urlopen(f"{url}/api/v1", timeout=2) as r:
+                with urllib.request.urlopen(f"{url}{API_PREFIX}", timeout=2) as r:
                     if json.load(r)["ready"]["catalog"]:
                         break
             except OSError:
@@ -181,7 +182,7 @@ def api(server, playwright):
     ctx = playwright.request.new_context(base_url=server["url"])
 
     def uuid_of(name):
-        page = ctx.get("/api/v1/profiles", params={"q": name, "limit": 200}).json()
+        page = ctx.get(API_PREFIX + "/profiles", params={"q": name, "limit": 200}).json()
         return next(p["uuid"] for p in page["data"] if p["name"] == name)
 
     profiles = {"machine_uuid": uuid_of(MACHINE), "process_uuid": uuid_of(PROCESS),
@@ -194,21 +195,21 @@ def api(server, playwright):
                 file = {"name": filename, "mimeType": "model/3mf", "buffer": PROJECT_3MF}
             else:
                 file = {"name": filename, "mimeType": "model/stl", "buffer": STL}
-            r = ctx.post("/api/v1/jobs", multipart={**profiles, "plate": plate, "file": file})
+            r = ctx.post(API_PREFIX + "/jobs", multipart={**profiles, "plate": plate, "file": file})
             assert r.status == 202, r.text()
             return r.json()["id"]
 
         def wait_for(self, job_id, *statuses, timeout=20):
             deadline = time.time() + timeout
             while time.time() < deadline:
-                job = ctx.get(f"/api/v1/jobs/{job_id}").json()
+                job = ctx.get(f"{API_PREFIX}/jobs/{job_id}").json()
                 if job["status"] in statuses:
                     return job
                 time.sleep(0.2)
             raise AssertionError(f"job {job_id} never reached {statuses}: {job}")
 
         def download(self, job_id):
-            assert ctx.get(f"/api/v1/jobs/{job_id}/artifact").ok
+            assert ctx.get(f"{API_PREFIX}/jobs/{job_id}/artifact").ok
 
     yield Api()
     ctx.dispose()

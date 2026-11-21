@@ -1,4 +1,5 @@
 """/api/v1/pack `items` (file + quantity pairs): validation, v1 error details, injector pass-through."""
+from tests.api_target import API_PREFIX
 import io
 import json
 import struct
@@ -21,7 +22,7 @@ def _stl() -> bytes:
     return buf.getvalue()
 
 
-def _post(client, items=None, names=("a.stl", "b.stl"), path="/api/v1/pack"):
+def _post(client, items=None, names=("a.stl", "b.stl"), path=API_PREFIX + "/pack"):
     data = {"bed_x": "200", "bed_y": "200", "bed_z": "200"}
     if items is not None:
         data["items"] = items if isinstance(items, str) else json.dumps(items)
@@ -61,7 +62,7 @@ BAD_ITEMS = {
 def test_pack_rejects_bad_items(items):
     client = TestClient(app)
     assert _post(client, items).status_code == 422
-    assert _post(client, items, path="/api/v1/pack").status_code == 422
+    assert _post(client, items, path=API_PREFIX + "/pack").status_code == 422
 
 
 def test_pack_rejects_duplicate_upload_filenames_when_items_given():
@@ -75,7 +76,7 @@ def test_v1_422_lists_each_problem_in_details():
     resp = _post(
         TestClient(app),
         [_item("a.stl", 0), _item("zzz.stl", 2), _item("b.stl", 1.5)],
-        path="/api/v1/pack",
+        path=API_PREFIX + "/pack",
     )
     assert resp.status_code == 422
     err = resp.json()["error"]
@@ -89,10 +90,10 @@ def test_v1_422_lists_each_problem_in_details():
 
 def test_v1_422_missing_entry_and_cap_context():
     client = TestClient(app)
-    err = _post(client, [_item("a.stl", 1)], path="/api/v1/pack").json()["error"]
+    err = _post(client, [_item("a.stl", 1)], path=API_PREFIX + "/pack").json()["error"]
     assert any("no entry for uploaded file 'b.stl'" in d["msg"] for d in err["details"])
 
-    err = _post(client, [_item("a.stl", 250), _item("b.stl", 251)], path="/api/v1/pack").json()["error"]
+    err = _post(client, [_item("a.stl", 250), _item("b.stl", 251)], path=API_PREFIX + "/pack").json()["error"]
     assert err["details"][0]["ctx"] == {"total": 501, "max": PACK_MAX_INSTANCES}
 
 

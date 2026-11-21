@@ -1,4 +1,5 @@
 """BIZ-361: POST /api/v1/pack/next - the fullest single plate a machine can print."""
+from tests.api_target import API_PREFIX
 import io
 import json
 import struct
@@ -134,7 +135,7 @@ def _post(tmp_path, machine, sel=SEL, **data):
     files = [("files", ("a.3mf", a.read_bytes(), "application/octet-stream")),
              ("files", ("b.stl", _box_stl(40, 40, 20), "application/octet-stream"))]
     with patch("app.main.catalog", _Catalog()), patch("asyncio.create_subprocess_exec", new=_fake_orca):
-        return TestClient(app).post("/api/v1/pack/next", files=files,
+        return TestClient(app).post(API_PREFIX + "/pack/next", files=files,
                                     data={"selection": json.dumps(sel), "machine_uuid": machine, **data})
 
 
@@ -234,4 +235,4 @@ def test_choose_keeps_whole_units_in_plate_order():
 
 
 def test_pack_next_feature_flag():
-    assert "pack.next" in TestClient(app).get("/api/v1").json()["features"]
+    assert "pack.next" in TestClient(app).get(API_PREFIX).json()["features"]

@@ -1,4 +1,5 @@
 """BIZ-356: POST /api/v1/pack/mixed - a mixed selection on the fewest plates of one bed."""
+from tests.api_target import API_PREFIX
 import io
 import json
 import zipfile
@@ -31,7 +32,7 @@ def _post(tmp_path, sel=SEL, **data):
              ("files", ("c.stl", _box_stl(50, 50, 50), "application/octet-stream"))]
     data = data or {"bed_x": "256", "bed_y": "256", "bed_z": "256"}
     with patch("app.main.catalog", _Catalog()), patch("asyncio.create_subprocess_exec", new=_fake_orca):
-        return TestClient(app).post("/api/v1/pack/mixed", files=files,
+        return TestClient(app).post(API_PREFIX + "/pack/mixed", files=files,
                                     data={"selection": json.dumps(sel), **data})
 
 
@@ -159,4 +160,4 @@ def test_together_entries_rearranged_copy_by_copy_are_capped(tmp_path):
 
 
 def test_pack_mixed_feature_flag():
-    assert "pack.mixed" in TestClient(app).get("/api/v1").json()["features"]
+    assert "pack.mixed" in TestClient(app).get(API_PREFIX).json()["features"]

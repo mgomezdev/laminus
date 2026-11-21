@@ -5,6 +5,7 @@ the response is sent, so a burst of concurrent requests would otherwise all be a
 from fastapi.testclient import TestClient
 
 import app.main as main_mod
+from tests.api_target import API_PREFIX
 from app.profile_catalog import ProfileCatalog
 
 
@@ -33,7 +34,7 @@ def test_slice_start_rejects_when_pending_jobs_fill_the_limit(profile_tree):
         }
     try:
         resp = client.post(
-            "/api/v1/jobs",
+            API_PREFIX + "/jobs",
             files={"file": ("m.stl", b"solid t\nendsolid", "application/octet-stream")},
             data={
                 "machine_uuid": machine_uuid,

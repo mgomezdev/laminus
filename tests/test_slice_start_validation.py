@@ -7,6 +7,7 @@ test_mock_contract.py, where the same pattern leaves `catalog` as None and the
 fixture-built ProfileCatalog directly onto app.main.catalog without it being
 raced or clobbered by the background catalog-build task.
 """
+from tests.api_target import API_PREFIX
 import pytest
 from fastapi.testclient import TestClient
 
@@ -32,7 +33,7 @@ def test_slice_start_rejects_malformed_stl(profile_tree):
     main_mod.catalog = cat
     client = TestClient(main_mod.app)
     resp = client.post(
-        "/api/v1/jobs",
+        API_PREFIX + "/jobs",
         files={"file": ("bad.stl", b"", "application/octet-stream")},
         data={
             "machine_uuid": machine_uuid,
@@ -52,7 +53,7 @@ def test_slice_start_rejects_malformed_3mf(profile_tree):
     main_mod.catalog = cat
     client = TestClient(main_mod.app)
     resp = client.post(
-        "/api/v1/jobs",
+        API_PREFIX + "/jobs",
         files={"file": ("bad.3mf", b"not a zip file", "application/octet-stream")},
         data={
             "machine_uuid": machine_uuid,
@@ -70,7 +71,7 @@ def test_slice_start_rejects_zero_byte_3mf(profile_tree):
     main_mod.catalog = cat
     client = TestClient(main_mod.app)
     resp = client.post(
-        "/api/v1/jobs",
+        API_PREFIX + "/jobs",
         files={"file": ("empty.3mf", b"", "application/octet-stream")},
         data={
             "machine_uuid": machine_uuid,
@@ -98,7 +99,7 @@ def test_slice_start_rejects_escaping_export_3mf(profile_tree, export_name):
     main_mod.catalog = cat
     client = TestClient(main_mod.app)
     resp = client.post(
-        "/api/v1/jobs",
+        API_PREFIX + "/jobs",
         files={"file": ("model.3mf", b"not a zip file", "application/octet-stream")},
         data={
             "machine_uuid": machine_uuid,
@@ -118,7 +119,7 @@ def test_slice_prepared_rejects_escaping_export_3mf(export_name):
     """/api/v1/slice/prepared takes the same export_3mf field and needs the same guard."""
     client = TestClient(main_mod.app)
     resp = client.post(
-        "/api/v1/slice/prepared",
+        API_PREFIX + "/slice/prepared",
         files={"file": ("model.3mf", b"not a zip file", "application/octet-stream")},
         data={"plate": "1", "export_3mf": export_name},
     )
@@ -147,7 +148,7 @@ def test_slice_start_rewrites_bambu_auto_values_that_arrive_through_extra_config
     stl.write(struct.pack("<H", 0))
     try:
         resp = TestClient(main_mod.app).post(
-            "/api/v1/jobs",
+            API_PREFIX + "/jobs",
             files={"file": ("m.stl", stl.getvalue(), "application/octet-stream")},
             data={"machine_uuid": machine_uuid, "process_uuid": process_uuid, "filament_uuids": f'["{filament_uuid}"]',
                   "plate": "1", "extra_config": json.dumps({"raft_first_layer_expansion": "-1", "brim_type": "no_brim"})},
@@ -181,7 +182,7 @@ def test_slice_start_3mf_path_hands_the_rewritten_settings_to_the_slice_task(pro
         zf.writestr("3D/3dmodel.model", "<model/>")
     try:
         resp = TestClient(main_mod.app).post(
-            "/api/v1/jobs",
+            API_PREFIX + "/jobs",
             files={"file": ("m.3mf", buf.getvalue(), "application/octet-stream")},
             data={"machine_uuid": machine_uuid, "process_uuid": process_uuid, "filament_uuids": f'["{filament_uuid}"]',
                   "plate": "1", "extra_config": json.dumps({"tree_support_wall_count": "-1", "brim_type": "no_brim"})},
