@@ -123,6 +123,20 @@ def test_parse_machine_name_no_match_returns_none():
 from app.profile_catalog import ProfileCatalog
 
 
+def test_catalog_lists_user_machine_override_once(tmp_path):
+    name = "Elegoo Centauri Carbon 0.4 nozzle"
+    system, user = tmp_path / "system", tmp_path / "user"
+    write_json(f"{system}/Elegoo/machine/{name}.json", {"name": name, "printable_height": 256})
+    write_json(f"{user}/default/machine/{name}.json", {"name": name, "printable_height": 250})
+    catalog = ProfileCatalog(str(system), str(user))
+    catalog.build()
+
+    machines = catalog.as_dict()["machine"]
+    assert catalog.counts["machine"] == 1
+    assert machines[0]["source"] == "user"
+    assert catalog.get_by_uuid(machines[0]["uuid"])["bed_size_z"] == 250
+
+
 def test_vendor_renamed_uuid_resolves_current_preset_after_cache_reload(tmp_path):
     root = tmp_path / "system"
     write_json(f"{root}/Vendor/filament/New PLA.json",

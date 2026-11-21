@@ -203,7 +203,7 @@ def resolve_inheritance(
 
 # Bump when catalog entries gain/change fields, so a cache written by older code is rebuilt
 # rather than served without them (the cache key only tracks profile *files*).
-_CACHE_SCHEMA = 5  # 5: lookup aliases for vendor-declared preset renames
+_CACHE_SCHEMA = 6  # 6: catalog listings use the same unique UUIDs as detail lookups
 
 SYSTEM_PROFILE_TYPES = ("machine", "process", "filament")
 
@@ -311,13 +311,14 @@ class ProfileCatalog:
                             "reason": str(exc),
                         })
                         continue
-                    catalog[ptype].append(entry)
                     by_uuid[entry["uuid"]] = entry
                     renamed_from = resolved.get("renamed_from")
                     if source == "system" and ptype != "machine" and isinstance(renamed_from, str):
                         for alias in _previous_profile_uuids(rel_path, renamed_from):
                             alias_targets.setdefault(alias, set()).add(entry["uuid"])
 
+        for entry in by_uuid.values():
+            catalog[entry["type"]].append(entry)
         self._catalog = catalog
         self._by_uuid = by_uuid
         self._aliases = {
