@@ -4,7 +4,6 @@ The plate must be located with the SOURCE project's bed (the grid it was laid ou
 moved from the source bed centre to the target bed centre (layout preserved), checked
 against the target bed, and only then given the target machine's settings.
 """
-from tests.api_target import API_PREFIX
 import itertools
 import json
 import re
@@ -211,4 +210,4 @@ def test_non_zero_bed_origin(tmp_path):
 def test_plate_isolation_feature_flag():
     from fastapi.testclient import TestClient
     import app.main as main_mod
-    assert "slice.plate_isolation" in TestClient(main_mod.app).get(API_PREFIX).json()["features"]
+    assert "slice.plate_isolation" in TestClient(main_mod.app).get("/api/v1").json()["features"]

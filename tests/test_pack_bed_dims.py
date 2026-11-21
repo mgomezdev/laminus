@@ -4,7 +4,6 @@ job directory it already created.
 
 Uses the same profile_tree-injection pattern as test_slice_start_validation.py.
 """
-from tests.api_target import API_PREFIX
 from fastapi.testclient import TestClient
 
 import app.main as main_mod
@@ -28,7 +27,7 @@ def test_pack_uuid_mode_rejects_machine_without_bed_dims(profile_tree):
     main_mod.catalog = cat
     client = TestClient(main_mod.app)
     resp = client.post(
-        API_PREFIX + "/pack",
+        "/api/v1/pack",
         files=[("files", ("m.stl", b"solid t\nendsolid", "application/octet-stream"))],
         data={
             "machine_uuid": machine_uuid,
@@ -42,7 +41,7 @@ def test_pack_uuid_mode_rejects_machine_without_bed_dims(profile_tree):
 
 def _post_pack(client, **data):
     return client.post(
-        API_PREFIX + "/pack",
+        "/api/v1/pack",
         files=[("files", ("m.stl", b"solid t\nendsolid", "application/octet-stream"))],
         data=data,
     )

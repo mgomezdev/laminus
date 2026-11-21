@@ -9,7 +9,6 @@ import json
 from pathlib import Path
 
 from app.main import app
-from tests.api_target import API_PREFIX
 
 BASELINE = Path(__file__).parent / "fixtures" / "api_v1_surface.json"
 
@@ -28,11 +27,10 @@ def surface() -> dict:
     spec = app.openapi()
     out = {}
     for path, ops in spec["paths"].items():
-        if path != API_PREFIX and not path.startswith(API_PREFIX + "/"):
+        if path != "/api/v1" and not path.startswith("/api/v1/"):
             continue
         for method, op in ops.items():
-            baseline_path = "/api/v1" + path[len(API_PREFIX):]
-            out[f"{method.upper()} {baseline_path}"] = {
+            out[f"{method.upper()} {path}"] = {
                 "required_params": sorted(f"{p['in']}:{p['name']}" for p in op.get("parameters", [])
                                           if p.get("required")),
                 "required_body": _required_body_fields(spec, op),
@@ -41,7 +39,7 @@ def surface() -> dict:
     return out
 
 
-def test_api_surface_is_backward_compatible_with_v1():
+def test_v1_surface_is_backward_compatible():
     baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
     current = surface()
     problems = []
@@ -68,8 +66,8 @@ def test_only_versioned_api_routes_are_registered():
     for service in (app, mock_app):
         paths = [r.path for r in service.routes if r.path.startswith("/api")]
         assert paths
-        assert all(p == API_PREFIX or p.startswith(API_PREFIX + "/") for p in paths)
-        assert all(p == API_PREFIX or p.startswith(API_PREFIX + "/")
+        assert all(p == "/api/v1" or p.startswith("/api/v1/") for p in paths)
+        assert all(p == "/api/v1" or p.startswith("/api/v1/")
                    for p in service.openapi()["paths"] if p.startswith("/api"))
 
 

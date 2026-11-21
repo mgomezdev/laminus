@@ -1,5 +1,4 @@
 """API v1 contract: envelope, pagination, idempotency, discovery, legacy deprecation."""
-from tests.api_target import API_PREFIX, API_VERSION
 import asyncio
 import time
 from collections import OrderedDict
@@ -44,22 +43,22 @@ def _hist(i, status="completed"):
 
 
 def test_capabilities():
-    r = client.get(API_PREFIX)
+    r = client.get("/api/v1")
     assert r.status_code == 200
     body = r.json()
-    assert body["api_version"] == API_VERSION and body["supported_versions"] == [API_VERSION]
+    assert body["api_version"] == "v1" and body["supported_versions"] == ["v1"]
     assert {"jobs", "jobs.idempotency", "pagination.cursor"} <= set(body["features"])
     assert body["limits"]["max_page_size"] == 200
-    assert r.headers["API-Version"] == API_VERSION and r.headers["X-Request-ID"]
+    assert r.headers["API-Version"] == "v1" and r.headers["X-Request-ID"]
 
 
 def test_request_id_echoed():
-    r = client.get(API_PREFIX, headers={"X-Request-ID": "abc-123"})
+    r = client.get("/api/v1", headers={"X-Request-ID": "abc-123"})
     assert r.headers["X-Request-ID"] == "abc-123"
 
 
 def test_error_envelope_on_v1_and_retired_legacy_path():
-    v1 = client.get(API_PREFIX + "/jobs/nope")
+    v1 = client.get("/api/v1/jobs/nope")
     assert v1.status_code == 404
     assert v1.json()["error"] == {"code": "job_not_found", "message": "Job not found.", "status": 404}
     assert v1.json()["request_id"] == v1.headers["X-Request-ID"]
@@ -68,7 +67,7 @@ def test_error_envelope_on_v1_and_retired_legacy_path():
 
 
 def test_validation_errors_are_enveloped():
-    r = client.get(API_PREFIX + "/jobs?limit=0")
+    r = client.get("/api/v1/jobs?limit=0")
     assert r.status_code == 422
     err = r.json()["error"]
     assert err["code"] == "validation_error" and err["details"]
@@ -80,7 +79,7 @@ def test_job_pagination_walks_all_pages_newest_first():
     seen, cursor = [], None
     for _ in range(4):
         params = {"limit": 2, **({"cursor": cursor} if cursor else {})}
-        body = client.get(API_PREFIX + "/jobs", params=params).json()
+        body = client.get("/api/v1/jobs", params=params).json()
         seen += [j["id"] for j in body["data"]]
         cursor = body["page"]["next_cursor"]
         if cursor is None:
@@ -91,33 +90,33 @@ def test_job_pagination_walks_all_pages_newest_first():
 def test_pagination_is_stable_when_new_jobs_arrive():
     for i in range(4):
         _hist(i)
-    first = client.get(API_PREFIX + "/jobs?limit=2").json()
+    first = client.get("/api/v1/jobs?limit=2").json()
     _hist(99)  # newest; must not shift page 2
-    second = client.get(API_PREFIX + "/jobs", params={"limit": 2, "cursor": first["page"]["next_cursor"]}).json()
+    second = client.get("/api/v1/jobs", params={"limit": 2, "cursor": first["page"]["next_cursor"]}).json()
     assert [j["id"] for j in second["data"]] == ["j1", "j0"]
 
 
 def test_bad_cursor_is_422():
-    r = client.get(API_PREFIX + "/jobs", params={"cursor": "%%%"})
+    r = client.get("/api/v1/jobs", params={"cursor": "%%%"})
     assert r.status_code == 422 and r.json()["error"]["code"] == "invalid_cursor"
 
 
 def test_job_status_filter_and_view_shape():
     _hist(1, "failed")
     _hist(2)
-    data = client.get(API_PREFIX + "/jobs?status=failed").json()["data"]
+    data = client.get("/api/v1/jobs?status=failed").json()["data"]
     assert [j["id"] for j in data] == ["j1"]
-    assert data[0]["links"]["events"] == API_PREFIX + "/jobs/j1/events"
+    assert data[0]["links"]["events"] == "/api/v1/jobs/j1/events"
     assert data[0]["artifact"]["available"] is False
 
 
 def test_artifact_states():
-    assert client.get(API_PREFIX + "/jobs/x/artifact").json()["error"]["code"] == "job_not_found"
+    assert client.get("/api/v1/jobs/x/artifact").json()["error"]["code"] == "job_not_found"
     main_mod.jobs["p"] = {"id": "p", "status": "slicing", "error": None, "sliced_file": None, "logger": None}
-    assert client.get(API_PREFIX + "/jobs/p/artifact").status_code == 409
+    assert client.get("/api/v1/jobs/p/artifact").status_code == 409
     _hist(7)  # evicted: still listed, artifact gone
-    assert client.get(API_PREFIX + "/jobs/j7").status_code == 200
-    assert client.get(API_PREFIX + "/jobs/j7/artifact").json()["error"]["code"] == "artifact_gone"
+    assert client.get("/api/v1/jobs/j7").status_code == 200
+    assert client.get("/api/v1/jobs/j7/artifact").json()["error"]["code"] == "artifact_gone"
 
 
 def test_events_are_typed_and_resumable():
@@ -131,28 +130,28 @@ def test_events_are_typed_and_resumable():
 
     lg = asyncio.new_event_loop().run_until_complete(build())
     main_mod.jobs["e1"] = {"id": "e1", "status": "completed", "error": None, "sliced_file": None, "logger": lg}
-    body = client.get(API_PREFIX + "/jobs/e1/events").text
+    body = client.get("/api/v1/jobs/e1/events").text
     assert 'id: 1\nevent: log\ndata: {"message": "one"}' in body
     assert "event: completed" in body
-    resumed = client.get(API_PREFIX + "/jobs/e1/events", headers={"Last-Event-ID": "2"}).text
+    resumed = client.get("/api/v1/jobs/e1/events", headers={"Last-Event-ID": "2"}).text
     assert "one" not in resumed and "two" not in resumed and "event: completed" in resumed
 
 
 def test_profiles_list_filter_paginate_detail(cat):
-    body = client.get(API_PREFIX + "/profiles", params={"limit": 2}).json()
+    body = client.get("/api/v1/profiles", params={"limit": 2}).json()
     assert len(body["data"]) == 2 and body["page"]["next_cursor"]
-    machines = client.get(API_PREFIX + "/profiles", params={"limit": 200, "type": "machine"}).json()["data"]
+    machines = client.get("/api/v1/profiles", params={"limit": 200, "type": "machine"}).json()["data"]
     assert {p["type"] for p in machines} == {"machine"}
     uid = machines[0]["uuid"]
-    assert client.get(f"{API_PREFIX}/profiles/{uid}").json()["uuid"] == uid
-    assert client.get(API_PREFIX + "/profiles/none").json()["error"]["code"] == "profile_not_found"
-    assert client.get(API_PREFIX + "/profiles?manufacturer=x").json()["error"]["code"] == "partial_machine_filter"
-    assert client.get(API_PREFIX + "/profiles?type=bogus").status_code == 422
+    assert client.get(f"/api/v1/profiles/{uid}").json()["uuid"] == uid
+    assert client.get("/api/v1/profiles/none").json()["error"]["code"] == "profile_not_found"
+    assert client.get("/api/v1/profiles?manufacturer=x").json()["error"]["code"] == "partial_machine_filter"
+    assert client.get("/api/v1/profiles?type=bogus").status_code == 422
 
 
 def test_profiles_catalog_not_ready_has_retry_after():
     main_mod.catalog = None
-    r = client.get(API_PREFIX + "/profiles")
+    r = client.get("/api/v1/profiles")
     assert r.status_code == 503 and r.headers["Retry-After"] == "5"
     assert r.json()["error"]["code"] == "catalog_not_ready"
 
@@ -179,14 +178,14 @@ def _fake_start(calls):
 def _post(headers=None, data=None, content=b"stl"):
     d = {"process_uuid": "p", "filament_uuids": '["f"]', "plate": "1"}
     d.update(data or {})
-    return client.post(API_PREFIX + "/jobs", files={"file": ("a.stl", content)}, data=d, headers=headers or {})
+    return client.post("/api/v1/jobs", files={"file": ("a.stl", content)}, data=d, headers=headers or {})
 
 
 def test_create_job_returns_202_location():
     calls = []
     with patch.object(main_mod, "start_slice", _fake_start(calls)):
         r = _post()
-    assert r.status_code == 202 and r.headers["Location"] == API_PREFIX + "/jobs/new1"
+    assert r.status_code == 202 and r.headers["Location"] == "/api/v1/jobs/new1"
     assert r.json()["id"] == "new1" and r.json()["status"] == "pending"
 
 
@@ -228,9 +227,9 @@ def test_invalid_idempotency_key():
 # ------------------------------------------------------------ projects + policy
 
 def test_project_routes_exist_under_v1_with_enveloped_errors():
-    r = client.post(API_PREFIX + "/projects/subset", files={"file": ("a.txt", b"x")}, data={"selection": "[]"})
+    r = client.post("/api/v1/projects/subset", files={"file": ("a.txt", b"x")}, data={"selection": "[]"})
     assert r.status_code == 400 and r.json()["error"]["code"] == "bad_request"
-    r = client.post(API_PREFIX + "/projects/inspect", files={"file": ("a.txt", b"x")})
+    r = client.post("/api/v1/projects/inspect", files={"file": ("a.txt", b"x")})
     assert "error" in r.json()
 
 
@@ -239,7 +238,7 @@ def test_project_routes_exist_under_v1_with_enveloped_errors():
 
 
 def test_v1_health_and_literal_profile_paths_beat_uuid_route():
-    r = client.get(API_PREFIX + "/health")
-    assert r.status_code == 200 and r.headers["API-Version"] == API_VERSION
-    r = client.get(API_PREFIX + "/profiles/broken")
+    r = client.get("/api/v1/health")
+    assert r.status_code == 200 and r.headers["API-Version"] == "v1"
+    r = client.get("/api/v1/profiles/broken")
     assert r.status_code != 404 or r.json()["error"]["code"] != "profile_not_found"

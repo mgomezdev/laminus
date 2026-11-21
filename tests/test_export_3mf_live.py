@@ -16,10 +16,7 @@ import zipfile
 import httpx
 import pytest
 
-from tests.api_target import API_PREFIX
-
 BASE = os.environ.get("LAMINUS_URL", "").rstrip("/")
-API = BASE + API_PREFIX
 pytestmark = pytest.mark.skipif(not BASE, reason="LAMINUS_URL not set (needs a live Laminus + OrcaSlicer)")
 
 _CUBE_TRIS = [(0, 1, 3), (0, 3, 2), (4, 6, 7), (4, 7, 5), (0, 4, 5), (0, 5, 1),
@@ -55,13 +52,13 @@ def _cube_stl(size=20.0):
 def _assert_exported(job_id):
     deadline = time.monotonic() + 300
     while True:
-        job = httpx.get(f"{API}/jobs/{job_id}", timeout=30).json()
+        job = httpx.get(f"{BASE}/api/v1/jobs/{job_id}", timeout=30).json()
         if job["status"] in ("completed", "failed") or time.monotonic() > deadline:
             break
         time.sleep(2)
     assert job["status"] == "completed", job
 
-    art = httpx.get(f"{API}/jobs/{job_id}/artifact", timeout=60)
+    art = httpx.get(f"{BASE}/api/v1/jobs/{job_id}/artifact", timeout=60)
     assert art.status_code == 200
     with zipfile.ZipFile(io.BytesIO(art.content)) as z:
         gcode = z.read("Metadata/plate_1.gcode")
@@ -75,7 +72,7 @@ def test_jobs_export_3mf_produces_sliced_3mf(printer):
             "filament_uuids": json.dumps([filament]), "plate": "1", "export_3mf": "out.gcode.3mf"}
     if extra:
         data["extra_config"] = json.dumps(extra)
-    r = httpx.post(f"{API}/jobs", data=data,
+    r = httpx.post(f"{BASE}/api/v1/jobs", data=data,
                    files={"file": ("cube.stl", _cube_stl(), "application/octet-stream")}, timeout=60)
     assert r.status_code == 202, r.text
     _assert_exported(r.json()["id"])
@@ -87,7 +84,7 @@ def test_presets_resolve_against_their_own_vendor(printer, flavor):
     # BIZ-350: shared base names (fdm_machine_common, ...) resolved to another vendor's
     # file - P1S got Wanhao's base and sliced as klipper.
     machine, process, filament, _ = PRINTERS[printer]
-    r = httpx.post(f"{API}/profiles/merged-config", timeout=60,
+    r = httpx.post(f"{BASE}/api/v1/profiles/merged-config", timeout=60,
                    json={"machine_uuid": machine, "process_uuid": process, "filament_uuids": [filament]})
     assert r.status_code == 200, r.text
     assert r.json()["gcode_flavor"] == flavor
@@ -96,7 +93,7 @@ def test_presets_resolve_against_their_own_vendor(printer, flavor):
 def test_prepared_export_3mf_repairs_filament_ids():
     # Packs made before the fix carry `filament_ids: []` (and some a stray `filament_id`).
     machine, process, filament, _ = PRINTERS["centauri_carbon"]
-    r = httpx.post(f"{API}/pack", data={"machine_uuid": machine, "process_uuid": process,
+    r = httpx.post(f"{BASE}/api/v1/pack", data={"machine_uuid": machine, "process_uuid": process,
                                                "filament_uuids": json.dumps([filament])},
                    files=[("files", ("cube.stl", _cube_stl(), "application/octet-stream"))], timeout=300)
     assert r.status_code == 200, r.text
@@ -109,7 +106,7 @@ def test_prepared_export_3mf_repairs_filament_ids():
                 cfg["filament_ids"], cfg["filament_id"] = [], ["GFL99"]
                 data = json.dumps(cfg)
             dst.writestr(item, data)
-    r = httpx.post(f"{API}/slice/prepared", data={"plate": "1", "export_3mf": "out.gcode.3mf"},
+    r = httpx.post(f"{BASE}/api/v1/slice/prepared", data={"plate": "1", "export_3mf": "out.gcode.3mf"},
                    files={"file": ("pack.3mf", buf.getvalue(), "application/octet-stream")}, timeout=60)
     assert r.status_code == 200, r.text
     _assert_exported(r.json()["job_id"])
@@ -121,21 +118,21 @@ def test_slice_uses_the_machine_settings_not_orca_defaults(printer):
     # (200 x 200 bed, empty printer_model): big plates failed -52, everything else printed
     # with default speeds/temperatures.
     machine, process, filament, extra = PRINTERS[printer]
-    cfg = httpx.post(f"{API}/profiles/merged-config", timeout=60,
+    cfg = httpx.post(f"{BASE}/api/v1/profiles/merged-config", timeout=60,
                      json={"machine_uuid": machine, "process_uuid": process, "filament_uuids": [filament]}).json()
     data = {"machine_uuid": machine, "process_uuid": process,
             "filament_uuids": json.dumps([filament]), "plate": "1", "export_3mf": "out.gcode.3mf"}
     if extra:
         data["extra_config"] = json.dumps(extra)
-    r = httpx.post(f"{API}/jobs", data=data,
+    r = httpx.post(f"{BASE}/api/v1/jobs", data=data,
                    files={"file": ("cube.stl", _cube_stl(), "application/octet-stream")}, timeout=60)
     assert r.status_code == 202, r.text
     job_id = r.json()["id"]
     deadline = time.monotonic() + 300
-    while httpx.get(f"{API}/jobs/{job_id}", timeout=30).json()["status"] not in ("completed", "failed"):
+    while httpx.get(f"{BASE}/api/v1/jobs/{job_id}", timeout=30).json()["status"] not in ("completed", "failed"):
         assert time.monotonic() < deadline
         time.sleep(2)
-    art = httpx.get(f"{API}/jobs/{job_id}/artifact", timeout=60)   # one download per job
+    art = httpx.get(f"{BASE}/api/v1/jobs/{job_id}/artifact", timeout=60)   # one download per job
     assert art.status_code == 200, art.text
     with zipfile.ZipFile(io.BytesIO(art.content)) as z:
         gcode = z.read("Metadata/plate_1.gcode").decode("utf-8", "replace")
@@ -149,7 +146,7 @@ def test_prepared_bambu_project_with_auto_sentinels_slices(plate):
     # raft_first_layer_expansion / tree_support_wall_count; Orca failed every plate -18.
     path = os.path.join(os.path.dirname(__file__), "fixtures", "bambu_3plate_multicolor.3mf")
     with open(path, "rb") as f:
-        r = httpx.post(f"{API}/slice/prepared", data={"plate": str(plate), "export_3mf": "out.gcode.3mf"},
+        r = httpx.post(f"{BASE}/api/v1/slice/prepared", data={"plate": str(plate), "export_3mf": "out.gcode.3mf"},
                        files={"file": ("bambu.3mf", f.read(), "application/octet-stream")}, timeout=60)
     assert r.status_code == 200, r.text
     _assert_exported(r.json()["job_id"])

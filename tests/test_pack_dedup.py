@@ -1,6 +1,5 @@
 """Regression: /api/v1/pack must not silently overwrite two uploaded STLs sharing a
 filename - both must be written and both must reach the packer."""
-from tests.api_target import API_PREFIX
 import io
 import os
 import struct
@@ -47,7 +46,7 @@ def test_pack_dedupes_duplicate_stl_filenames():
     with patch("app.main._inject_stls_into_3mf", new=_fake_inject), \
          patch("asyncio.create_subprocess_exec", new=_mock_slicer_ok):
         resp = client.post(
-            API_PREFIX + "/pack",
+            "/api/v1/pack",
             files=[
                 ("files", ("bracket.stl", _stl(), "application/octet-stream")),
                 ("files", ("bracket.stl", _stl(), "application/octet-stream")),

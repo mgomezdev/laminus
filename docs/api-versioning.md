@@ -4,17 +4,14 @@
 
 | Version | Prefix | Status |
 |---|---|---|
-| v2 | `/api/v2` | Current. Runs OrcaSlicer 2.5.x and defaults to 2.5.1. See `openapi-v2.json`. |
-| v1 | `/api/v1` | Deprecated. Runs OrcaSlicer 2.4.2 during feature bridge testing. See `openapi-v1.json`. |
+| v1 | `/api/v1` | Stable. Runs OrcaSlicer 2.5.x and defaults to 2.5.1. See `openapi-v1.json`. |
 | legacy | `/api/*` (no version) | Retired October 24, 2026 (pre-alpha exception); returns 404 |
 
-`GET /api/v2` and `GET /api/v1` report supported versions, their engine, readiness, feature flags, and limits. V1 responses include `Deprecation` and a link to v2. V1 retirement follows feature bridge testing. No retirement date has been set.
+`GET /api/v1` is the discovery document: supported versions, engine, readiness, `features` flags and limits. Feature-detect from `features`; don't parse version strings.
 
-Both versions start with the same routes and request shapes. Orca releases can ship different presets and produce different outputs. Discover presets on the version where you submit the job. Follow job and artifact links returned by that version.
+CI runs the v1 HTTP contract, packing, slicing, and export suites on the real OrcaSlicer AppImage. To check a running deployment, run `LAMINUS_URL=http://localhost:5000 pytest tests/test_api_live.py`.
 
-CI runs the same API contract, packing, slicing, export, and browser tests for each version. Live engine checks use the real AppImages. Run the live suites with `LAMINUS_URL=http://localhost:5000` and `LAMINUS_API_VERSION=v1` or `v2` after starting the Compose app.
-
-The v2 catalog accepts a former stock process or filament UUID when the installed Orca release declares an unambiguous rename in the same vendor directory. For printers with multiple plate types, Laminus uses the machine default when the selected materials support it. If the default is incompatible and a compatible plate is available, Laminus selects a plate supported by all selected materials. Use `extra_config.curr_bed_type` when slicing through `/jobs` to select the installed plate explicitly.
+The catalog accepts a former stock process or filament UUID when the installed Orca release declares an unambiguous rename in the same vendor directory. For printers with multiple plate types, Laminus uses the printer default when the selected materials support it. Otherwise, it selects an available plate supported by all the selected materials. To select the installed plate explicitly, set `extra_config.curr_bed_type` when submitting a job.
 
 ## What v1 guarantees
 
@@ -23,14 +20,14 @@ Within a major version, only **compatible** changes ship:
 * new endpoints, new optional request params, new response fields, new enum values in *responses*, new error `code`s
 * clients must ignore unknown response fields
 
-These need a new major (`/api/v2`):
+These changes require a new major API version:
 
 * removing/renaming an endpoint, field or error code
 * new **required** request param or body field
 * removing a documented response status
 * changing a field's type or meaning, or changing pagination/envelope shape
 
-`tests/test_api_v1_compat.py` checks both versions against the committed v1 baseline `tests/fixtures/api_v1_surface.json`. To add to v1 deliberately, run `python scripts/snapshot_v1_surface.py` and commit the updated baseline.
+`tests/test_api_v1_compat.py` enforces this against the committed baseline `tests/fixtures/api_v1_surface.json`. If it fails you are making a breaking change. To add to v1 deliberately, run `python scripts/snapshot_v1_surface.py` and commit the updated baseline.
 
 ## Conventions (v1)
 
@@ -94,8 +91,8 @@ clients and the bundled UI together. Themis, Ordinus, and Concordia already use
 v1 in their active clients and healthchecks.
 
 `GET /api/v1` reports `legacy.retired: true` and `legacy.sunset: "2026-10-24"`.
-`openapi.json` contains both contracts. The combined and per-version artifacts
-are regenerated and checked by CI. Dashboard,
+`openapi.json` now contains only the v1 contract; `openapi-v1.json` remains the
+version-specific artifact. Both are regenerated and checked by CI. Dashboard,
 Swagger, and OpenAPI document URLs remain operational outside `/api`.
 
 This is a breaking pre-alpha release (0.12.0). The exception does not change the

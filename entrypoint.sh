@@ -1,11 +1,11 @@
 #!/bin/bash
 set -eo pipefail
 
-if [ "${1:-}" = "laminus-bridge" ]; then
-    exec "$@"
+export ORCA_VERSION="${ORCA_VERSION:-2.5.1}"
+if [[ ! "$ORCA_VERSION" =~ ^2\.5\.[0-9]+$ ]]; then
+    echo "[laminus] ORCA_VERSION must select a 2.5.x release" >&2
+    exit 1
 fi
-
-ORCA_VERSION="${ORCA_VERSION:-2.4.2}"
 ORCA_INSTALL_DIR="${ORCA_INSTALL_DIR:-/opt/orcaslicer}"
 export ORCA_VERSION_FILE="${ORCA_INSTALL_DIR}/.version"
 
@@ -35,9 +35,10 @@ else
     echo "[laminus] OrcaSlicer v${ORCA_VERSION} installed."
 fi
 
+ln -sf "${ORCA_INSTALL_DIR}/AppRun" /usr/local/bin/orcaslicer
+
 # The desktop command manages its own persistent datadir.
 if [ "${1:-}" = "orca-desktop" ]; then
-    ln -sf "${ORCA_INSTALL_DIR}/AppRun" /usr/local/bin/orcaslicer
     exec "$@"
 fi
 

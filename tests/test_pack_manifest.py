@@ -15,7 +15,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.api_target import API_PREFIX
 from app import manifest as mf
 from app import subset_3mf as s
 from app.main import app
@@ -88,7 +87,7 @@ def _pack(plates=PLATES):
 
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
         return TestClient(app).post(
-            API_PREFIX + "/pack",
+            "/api/v1/pack",
             files=[("files", (n, _stl(n.encode()), "application/octet-stream")) for n in UPLOADS],
             data={"bed_x": "60", "bed_y": "60", "bed_z": "60", "items": json.dumps(ITEMS)})
 
@@ -121,7 +120,7 @@ def test_pack_without_items_uses_upload_order():
 
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
         r = TestClient(app).post(
-            API_PREFIX + "/pack", files=[("files", (n, _stl(n.encode()), "application/octet-stream"))
+            "/api/v1/pack", files=[("files", (n, _stl(n.encode()), "application/octet-stream"))
                                    for n in ("x.stl", "y.stl")],
             data={"bed_x": "60", "bed_y": "60", "bed_z": "60"})
     m = _assert_matches_plates(r.content)
@@ -182,7 +181,7 @@ def test_subset_manifest_attributes_instances_in_selection_order(tmp_path):
     make_3mf(src)
     sel = [{"name": "Lid", "qty": 3}, {"plate": 1, "qty": 2}]   # Lid x3 + (Lid + Base) x2
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
-        r = TestClient(app).post(API_PREFIX + "/projects/subset",
+        r = TestClient(app).post("/api/v1/projects/subset",
                                  files=[("file", ("model.3mf", src.read_bytes(), "application/octet-stream"))],
                                  data={"selection": json.dumps(sel)})
     assert r.status_code == 200, r.text
@@ -205,7 +204,7 @@ def test_merge_manifest_uses_global_selection_index_and_merged_ids(tmp_path):
     files = [("files", ("first.3mf", a.read_bytes(), "application/octet-stream")),
              ("files", ("second.3mf", b.read_bytes(), "application/octet-stream"))]
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
-        r = TestClient(app).post(API_PREFIX + "/projects/merge", files=files, data={"selection": json.dumps(sel)})
+        r = TestClient(app).post("/api/v1/projects/merge", files=files, data={"selection": json.dumps(sel)})
     assert r.status_code == 200, r.text
     m = _assert_matches_plates(r.content)
     assert m["items"] == [{"item": 0, "source": "first.3mf", "requested": 4},
@@ -232,4 +231,4 @@ def test_embed_replaces_an_existing_manifest(tmp_path):
 
 
 def test_pack_manifest_feature_flag():
-    assert "pack.manifest" in TestClient(app).get(API_PREFIX).json()["features"]
+    assert "pack.manifest" in TestClient(app).get("/api/v1").json()["features"]

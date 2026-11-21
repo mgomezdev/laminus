@@ -1,5 +1,4 @@
 """BIZ-363: POST /api/v1/projects/measure - object / plate / STL bounding-box sizes."""
-from tests.api_target import API_PREFIX
 import io
 import json
 import re
@@ -38,7 +37,7 @@ def _rotate_first_item(path, oid):
 
 def _post(name, data, selection=None):
     form = {} if selection is None else {"selection": json.dumps(selection)}
-    return TestClient(app).post(API_PREFIX + "/projects/measure", data=form,
+    return TestClient(app).post("/api/v1/projects/measure", data=form,
                                 files={"file": (name, data, "application/octet-stream")})
 
 
@@ -101,4 +100,4 @@ def test_errors_are_unprocessable(tmp_path, name, sel):
 
 
 def test_measure_feature_flag():
-    assert "projects.measure" in TestClient(app).get(API_PREFIX).json()["features"]
+    assert "projects.measure" in TestClient(app).get("/api/v1").json()["features"]

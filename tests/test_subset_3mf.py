@@ -1,5 +1,4 @@
 """Subset extraction: pick objects x qty out of an Orca/Bambu 3MF, keep overrides intact."""
-from tests.api_target import API_PREFIX, API_VERSION
 import io
 import json
 import zipfile
@@ -301,7 +300,7 @@ def _upload(src_path):
 
 
 def test_endpoint_list_objects(src):
-    r = TestClient(app).post(API_PREFIX + "/projects/inspect", files=[_upload(src)])
+    r = TestClient(app).post("/api/v1/projects/inspect", files=[_upload(src)])
     assert r.status_code == 200
     assert {o["name"] for o in r.json()["objects"]} == {"Lid", "Base"}
 
@@ -324,7 +323,7 @@ def test_endpoint_subset_runs_orca_on_expanded_oracle(src):
 
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
         r = TestClient(app).post(
-            API_PREFIX + "/projects/subset", files=[_upload(src)],
+            "/api/v1/projects/subset", files=[_upload(src)],
             data={"selection": json.dumps([{"name": "Lid", "qty": 5}]), "allow_rotations": "true"})
     assert r.status_code == 200, r.text
     assert r.headers["X-Instance-Count"] == "5"
@@ -342,13 +341,13 @@ def test_endpoint_subset_runs_orca_on_expanded_oracle(src):
     ('[{"name": "Nope", "qty": 1}]', 422),
 ])
 def test_endpoint_rejects_bad_selection(src, selection, code):
-    r = TestClient(app).post(API_PREFIX + "/projects/subset", files=[_upload(src)], data={"selection": selection})
+    r = TestClient(app).post("/api/v1/projects/subset", files=[_upload(src)], data={"selection": selection})
     assert r.status_code == code
 
 
 def test_endpoint_rejects_non_3mf():
     r = TestClient(app).post(
-        API_PREFIX + "/projects/subset", files=[("file", ("m.stl", b"x", "application/octet-stream"))],
+        "/api/v1/projects/subset", files=[("file", ("m.stl", b"x", "application/octet-stream"))],
         data={"selection": "[]"})
     assert r.status_code == 400
 
@@ -450,7 +449,7 @@ def test_endpoint_merge_two_files(src, tmp_path):
              ("files", ("second.3mf", open(other, "rb"), "application/octet-stream"))]
     sel = [{"file": "first.3mf", "plate": 1, "qty": 2}, {"file": 1, "name": "Lid", "qty": 1}]
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
-        r = TestClient(app).post(API_PREFIX + "/projects/merge", files=files, data={"selection": json.dumps(sel)})
+        r = TestClient(app).post("/api/v1/projects/merge", files=files, data={"selection": json.dumps(sel)})
     assert r.status_code == 200, r.text
     assert r.headers["X-Instance-Count"] == "5" and r.headers["X-Plate-Count"] == "2"
     fp = s.fingerprint(io.BytesIO(r.content))
@@ -476,7 +475,7 @@ def test_endpoint_merge_selection_validation(src, selection, code):
     files = [("files", ("first.3mf", open(src, "rb"), "application/octet-stream")),
              ("files", ("second.3mf", open(src, "rb"), "application/octet-stream"))]
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
-        r = TestClient(app).post(API_PREFIX + "/projects/merge", files=files, data={"selection": selection})
+        r = TestClient(app).post("/api/v1/projects/merge", files=files, data={"selection": selection})
     assert r.status_code == code, r.text
 
 
@@ -510,13 +509,13 @@ def test_object_previews_names_plates_and_png(src, tmp_path):
 
 def test_endpoint_previews(src):
     c = TestClient(app)
-    r = c.post(API_PREFIX + "/projects/previews", files=[_upload(src)], data={"size": "48"})
+    r = c.post("/api/v1/projects/previews", files=[_upload(src)], data={"size": "48"})
     assert r.status_code == 200, r.text
     objs = r.json()["objects"]
     assert {o["name"] for o in objs} == {"Lid", "Base"} and all(o["preview"]["height"] == 48 for o in objs)
-    r = c.post(API_PREFIX + "/projects/previews", files=[_upload(src)], data={"images": "false"})
+    r = c.post("/api/v1/projects/previews", files=[_upload(src)], data={"images": "false"})
     assert all(o["preview"] is None and o["plates"] for o in r.json()["objects"])
-    assert c.post(API_PREFIX + "/projects/previews", files=[_upload(src)], data={"size": "5"}).status_code == 422
+    assert c.post("/api/v1/projects/previews", files=[_upload(src)], data={"size": "5"}).status_code == 422
 
 
 def test_merge_makes_inner_object_ids_unique_across_sources(src, tmp_path):
@@ -566,7 +565,7 @@ def test_endpoints_report_empty_warnings_for_flat_layout(src):
         return proc
 
     with patch("asyncio.create_subprocess_exec", new=_fake_orca):
-        r = TestClient(app).post(API_PREFIX + "/projects/subset", files=[_upload(src)],
+        r = TestClient(app).post("/api/v1/projects/subset", files=[_upload(src)],
                                  data={"selection": json.dumps([{"name": "Lid", "qty": 3}])})
     assert r.status_code == 200 and r.headers["X-Warnings"] == ""
 
@@ -677,7 +676,7 @@ class _FakeCatalog:
         return self.cfgs[u]
 
 
-def _post_subset(src_path, _url=API_PREFIX + "/projects/subset", **data):
+def _post_subset(src_path, _url="/api/v1/projects/subset", **data):
     async def _fake_orca(*args, **kwargs):
         a = list(args)
         _fake_two_plates(a[-1], a[a.index("--export-3mf") + 1])
@@ -731,16 +730,11 @@ def _cfg_bytes(b):
 def test_v1_projects_subset_supports_remap_and_enveloped_errors(tmp_path):
     srcp = str(tmp_path / "m.3mf")
     _multi(srcp)
-    url = API_PREFIX + "/projects/subset"
+    url = "/api/v1/projects/subset"
     r = _post_subset(srcp, _url=url, machine_uuid="m1", process_uuid="p1", filament_uuids='["f1"]')
     assert r.status_code == 200, r.text
     assert "extruder 2 -> 1" in r.headers["X-Remap-Warnings"]
-    assert r.headers["API-Version"] == API_VERSION
-    if API_VERSION == "v1":
-        assert r.headers["Link"] == '</api/v2>; rel="successor-version"'
-        assert r.headers["Deprecation"].startswith("@")
-    else:
-        assert "Deprecation" not in r.headers
+    assert r.headers["API-Version"] == "v1" and "Deprecation" not in r.headers
     bad = _post_subset(srcp, _url=url, machine_uuid="m1", filament_uuids='["f1","f1"]')
     assert bad.status_code == 422
     assert bad.json()["error"]["code"] == "unprocessable" and "slot" in bad.json()["error"]["message"]

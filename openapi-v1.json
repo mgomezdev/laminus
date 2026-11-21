@@ -1,7 +1,7 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Laminus \u2014 OrcaSlicer Sidecar API",
+    "title": "Laminus \u2014 OrcaSlicer Sidecar API (API v1)",
     "description": "Headless 3D model slicing via OrcaSlicer CLI running inside a Docker container. Laminus is a sidecar service used by Themis; it is not intended to be called directly by end-users in normal operation.\n\n## Typical agent workflow\n\n1. **`GET /api/v1/health`** \u2014 wait until `catalog_loaded: true` before making any other calls.\n2. **`GET /api/v1/profiles`** \u2014 discover machine / process / filament UUIDs for your printer and material. Filter by `manufacturer`, `model`, and `nozzle` to narrow results.\n3. **`POST /api/v1/jobs`** \u2014 upload the model (`.3mf` or `.stl`) with the resolved UUIDs. The 202 response contains an `id`.\n4. **`GET /api/v1/jobs/{job_id}`** \u2014 poll every 2\u20135 s until `status` is `completed` or `failed`.\n5. **`GET /api/v1/jobs/{job_id}/artifact`** \u2014 retrieve the GCode (or `.3mf` when `export_3mf` was requested). Downloading removes the artifact; the job record remains.\n\nAlternatively, use **`POST /api/v1/slice/prepared`** when the 3MF already embeds print settings from a previous OrcaSlicer session \u2014 no profile resolution is needed.\n\n## Packing / arrangement\n\nUse **`POST /api/v1/pack`** to distribute STL geometry across build plates before slicing. Three modes: supply a template `.3mf`, profile UUIDs (preferred \u2014 catalog-aware), or explicit bed dimensions. The packed `.3mf` is returned directly (synchronous, up to 120 s).\n\n## Error conventions\n\n- **422** \u2014 caller-side validation failure (bad UUIDs, missing required fields, etc.).\n- **503** \u2014 Laminus is not yet ready; the catalog is still building. Retry after `GET /api/v1/health` reports `catalog_loaded: true`.\n- **400 / 408 / 500** \u2014 OrcaSlicer-side failures; check server logs for details.",
     "version": "0.12.0"
   },
@@ -39,8 +39,7 @@
           "503": {
             "description": "Catalog not yet ready \u2014 retry after /api/v1/health reports catalog_loaded: true"
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/profiles/broken": {
@@ -63,8 +62,7 @@
           "503": {
             "description": "Catalog not yet ready"
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/profiles/machines/suggest": {
@@ -107,8 +105,7 @@
               }
             }
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/profiles/models/variants": {
@@ -151,8 +148,7 @@
               }
             }
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/profiles/machines/{machine_ref}/presets": {
@@ -163,7 +159,6 @@
         "summary": "Process/filament presets compatible with a machine",
         "description": "Presets whose resolved `compatible_printers` is empty or names this machine. `kind=process|filament` narrows; default both. `compatible_models` is omitted for universal presets. 404 `{\"error\": \"unknown_machine_ref\"}`, 422 `{\"error\": \"invalid_kind\"}`.",
         "operationId": "v1_machine_presets",
-        "deprecated": true,
         "parameters": [
           {
             "name": "machine_ref",
@@ -220,7 +215,6 @@
         "summary": "Can this machine ref (and bed) be sliced for?",
         "description": "Always 200. `supported` is false with `reason` `unknown_machine_ref` or `bed_mismatch` (`bed_x`/`bed_y` in mm, 1 mm tolerance; a machine with no declared bed size is never ruled out). `reason` is null when supported.",
         "operationId": "v1_machine_supports",
-        "deprecated": true,
         "parameters": [
           {
             "name": "machine_ref",
@@ -325,8 +319,7 @@
           "503": {
             "description": "Too many concurrent slice jobs \u2014 retry when a slot opens (check active_jobs in GET /api/v1/health)"
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/slice/thumbnail": {
@@ -359,8 +352,7 @@
           "422": {
             "description": "OrcaSlicer returned non-zero, no PNG found in output, plate < 1, bad filename, or non-.3mf file uploaded. Also returned on timeout (the OrcaSlicer process is killed)."
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/pack": {
@@ -405,8 +397,7 @@
           "503": {
             "description": "Profile catalog not yet ready (UUID mode only)"
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/arrange": {
@@ -455,8 +446,7 @@
               }
             }
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/projects/inspect": {
@@ -499,8 +489,7 @@
               }
             }
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/projects/previews": {
@@ -536,8 +525,7 @@
           "422": {
             "description": "size out of range"
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/projects/subset": {
@@ -579,8 +567,7 @@
           "503": {
             "description": "machine_uuid given but catalog not ready"
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/projects/merge": {
@@ -622,8 +609,7 @@
           "503": {
             "description": "machine_uuid given but catalog not ready"
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/pack/next": {
@@ -665,8 +651,7 @@
           "503": {
             "description": "Catalog not ready"
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/pack/mixed": {
@@ -708,8 +693,7 @@
           "503": {
             "description": "machine_uuid given but catalog not ready"
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/projects/measure": {
@@ -742,8 +726,7 @@
           "422": {
             "description": "Unreadable file or bad selection"
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/profiles/upload": {
@@ -786,8 +769,7 @@
               }
             }
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/profiles/rescan": {
@@ -807,8 +789,7 @@
               }
             }
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/health": {
@@ -817,7 +798,7 @@
           "health"
         ],
         "summary": "Service health check",
-        "description": "Returns service readiness information. **Always call this first** \u2014 profile and slice endpoints return **503** while `catalog_loading` is `true`.\n\n**Response fields:**\n- `status` \u2014 always `\"healthy\"` when the process is running\n- `orcaslicer_installed` \u2014 whether the configured OrcaSlicer binary is executable\n- `orcaslicer_version` \u2014 version string from `orcaslicer --version`, or `null` if the binary is not installed or timed out\n- `orca_version` \u2014 installed OrcaSlicer release (e.g. `\"2.4.2\"`), read from the install's `.version` marker, falling back to the `ORCA_VERSION` env var; `null` if neither is available\n- `config_mounted` \u2014 whether `/config` exists (volume mount check)\n- `system_profiles_available` \u2014 whether the OrcaSlicer AppImage's profiles directory is present (required for catalog build)\n- `catalog_loaded` \u2014 `true` when the profile catalog is fully built and ready; `false` during initial startup or rebuild\n- `catalog_building` \u2014 `true` while a catalog rebuild is in progress\n- `catalog_profile_count` \u2014 `{machine: N, process: N, filament: N}` when loaded, otherwise `null`\n- `catalog_skipped_count` \u2014 number of profiles excluded from the catalog on the last build (unresolvable `inherits` parent, unparseable JSON, etc.) \u2014 call `GET /api/v1/profiles/broken` for which profiles and why; `null` if not yet built\n- `active_jobs` \u2014 number of jobs currently in `slicing` status",
+        "description": "Returns service readiness information. **Always call this first** \u2014 profile and slice endpoints return **503** while `catalog_loading` is `true`.\n\n**Response fields:**\n- `status` \u2014 always `\"healthy\"` when the process is running\n- `orcaslicer_installed` \u2014 whether the configured OrcaSlicer binary is executable\n- `orcaslicer_version` \u2014 version string from `orcaslicer --version`, or `null` if the binary is not installed or timed out\n- `orca_version` \u2014 installed OrcaSlicer release (e.g. `\"2.5.1\"`), read from the install's `.version` marker, falling back to the `ORCA_VERSION` env var; `null` if neither is available\n- `config_mounted` \u2014 whether `/config` exists (volume mount check)\n- `system_profiles_available` \u2014 whether the OrcaSlicer AppImage's profiles directory is present (required for catalog build)\n- `catalog_loaded` \u2014 `true` when the profile catalog is fully built and ready; `false` during initial startup or rebuild\n- `catalog_building` \u2014 `true` while a catalog rebuild is in progress\n- `catalog_profile_count` \u2014 `{machine: N, process: N, filament: N}` when loaded, otherwise `null`\n- `catalog_skipped_count` \u2014 number of profiles excluded from the catalog on the last build (unresolvable `inherits` parent, unparseable JSON, etc.) \u2014 call `GET /api/v1/profiles/broken` for which profiles and why; `null` if not yet built\n- `active_jobs` \u2014 number of jobs currently in `slicing` status",
         "operationId": "v1_health_check",
         "responses": {
           "200": {
@@ -828,8 +809,7 @@
               }
             }
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/cleanup": {
@@ -840,7 +820,6 @@
         "summary": "Remove stale temp files from failed/interrupted jobs",
         "description": "Scans `/tmp/jobs` and `/tmp/arrange` for leftover directories/files not accounted for by any currently active job, and removes the ones older than `min_age_seconds`. This catches clutter that the normal job-eviction sweep can't see \u2014 e.g. scratch dirs from an `/api/v1/arrange`, `/api/v1/pack`, or `/api/v1/slice/thumbnail` request that never finished because the container was killed mid-request, or `/tmp/jobs` entries left behind by a slice job that existed before a restart.\n\n**`dry_run=true`** reports what would be removed (path count + total bytes) without deleting anything \u2014 use this to preview before committing.\n\n**`min_age_seconds`** (default 300) guards against deleting a directory that's still being written to by an in-flight request; pass `0` to remove everything unowned regardless of age.",
         "operationId": "v1_cleanup_temp",
-        "deprecated": true,
         "parameters": [
           {
             "name": "min_age_seconds",
@@ -895,8 +874,7 @@
               }
             }
           }
-        },
-        "deprecated": true
+        }
       }
     },
     "/api/v1/jobs": {
@@ -907,7 +885,6 @@
         "summary": "Create a slice job",
         "description": "Upload an STL/3MF and resolved profile UUIDs. Send an `Idempotency-Key` header to make retries safe: the same key with the same body returns the original job (`Idempotent-Replay: true`); the same key with a different body is a 422 `idempotency_key_reuse`; a key whose first request is still being processed is a 409. Keys are remembered for 24 h, in memory (not across restarts).",
         "operationId": "create_job_api_v1_jobs_post",
-        "deprecated": true,
         "requestBody": {
           "required": true,
           "content": {
@@ -944,7 +921,6 @@
         ],
         "summary": "List jobs (newest first, cursor-paginated)",
         "operationId": "list_jobs_api_v1_jobs_get",
-        "deprecated": true,
         "parameters": [
           {
             "name": "limit",
@@ -1020,7 +996,6 @@
         ],
         "summary": "Get a job",
         "operationId": "get_job_api_v1_jobs__job_id__get",
-        "deprecated": true,
         "parameters": [
           {
             "name": "job_id",
@@ -1065,7 +1040,6 @@
         "summary": "Stream job events (SSE)",
         "description": "Typed server-sent events with sequential `id`s: `log` ({message}), `dropped` ({message}), and one terminal `completed` or `failed` ({reason}). Send `Last-Event-ID` to skip events already seen (the buffer is replayed from the start on every connect).",
         "operationId": "job_events_api_v1_jobs__job_id__events_get",
-        "deprecated": true,
         "parameters": [
           {
             "name": "job_id",
@@ -1105,7 +1079,6 @@
         "summary": "Download the sliced artifact",
         "description": "One-time download: the job's files are deleted afterwards (its record stays listed with `artifact.available: false`).",
         "operationId": "job_artifact_api_v1_jobs__job_id__artifact_get",
-        "deprecated": true,
         "parameters": [
           {
             "name": "job_id",
@@ -1153,7 +1126,6 @@
         "summary": "List profiles (cursor-paginated)",
         "description": "Flat list across machine/process/filament presets. `manufacturer`, `model` and `nozzle` must be given together (compatibility filter).",
         "operationId": "list_profiles_api_v1_profiles_get",
-        "deprecated": true,
         "parameters": [
           {
             "name": "type",
@@ -1297,7 +1269,6 @@
         ],
         "summary": "Get one profile",
         "operationId": "get_profile_api_v1_profiles__profile_uuid__get",
-        "deprecated": true,
         "parameters": [
           {
             "name": "profile_uuid",

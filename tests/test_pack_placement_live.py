@@ -21,10 +21,7 @@ import httpx
 import numpy as np
 import pytest
 
-from tests.api_target import API_PREFIX
-
 BASE = os.environ.get("LAMINUS_URL", "").rstrip("/")
-API = BASE + API_PREFIX
 pytestmark = pytest.mark.skipif(not BASE, reason="LAMINUS_URL not set (needs a live Laminus + OrcaSlicer)")
 
 _CUBE_TRIS = [(0, 1, 3), (0, 3, 2), (4, 6, 7), (4, 7, 5), (0, 4, 5), (0, 5, 1),
@@ -55,7 +52,7 @@ class Part:
 def pack(parts, qtys, bed):
     items = json.dumps([{"file": p.name, "quantity": q} for p, q in zip(parts, qtys)])
     r = httpx.post(
-        f"{API}/pack",
+        f"{BASE}/api/v1/pack",
         files=[("files", (p.name, p.stl, "application/octet-stream")) for p in parts],
         data={"bed_x": bed[0], "bed_y": bed[1], "bed_z": bed[2], "items": items},
         timeout=300,
@@ -201,7 +198,7 @@ def test_tall_part_not_tilted():
 
 
 def _arrange(content: bytes, **data) -> bytes:
-    r = httpx.post(f"{API}/arrange", files={"file": ("in.3mf", content, "application/octet-stream")},
+    r = httpx.post(f"{BASE}/api/v1/arrange", files={"file": ("in.3mf", content, "application/octet-stream")},
                    data=data, timeout=300)
     assert r.status_code == 200, r.text
     return r.content
@@ -248,14 +245,14 @@ def test_arrange_does_not_tilt_by_default():
 
 def test_machine_uuid_alone_uses_machine_bed():
     """machine_uuid with no process/filament == geometry mode on that machine's bed."""
-    r = httpx.get(f"{API}/profiles", params={"type": "machine", "q": "Bambu Lab X1 Carbon 0.4 nozzle"})
+    r = httpx.get(f"{BASE}/api/v1/profiles", params={"type": "machine", "q": "Bambu Lab X1 Carbon 0.4 nozzle"})
     machine = next((m for m in r.json()["data"] if m["name"] == "Bambu Lab X1 Carbon 0.4 nozzle"), None)
     if machine is None or not machine.get("bed_size_x"):
         pytest.skip("reference machine not in this catalog")
     bed = (machine["bed_size_x"], machine["bed_size_y"], 1000)
     parts, qtys = [A, B], [6, 4]
     resp = httpx.post(
-        f"{API}/pack",
+        f"{BASE}/api/v1/pack",
         files=[("files", (p.name, p.stl, "application/octet-stream")) for p in parts],
         data={"machine_uuid": machine["uuid"],
               "items": json.dumps([{"file": p.name, "quantity": q} for p, q in zip(parts, qtys)])},

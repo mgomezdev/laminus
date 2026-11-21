@@ -14,10 +14,7 @@ import xml.etree.ElementTree as ET
 import pytest
 import httpx
 
-from tests.api_target import API_PREFIX, API_VERSION
-
 BASE = os.environ.get("LAMINUS_URL", "").rstrip("/")
-API = BASE + API_PREFIX
 pytestmark = pytest.mark.skipif(not BASE, reason="LAMINUS_URL not set (needs a live Laminus + OrcaSlicer)")
 
 _CUBE_TRIS = [(0, 1, 3), (0, 3, 2), (4, 6, 7), (4, 7, 5), (0, 4, 5), (0, 5, 1),
@@ -39,7 +36,7 @@ def cube_stl(size: float) -> bytes:
     return buf.getvalue()
 
 
-def pack(stls, qty=None, bed=(100, 100, 100), timeout=150, path=f"{API}/pack", items=None):
+def pack(stls, qty=None, bed=(100, 100, 100), timeout=150, path=f"{BASE}/api/v1/pack", items=None):
     """stls: list of (filename, bytes); qty: copy counts aligned with stls (sent as `items`).
 
     Pass `items` (raw str) to send an arbitrary manifest. Returns the httpx.Response.
@@ -91,12 +88,11 @@ def analyse(content: bytes):
 
 @pytest.fixture(scope="module", autouse=True)
 def _live():
-    response = httpx.get(f"{API}/health", timeout=5).raise_for_status()
-    assert response.headers["API-Version"] == API_VERSION
+    response = httpx.get(f"{BASE}/api/v1/health", timeout=5).raise_for_status()
+    assert response.headers["API-Version"] == "v1"
     health = response.json()
     assert health["orcaslicer_installed"]
-    expected_release = {"v1": "2.4.2", "v2": "2.5."}[API_VERSION]
-    assert str(health["orca_version"]).startswith(expected_release)
+    assert str(health["orca_version"]).startswith("2.5.")
 
 
 A, B = ("a.stl", cube_stl(40)), ("b.stl", cube_stl(20))
@@ -179,7 +175,7 @@ BAD = {
 
 
 @pytest.mark.parametrize("items", BAD.values(), ids=BAD.keys())
-@pytest.mark.parametrize("path", [f"{API}/pack", f"{API}/pack"])
+@pytest.mark.parametrize("path", [f"{BASE}/api/v1/pack", f"{BASE}/api/v1/pack"])
 def test_bad_items_rejected_422(items, path):
     raw = items if isinstance(items, str) else json.dumps(items)
     r = pack([A, B], items=raw, path=path)
@@ -193,7 +189,7 @@ def test_duplicate_upload_filenames_rejected_when_items_given():
 
 def test_v1_error_details_point_at_each_problem():
     r = pack([A, B], items=json.dumps([_it("a.stl", 0), _it("zzz.stl", 2), _it("b.stl", 1.5)]),
-             path=f"{API}/pack")
+             path=f"{BASE}/api/v1/pack")
     assert r.status_code == 422
     err = r.json()["error"]
     assert err["code"] == "validation_error"
@@ -205,7 +201,7 @@ def test_v1_error_details_point_at_each_problem():
 
 
 def test_v1_pack_with_items_works():
-    r = pack([A, B], [2, 1], path=f"{API}/pack")
+    r = pack([A, B], [2, 1], path=f"{BASE}/api/v1/pack")
     assert r.status_code == 200, r.text
     assert analyse(r.content)[0] == {40: 2, 20: 1}
 
@@ -222,6 +218,6 @@ def test_too_many_unique_files_still_422():
 
 
 def test_rejection_does_not_leak_work_dirs():
-    before = httpx.get(f"{API}/health", timeout=5).json().get("active_jobs")
+    before = httpx.get(f"{BASE}/api/v1/health", timeout=5).json().get("active_jobs")
     pack([A, B], [0,1])
-    assert httpx.get(f"{API}/health", timeout=5).json().get("active_jobs") == before
+    assert httpx.get(f"{BASE}/api/v1/health", timeout=5).json().get("active_jobs") == before

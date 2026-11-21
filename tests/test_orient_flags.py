@@ -1,6 +1,5 @@
 """--orient tilts parts about X/Y (changes layer-line direction): pack never passes it
 as 1, and /api/v1/arrange only passes it when orient=true is requested."""
-from tests.api_target import API_PREFIX
 import io
 import struct
 import zipfile
@@ -53,7 +52,7 @@ def _orient_value(args):
     return args[args.index("--orient") + 1] if "--orient" in args else None
 
 
-@pytest.mark.parametrize("path", [API_PREFIX + "/pack", API_PREFIX + "/pack"])
+@pytest.mark.parametrize("path", ["/api/v1/pack", "/api/v1/pack"])
 def test_pack_never_orients(path):
     args = _run(path, files=[("files", ("a.stl", _stl(), "application/octet-stream"))],
                 data={"bed_x": "200", "bed_y": "200", "bed_z": "200"})
@@ -62,7 +61,7 @@ def test_pack_never_orients(path):
 
 @pytest.mark.parametrize("data,expected", [({}, None), ({"orient": "false"}, None), ({"orient": "true"}, "1")])
 def test_arrange_orient_is_opt_in(data, expected):
-    args = _run(API_PREFIX + "/arrange", files={"file": ("m.3mf", _3mf(), "application/octet-stream")}, data=data)
+    args = _run("/api/v1/arrange", files={"file": ("m.3mf", _3mf(), "application/octet-stream")}, data=data)
     assert _orient_value(args) == expected
 
 
@@ -84,6 +83,6 @@ def test_arrange_feeds_orca_a_version_stripped_copy():
         return proc
 
     with patch("asyncio.create_subprocess_exec", new=_fake):
-        resp = TestClient(app).post(API_PREFIX + "/arrange", files={"file": ("m.3mf", buf.getvalue(), "application/octet-stream")})
+        resp = TestClient(app).post("/api/v1/arrange", files={"file": ("m.3mf", buf.getvalue(), "application/octet-stream")})
     assert resp.status_code == 200
     assert "OrcaSlicer" not in seen["in"]

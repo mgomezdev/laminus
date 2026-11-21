@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import re
 import uuid
 import zipfile
@@ -154,20 +153,13 @@ def _check_export_3mf(export_3mf: Optional[str]) -> None:
         raise HTTPException(422, "export_3mf must end with .3mf")
 
 
-API_VERSION = os.environ.get("LAMINUS_API_VERSION", "v1")
-if API_VERSION not in {"v1", "v2"}:
-    raise ValueError(f"Unsupported LAMINUS_API_VERSION: {API_VERSION}")
-API_PREFIX = f"/api/{API_VERSION}"
-ORCA_VERSION = {"v1": "2.4.2", "v2": "2.5.1"}[API_VERSION]
-
-
-@app.get(API_PREFIX + "/health")
+@app.get("/api/v1/health")
 async def health():
     return {
         "status": "healthy",
         "orcaslicer_installed": True,
-        "orcaslicer_version": f"mock-{ORCA_VERSION}",
-        "orca_version": ORCA_VERSION,
+        "orcaslicer_version": "mock-2.5.1",
+        "orca_version": "2.5.1",
         "config_mounted": True,
         "system_profiles_available": True,
         "catalog_loaded": True,
@@ -180,17 +172,17 @@ async def health():
 
 
 
-@app.post(API_PREFIX + "/profiles/merged-config")
+@app.post("/api/v1/profiles/merged-config")
 async def merged_config(body: dict):
     return JSONResponse(_MERGED_CONFIG)
 
 
-@app.post(API_PREFIX + "/profiles/rescan")
+@app.post("/api/v1/profiles/rescan")
 async def rescan_profiles():
-    return {"status": "started", "message": f"Catalog rescan started. Poll {API_PREFIX}/health until catalog_building is false."}
+    return {"status": "started", "message": "Catalog rescan started. Poll /api/v1/health until catalog_building is false."}
 
 
-@app.get(API_PREFIX + "/profiles/broken")
+@app.get("/api/v1/profiles/broken")
 async def get_broken_profiles():
     return {"count": 0, "broken": []}
 
@@ -243,7 +235,7 @@ def _match(body: dict) -> Optional[str]:
     return "exact_model" if _norm(_MACHINE["model"]) in keys else "vendor_only"
 
 
-@app.post(API_PREFIX + "/profiles/machines/suggest")
+@app.post("/api/v1/profiles/machines/suggest")
 async def suggest_machines(body: dict):
     reason = _match(body)
     cands = [] if reason is None else [
@@ -252,13 +244,13 @@ async def suggest_machines(body: dict):
     return _neutral({"candidates": cands})
 
 
-@app.post(API_PREFIX + "/profiles/models/variants")
+@app.post("/api/v1/profiles/models/variants")
 async def model_variants(body: dict):
     variants = [{**_machine_json(), "is_default_guess": True}] if _match(body) == "exact_model" else []
     return _neutral({"variants": variants})
 
 
-@app.get(API_PREFIX + "/profiles/machines/{machine_ref}/presets")
+@app.get("/api/v1/profiles/machines/{machine_ref}/presets")
 async def machine_presets(machine_ref: str, kind: Optional[str] = None):
     if kind not in (None, "process", "filament"):
         return _neutral({"error": "invalid_kind"}, 422)
@@ -273,7 +265,7 @@ async def machine_presets(machine_ref: str, kind: Optional[str] = None):
     return _neutral({"machine_ref": machine_ref, "presets": presets})
 
 
-@app.get(API_PREFIX + "/profiles/machines/{machine_ref}/supports")
+@app.get("/api/v1/profiles/machines/{machine_ref}/supports")
 async def machine_supports(machine_ref: str, bed_x: Optional[float] = None, bed_y: Optional[float] = None):
     reason = None
     if machine_ref != MACHINE_REF:
@@ -287,7 +279,7 @@ async def machine_supports(machine_ref: str, bed_x: Optional[float] = None, bed_
 
 
 
-@app.post(API_PREFIX + "/slice/prepared")
+@app.post("/api/v1/slice/prepared")
 async def slice_prepared(
     file: UploadFile = File(...),
     plate: int = Form(...),
@@ -304,17 +296,17 @@ async def slice_prepared(
 
 
 
-@app.post(API_PREFIX + "/pack")
+@app.post("/api/v1/pack")
 async def pack_stls(request: Request):
     return Response(content=_MOCK_3MF, media_type="application/octet-stream")
 
 
-@app.post(API_PREFIX + "/arrange")
+@app.post("/api/v1/arrange")
 async def arrange(request: Request):
     return Response(content=_MOCK_3MF, media_type="application/octet-stream")
 
 
-@app.get(API_PREFIX + "/test/known-profile", include_in_schema=False)
+@app.get("/api/v1/test/known-profile", include_in_schema=False)
 async def test_known_profile(machine_name: str | None = None):
     """Stable profile UUIDs — use in tests to seed printer/job fixtures without
     hardcoding UUIDs that may drift. Hidden from the public OpenAPI schema.
@@ -344,6 +336,7 @@ from fastapi.exception_handlers import http_exception_handler, request_validatio
 from fastapi.exceptions import RequestValidationError  # noqa: E402
 from starlette.exceptions import HTTPException as StarletteHTTPException  # noqa: E402
 
+V1 = "/api/v1"
 _MAX_PAGE = 200
 _v1_jobs: dict[str, dict] = {}      # job_id -> {"filename", "created_at"}
 _v1_downloaded: set[str] = set()
@@ -356,7 +349,7 @@ _DEFAULT_CODES = {
 
 
 def _is_v1(request: Request) -> bool:
-    return request.url.path == API_PREFIX or request.url.path.startswith(API_PREFIX + "/")
+    return request.url.path == V1 or request.url.path.startswith(V1 + "/")
 
 
 def _rid(request: Request) -> str:
@@ -388,7 +381,7 @@ async def _v1_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Request-ID"] = request.state.request_id
     if _is_v1(request):
-        response.headers["API-Version"] = API_VERSION
+        response.headers["API-Version"] = "v1"
     return response
 
 
@@ -430,13 +423,13 @@ def _paginate(records: list[dict], key_fn, limit: int, cursor: Optional[str], re
     return page, {"limit": limit, "next_cursor": nxt}
 
 
-@app.get(API_PREFIX, tags=[API_VERSION], summary="API capability discovery")
+@app.get(V1, tags=["v1"], summary="API capability discovery")
 async def v1_capabilities():
     return {
-        "api_version": API_VERSION,
-        "supported_versions": [API_VERSION],
+        "api_version": "v1",
+        "supported_versions": ["v1"],
         "legacy": {"prefix": "/api", "deprecated": True, "retired": True, "sunset": "2026-10-24", "policy": "docs/api-versioning.md"},
-        "engine": {"name": "orcaslicer", "version": ORCA_VERSION, "binary_version": f"mock-{ORCA_VERSION}"},
+        "engine": {"name": "orcaslicer", "version": "2.5.1", "binary_version": "mock-2.5.1"},
         "ready": {"catalog": True},
         "features": ["jobs", "jobs.idempotency", "pagination.cursor", "profiles", "pack", "arrange", "health",
                      "slice.prepared", "profiles.rescan", "profiles.broken", "profiles.merged_config",
@@ -446,8 +439,8 @@ async def v1_capabilities():
 
 
 def _job_links(job_id: str) -> dict:
-    return {"self": f"{API_PREFIX}/jobs/{job_id}", "events": f"{API_PREFIX}/jobs/{job_id}/events",
-            "artifact": f"{API_PREFIX}/jobs/{job_id}/artifact"}
+    return {"self": f"{V1}/jobs/{job_id}", "events": f"{V1}/jobs/{job_id}/events",
+            "artifact": f"{V1}/jobs/{job_id}/artifact"}
 
 
 def _job_view(job_id: str) -> Optional[dict]:
@@ -463,7 +456,7 @@ def _job_view(job_id: str) -> Optional[dict]:
     }
 
 
-@app.post(f"{API_PREFIX}/jobs", tags=["v1 jobs"], status_code=202, summary="Create a slice job")
+@app.post(f"{V1}/jobs", tags=["v1 jobs"], status_code=202, summary="Create a slice job")
 async def v1_create_job(
     request: Request,
     file: UploadFile = File(...),
@@ -506,7 +499,7 @@ async def v1_create_job(
     return JSONResponse(view, status_code=202, headers={"Location": view["links"]["self"]})
 
 
-@app.get(f"{API_PREFIX}/jobs", tags=["v1 jobs"], summary="List jobs (newest first, cursor-paginated)")
+@app.get(f"{V1}/jobs", tags=["v1 jobs"], summary="List jobs (newest first, cursor-paginated)")
 async def v1_list_jobs(limit: int = Query(50, ge=1, le=_MAX_PAGE), cursor: Optional[str] = None,
                        status: Optional[str] = None):
     records = [{"id": j, **r} for j, r in _v1_jobs.items() if not status or status == "completed"]
@@ -514,7 +507,7 @@ async def v1_list_jobs(limit: int = Query(50, ge=1, le=_MAX_PAGE), cursor: Optio
     return {"data": [_job_view(r["id"]) for r in page], "page": meta}
 
 
-@app.get(f"{API_PREFIX}/jobs/{{job_id}}", tags=["v1 jobs"], summary="Get a job")
+@app.get(f"{V1}/jobs/{{job_id}}", tags=["v1 jobs"], summary="Get a job")
 async def v1_get_job(job_id: str):
     view = _job_view(job_id)
     if view is None:
@@ -522,7 +515,7 @@ async def v1_get_job(job_id: str):
     return view
 
 
-@app.get(f"{API_PREFIX}/jobs/{{job_id}}/artifact", tags=["v1 jobs"], summary="Download the sliced artifact")
+@app.get(f"{V1}/jobs/{{job_id}}/artifact", tags=["v1 jobs"], summary="Download the sliced artifact")
 async def v1_job_artifact(job_id: str):
     if job_id not in _v1_jobs:
         raise _err(404, "job_not_found", "Job not found.")
@@ -532,7 +525,7 @@ async def v1_job_artifact(job_id: str):
     return Response(content=_MOCK_GCODE, media_type="application/octet-stream")
 
 
-@app.get(f"{API_PREFIX}/profiles", tags=["v1 profiles"], summary="List profiles (cursor-paginated)")
+@app.get(f"{V1}/profiles", tags=["v1 profiles"], summary="List profiles (cursor-paginated)")
 async def v1_list_profiles(type: Optional[str] = Query(None, pattern="^(machine|process|filament)$"),
                            manufacturer: Optional[str] = None, model: Optional[str] = None,
                            nozzle: Optional[str] = None, q: Optional[str] = None,
@@ -548,7 +541,7 @@ async def v1_list_profiles(type: Optional[str] = Query(None, pattern="^(machine|
     return {"data": page, "page": meta}
 
 
-@app.get(f"{API_PREFIX}/profiles/{{profile_uuid}}", tags=["v1 profiles"], summary="Get one profile")
+@app.get(f"{V1}/profiles/{{profile_uuid}}", tags=["v1 profiles"], summary="Get one profile")
 async def v1_get_profile(profile_uuid: str):
     entry = _CATALOG.get(profile_uuid)
     if entry is None:

@@ -30,15 +30,9 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python scripts/export_openapi.py
       - name: Fail if spec is stale
-        run: git diff --exit-code openapi.json openapi-v1.json openapi-v2.json
+        run: git diff --exit-code openapi.json openapi-v1.json
 
   test:
-    strategy:
-      fail-fast: false
-      matrix:
-        api: [v1, v2]
-    env:
-      LAMINUS_API_VERSION: ${{ matrix.api }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -94,11 +88,7 @@ jobs:
           LAMINUS_TEST_ORCA_DESKTOP: "1"
         run: pytest -v tests/test_orca_desktop_live.py
 
-  api-bridge:
-    strategy:
-      fail-fast: false
-      matrix:
-        api: [v1, v2]
+  api-live:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -108,13 +98,12 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements.txt pytest pytest-asyncio httpx
       - run: docker compose up --build -d laminus
-      - name: Run the same API requests with Orca 2.4.2 and 2.5.1
+      - name: Verify the v1 deployment on OrcaSlicer 2.5.1
         env:
-          LAMINUS_BRIDGE_URL: http://localhost:5000
-        run: pytest -v tests/test_api_bridge_live.py
+          LAMINUS_URL: http://localhost:5000
+        run: pytest -v tests/test_api_live.py
       - name: Run the full compatibility suite against the real engine
         env:
-          LAMINUS_API_VERSION: ${{ matrix.api }}
           LAMINUS_URL: http://localhost:5000
         run: |
           pytest -v -ra tests/test_mock_contract.py tests/test_export_3mf_live.py \
@@ -128,12 +117,6 @@ jobs:
   # Browser e2e for the dashboard: the real app (uvicorn) against mock/orca_cli.py,
   # driven through Chromium. e2e/conftest.py shims orcaslicer + xvfb-run itself.
   e2e-ui:
-    strategy:
-      fail-fast: false
-      matrix:
-        api: [v1, v2]
-    env:
-      LAMINUS_API_VERSION: ${{ matrix.api }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -205,7 +188,7 @@ jobs:
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
   publish:
-    needs: [spec, test, orca-desktop, api-bridge, e2e-ui, mock-image, e2e-core]
+    needs: [spec, test, orca-desktop, api-live, e2e-ui, mock-image, e2e-core]
     # develop pushes run the checks but don't publish images
     if: github.event_name == 'push' && github.ref != 'refs/heads/develop'
     runs-on: ubuntu-latest

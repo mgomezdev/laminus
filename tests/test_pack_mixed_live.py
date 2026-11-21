@@ -12,7 +12,7 @@ import time
 import httpx
 import pytest
 
-from tests.test_export_3mf_live import API, BASE, PRINTERS
+from tests.test_export_3mf_live import BASE, PRINTERS
 from tests.test_pack_mixed import _check
 from tests.test_pack_next import _box_stl
 
@@ -23,7 +23,7 @@ def _orca_3mf():
     """A real OrcaSlicer project (the synthetic test 3MFs do not load in Orca): /pack of two
     70 x 60 plates and a 30 mm cube, all on plate 1."""
     stls = [("p1.stl", (70, 60, 10)), ("p2.stl", (70, 60, 10)), ("cube.stl", (30, 30, 30))]
-    r = httpx.post(f"{API}/pack", timeout=300,
+    r = httpx.post(f"{BASE}/api/v1/pack", timeout=300,
                    files=[("files", (n, _box_stl(*d), "application/octet-stream")) for n, d in stls],
                    data={"bed_x": "256", "bed_y": "256", "bed_z": "250"})
     assert r.status_code == 200, r.text
@@ -52,7 +52,7 @@ class _R:
 
 
 def _pack(tmp_path):
-    r = httpx.post(f"{API}/pack/mixed", files=_files(tmp_path), timeout=600,
+    r = httpx.post(f"{BASE}/api/v1/pack/mixed", files=_files(tmp_path), timeout=600,
                    data={"selection": json.dumps(SEL), "bed_x": "256", "bed_y": "256", "bed_z": "250"})
     m = _check(_R(r), tmp_path, 256, REQUESTED)
     assert "floating" not in r.headers["X-Merge-Warnings"] and "below" not in r.headers["X-Merge-Warnings"]
@@ -68,7 +68,7 @@ def test_acceptance_every_plate_slices(tmp_path):
     machine, process, filament, _ = PRINTERS["bambu_p1s"]          # 256 x 256 bed
     ids = []
     for pl in m["plates"]:
-        j = httpx.post(f"{API}/jobs", timeout=60,
+        j = httpx.post(f"{BASE}/api/v1/jobs", timeout=60,
                        files={"file": ("mixed.3mf", r.content, "application/octet-stream")},
                        data={"machine_uuid": machine, "process_uuid": process,
                              "filament_uuids": json.dumps([filament]), "plate": str(pl["plate"])})
@@ -77,7 +77,7 @@ def test_acceptance_every_plate_slices(tmp_path):
     deadline = time.monotonic() + 600
     for job_id in ids:
         while True:
-            job = httpx.get(f"{API}/jobs/{job_id}", timeout=30).json()
+            job = httpx.get(f"{BASE}/api/v1/jobs/{job_id}", timeout=30).json()
             if job["status"] in ("completed", "failed") or time.monotonic() > deadline:
                 break
             time.sleep(2)
@@ -85,7 +85,7 @@ def test_acceptance_every_plate_slices(tmp_path):
 
 
 def test_part_too_large_live(tmp_path):
-    r = httpx.post(f"{API}/pack/mixed", files=_files(tmp_path), timeout=600,
+    r = httpx.post(f"{BASE}/api/v1/pack/mixed", files=_files(tmp_path), timeout=600,
                    data={"selection": json.dumps(SEL), "bed_x": "45", "bed_y": "45", "bed_z": "250"})
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "part_too_large"
