@@ -22,6 +22,8 @@ def test_generated_project_selects_a_bed_supported_by_all_filaments():
     plain = {**_filament(), "textured_plate_temp": ["55"], "hot_plate_temp": ["55"]}
     smooth_only = {**_filament(), "textured_plate_temp": ["0"], "hot_plate_temp": ["55"]}
     assert build_project_settings(machine, _process(), [plain])["curr_bed_type"] == "Textured PEI Plate"
+    numeric = {**machine, "default_bed_type": "4"}
+    assert build_project_settings(numeric, _process(), [plain])["curr_bed_type"] == "Textured PEI Plate"
     assert build_project_settings(machine, _process(), [plain, smooth_only])["curr_bed_type"] == "High Temp Plate"
     explicit = {**_process(), "curr_bed_type": "Engineering Plate"}
     assert build_project_settings(machine, explicit, [smooth_only])["curr_bed_type"] == "Engineering Plate"

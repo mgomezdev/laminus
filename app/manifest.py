@@ -112,14 +112,7 @@ def pack_origin(path: str, per_input: list[dict]) -> Origin:
     records its input position as the part's ``source_object_id`` (the same mapping the
     min-Z restore relies on)."""
     with _subset.open_zip(path) as z:
-        ms = _subset._parse(z.read(_subset.MODEL_SETTINGS))
-    source_of: dict[str, int] = {}
-    for o in ms.findall("object"):
-        for part in o.findall("part"):
-            v = _subset._meta(part, "source_object_id")
-            if v is not None and v.isdigit():
-                source_of[o.get("id")] = int(v)
-                break
+        source_of = _subset.pack_source_indices(z.read(_subset.MODEL_SETTINGS))
 
     def _o(oid: str, k: int) -> Optional[dict]:
         src = source_of.get(oid)

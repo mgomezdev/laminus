@@ -195,6 +195,18 @@ def _meta(el: ET.Element, key: str) -> Optional[str]:
     return None
 
 
+def pack_source_indices(settings: bytes) -> dict[str, int]:
+    """Map each packed object to the position of its input copy."""
+    source_of = {}
+    for obj in _parse(settings).findall("object"):
+        for part in obj.findall("part"):
+            position = _meta(part, "source_object_id")
+            if position is not None and position.isdigit():
+                source_of[obj.get("id")] = int(position)
+                break
+    return source_of
+
+
 def list_objects(src: str) -> list[dict]:
     """Objects in the 3MF: id, name, extruder, part summary, current instance count."""
     with open_zip(src) as z:

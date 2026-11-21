@@ -23,6 +23,9 @@ _BED_TEMPERATURES = {
     "Textured Cool Plate": "textured_cool_plate_temp",
     "Supertack Plate": "supertack_plate_temp",
 }
+# Orca also stores default_bed_type as a numeric BedType. Zero is "Default
+# Plate"; the concrete enum values follow in this same order.
+_BED_TYPE_NUMBERS = {str(index): plate for index, plate in enumerate(_BED_TEMPERATURES, start=1)}
 
 
 def _select_bed_type(config: dict, filament_count: int) -> None:
@@ -41,7 +44,8 @@ def _select_bed_type(config: dict, filament_count: int) -> None:
             return False
 
     supported = [plate for plate, key in _BED_TEMPERATURES.items() if supports_plate(key)]
-    default = config.get("default_bed_type")
+    raw_default = config.get("default_bed_type")
+    default = _BED_TYPE_NUMBERS.get(str(raw_default), raw_default)
     if default in supported:
         config["curr_bed_type"] = default
     elif supported:
