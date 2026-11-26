@@ -108,7 +108,7 @@ jobs:
         run: |
           pytest -v -ra tests/test_mock_contract.py tests/test_export_3mf_live.py \
             tests/test_pack_mixed_live.py tests/test_pack_placement_live.py \
-            tests/test_pack_quantities_live.py
+            tests/test_pack_quantities_live.py tests/test_object_labels_live.py
       - if: failure()
         run: docker compose logs --no-color --tail=120 laminus
       - if: always()
