@@ -70,6 +70,43 @@ for `raft_first_layer_expansion` and `tree_support_wall_count`, which Orca rejec
 (`-18`), is replaced with Orca's defaults (`2` and `0`), and each rewrite is logged in
 the job log.
 
+### Object labels and manifest (feature `slice.object_manifest`)
+
+Every slice (`POST /api/v1/jobs`, `/slice/prepared`) emits per-object labels, so a
+consumer can draw the plate and skip objects. **Deliberate override:** Laminus forces
+`exclude_object = 1` and `gcode_label_objects = 1` into the project settings of every
+slice, after the preset and `extra_config` are applied; a preset that turns label
+objects off is ignored. (Pinned Orca 2.5.1: `exclude_object` is what writes
+`EXCLUDE_OBJECT_DEFINE NAME= CENTER= POLYGON=` for Klipper flavor, `M486 A<name>` for
+Marlin flavor, and `label_object_enabled` in the `.gcode.3mf`; `gcode_label_objects`
+adds the `; printing object` comments.)
+
+Labels are opaque, slicer-owned strings, unique within the job. Orca builds them as
+`<object name>_id_<index>_copy_<n>`; the index makes two copies of one model distinct.
+Orca's own `Metadata/plate_N.json` holds the raw object name instead (copies collide),
+so Laminus rewrites those names to the labels. If the output has no labels or they are not unique, `objects` is `null` and the job
+log carries a `WARNING: no object manifest`. Callers must not parse or interpret a label.
+
+`GET /api/v1/jobs/{id}` on a completed job adds `objects` (`null` otherwise; absent from
+list pages; kept after the artifact is downloaded):
+
+```json
+{"version": 1,
+ "plates": [{"plate": 2,
+   "bed": {"origin": [0, 0], "size": [220, 220]},
+   "objects": [{"label": "bracket_id_0_copy_0",
+                "polygon": [[70,100],[90,100],[90,120],[70,120],[70,100]],
+                "bbox": [70, 100, 90, 120]}]}]}
+```
+
+- `plate`: the plate number requested (a job slices exactly one plate).
+- `bed`: `printable_area` bounds in bed mm; all coordinates are bed mm, the same frame as
+  the G-code. `bbox` = `[x0, y0, x1, y1]` of `polygon`.
+- `polygon`: Orca's footprint from `EXCLUDE_OBJECT_DEFINE` (Klipper); for other flavors
+  the bounding rectangle of the object's extrusion moves.
+- Same labels in the artifact: `.gcode` (definitions above), `.gcode.3mf`
+  (`Metadata/plate_1.json` `bbox_objects[].name`, `slice_info.config` objects).
+
 ## Profiles
 
 - `GET /api/v1/profiles`: flat, typed, cursor-paginated entries, optionally filtered
