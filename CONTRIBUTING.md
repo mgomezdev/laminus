@@ -107,7 +107,7 @@ That is what CI runs. `tests/test_mock_contract.py` runs every contract test aga
 live Laminus when `LAMINUS_URL` is set (CI's `api-live` job does this against real OrcaSlicer). The `*_live.py` suites
 likewise need a running Laminus with real OrcaSlicer (`LAMINUS_URL=...`) and skip otherwise.
 
-In CI, the mock binary (`mock/orca_cli.py`) is symlinked to `/usr/local/bin/orcaslicer` and `SYSTEM_PROFILES_DIR` is set to `tests/fixtures/profiles/` so all tests including real-client contract tests run without the full AppImage.
+In CI, the mock binary (`mock/orca_cli.py`) is symlinked to `/usr/local/bin/orcaslicer` and `SYSTEM_PROFILES_DIR` is set to `tests/fixtures/profiles/` so everything except the live (`LAMINUS_URL`) suites runs without the full AppImage.
 
 ### Dashboard e2e
 
