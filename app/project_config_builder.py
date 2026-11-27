@@ -15,6 +15,43 @@ _STRIP_KEYS = {
     "name", "type", "setting_id", "base_id", "description", "renamed_from",
 }
 
+_BED_TEMPERATURES = {
+    "Cool Plate": "cool_plate_temp",
+    "Engineering Plate": "eng_plate_temp",
+    "High Temp Plate": "hot_plate_temp",
+    "Textured PEI Plate": "textured_plate_temp",
+    "Textured Cool Plate": "textured_cool_plate_temp",
+    "Supertack Plate": "supertack_plate_temp",
+}
+# Orca also stores default_bed_type as a numeric BedType. Zero is "Default
+# Plate"; the concrete enum values follow in this same order.
+_BED_TYPE_NUMBERS = {str(index): plate for index, plate in enumerate(_BED_TEMPERATURES, start=1)}
+
+
+def _select_bed_type(config: dict, filament_count: int) -> None:
+    """Pick a supported plate for a generated project with no explicit selection."""
+    supports_multiple = str(config.get("support_multi_bed_types", "0")).lower() in {"1", "true"}
+    if config.get("curr_bed_type") or not supports_multiple:
+        return
+
+    def supports_plate(key):
+        temps = config.get(key)
+        if not isinstance(temps, list) or len(temps) != filament_count:
+            return False
+        try:
+            return all(float(value) > 0 for value in temps)
+        except (ValueError, TypeError):
+            return False
+
+    supported = [plate for plate, key in _BED_TEMPERATURES.items() if supports_plate(key)]
+    raw_default = config.get("default_bed_type")
+    default = _BED_TYPE_NUMBERS.get(str(raw_default), raw_default)
+    if default in supported:
+        config["curr_bed_type"] = default
+    elif supported:
+        config["curr_bed_type"] = supported[0]
+
+
 def build_project_settings(machine: dict, process: dict, filaments: list[dict]) -> dict:
     """Merge flattened machine + process + filament presets into a project_settings dict."""
     if not filaments:
@@ -42,6 +79,7 @@ def build_project_settings(machine: dict, process: dict, filaments: list[dict]) 
         config[key] = values
 
     normalize_filament_ids(config, len(filaments))
+    _select_bed_type(config, len(filaments))
 
     config["from"] = "user"
     config.setdefault("version", process.get("version", machine.get("version", "1.0.0")))

@@ -17,7 +17,8 @@ import zipfile
 from typing import Optional
 from fastapi import UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, Response
-from app.project_config_builder import build_project_settings, embed_project_settings
+from app.project_config_builder import build_project_settings, embed_project_settings, replace_bambu_auto_sentinels
+from app import object_labels as _labels
 from app.plate_extract import (
     extract_plate as _extract_plate, retarget_plate as _retarget_plate,
     PlateExtractError as _PlateExtractError, PlateFitError as _PlateFitError,
@@ -116,7 +117,7 @@ async def run_orcaslicer_task(
     async def _attempt(slice_input: str, label: str) -> bool:
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-            "orcaslicer", "--slice", str(slice_plate),
+            main.ORCA_BINARY, "--slice", str(slice_plate),
             "--outputdir", output_dir, "--arrange", arrange,
         ]
         if export_3mf:
@@ -217,6 +218,16 @@ async def run_orcaslicer_task(
         input_file_path = single_path
         slice_plate = 1
 
+    # BIZ-407: deliberate override - every slice emits object labels (exclude_object +
+    # gcode_label_objects forced on, whatever the preset or extra_config says). See
+    # app/object_labels.py.
+    try:
+        await asyncio.to_thread(_labels.force_settings, input_file_path)
+    except Exception as exc:
+        main.logger.exception("Job %s: could not force object labels", job_id)
+        _fail(f"Could not enable object labels: {exc}", "Object label setup failed")
+        return
+
     success = await _attempt(input_file_path, "Attempt 1")
 
     used_geometry_only = False
@@ -257,12 +268,26 @@ async def run_orcaslicer_task(
             gcodes = sorted(glob.glob(os.path.join(output_dir, "*.gcode")))
             found = gcodes[0] if gcodes else None
 
+        object_manifest = None
+        if found:
+            try:
+                project_cfg = await asyncio.to_thread(_labels.read_threemf_settings, input_file_path)
+                object_manifest = await asyncio.to_thread(
+                    _labels.manifest_for_output, found, plate_id, slice_plate, project_cfg)
+            except Exception as exc:
+                # Real Orca labels every slice (forced above), so this means the engine
+                # misbehaved. Keep the artifact usable; `objects` stays null and the live
+                # tests (tests/test_object_labels_live.py) are what catch a regression.
+                main.logger.error("Job %s: object manifest unavailable: %s", job_id, exc)
+                job_logger.log(f"WARNING: no object manifest: {exc}")
+
         if found:
             job["status"] = "completed"
             job["sliced_file"] = found
+            job["objects"] = object_manifest
             main._save_jobs()
             main._history_upsert(job_id, status="completed", sliced_file=os.path.basename(found),
-                             error=None, updated_at=time.time())
+                             objects=object_manifest, error=None, updated_at=time.time())
             job_logger.log(f"Output: {os.path.basename(found)}")
             job_logger.log("__COMPLETED__")
         else:
@@ -400,6 +425,9 @@ async def start_slice(
             project_cfg.update(overrides)
         except (ValueError, TypeError):
             raise HTTPException(status_code=422, detail="extra_config must be a JSON object.")
+        # A client may carry a Bambu-made 3MF's own setting changes in extra_config (Themis does): rewrite the
+        # Bambu "-1 = auto" values Orca rejects, as the 3MF path does for the file's own settings (BIZ-352).
+        replace_bambu_auto_sentinels(project_cfg)
     # STL: no plate layout to preserve, embed now. 3MF: the slice task extracts the plate with
     # the upload's own bed before embedding project_cfg (BIZ-355), so only validate it here.
     target_settings = None
@@ -602,7 +630,7 @@ async def slice_thumbnail(
 
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-            "orcaslicer", "--slice", str(plate), "--arrange", "0",
+            main.ORCA_BINARY, "--slice", str(plate), "--arrange", "0",
             "--export-3mf", out_3mf, in_file,
         ]
 

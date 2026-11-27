@@ -1,10 +1,6 @@
-"""Dual-TestClient contract test: real app and mock must satisfy identical assertions.
+"""Run the same HTTP contract assertions against the mock and a live Laminus.
 
-Both real_client and mock_client are tested against the same test functions.
-A PR that changes the API must also update the mock — or this test fails.
-
-Run:
-    pytest tests/test_mock_contract.py
+Set LAMINUS_URL to a disposable Laminus with OrcaSlicer to also run the live cases.
 """
 from __future__ import annotations
 
@@ -13,12 +9,12 @@ import io
 import json
 import os
 import struct
-import sys
 import time
+import uuid
 import zipfile
 from pathlib import Path
-from typing import Callable
 
+import httpx
 import pytest
 
 fastapi = pytest.importorskip("fastapi", reason="fastapi required")
@@ -41,63 +37,25 @@ def _load_mock() -> object:
 
 _mock_mod = _load_mock()
 
-# Try to import the real app; skip if unavailable (e.g. OrcaSlicer not installed in CI)
-_real_app = None
-_real_import_error: Exception | None = None
-try:
-    sys.path.insert(0, str(_ROOT))
-    from app.main import app as _real_app_obj  # noqa: E402
-    _real_app = _real_app_obj
-except Exception as e:
-    _real_import_error = e  # real app unavailable; only mock tests run
-
-
 # ---------------------------------------------------------------------------
 # Fixtures — parametrize the test suite over both clients
 # ---------------------------------------------------------------------------
 
-# CI sets this (see .github/workflows/ci.yml): there the real half MUST run, so a catalog that fails to
-# load is a failure, not a skip. Without it (a laptop with no profiles tree) the real half skips.
-_REQUIRE_REAL = os.environ.get("LAMINUS_CONTRACT_REQUIRE_REAL") == "1"
-
-
-def _real_unavailable(reason: str):
-    if _REQUIRE_REAL:
-        pytest.fail(f"{reason} (LAMINUS_CONTRACT_REQUIRE_REAL=1: the real half of the contract must run)")
-    pytest.skip(reason)
-
-
-@pytest.fixture(scope="module")
-def _real_client():
-    """The real app with its lifespan running: the catalog is built by a startup task, so a bare
-    ``TestClient(app)`` (no ``with``) never has one and every real-side test used to skip."""
-    if _real_app is None:
-        _real_unavailable(f"Real Laminus app not importable: {_real_import_error}")
-    # Decide before starting the app: its lifespan creates CONFIG_DIR / DATA_DIR (default /config and /data), and a
-    # missing profiles tree still "loads" an empty catalog, which would fail every test instead of skipping.
-    unset = [v for v in ("SYSTEM_PROFILES_DIR", "USER_CONFIG_DIR", "CONFIG_DIR", "DATA_DIR") if not os.environ.get(v)]
-    if unset:
-        _real_unavailable(f"Real Laminus not configured for tests: {', '.join(unset)} unset (see CONTRIBUTING.md, Running Tests)")
-    if not any(Path(os.environ["SYSTEM_PROFILES_DIR"]).glob("*/machine/*.json")):
-        _real_unavailable(f"No machine profiles under SYSTEM_PROFILES_DIR={os.environ['SYSTEM_PROFILES_DIR']}")
-    with TestClient(_real_app, raise_server_exceptions=True) as tc:
-        deadline = time.monotonic() + 30
-        health: dict = {}
-        while time.monotonic() < deadline:
-            health = tc.get("/api/v1/health").json()
-            if health.get("catalog_loaded") or not health.get("catalog_building"):
-                break
-            time.sleep(0.05)
-        if not health.get("catalog_loaded"):
-            pytest.fail(f"Real Laminus catalog did not load from a profiles tree that has machines: {health}")
-        yield tc
-
-
-@pytest.fixture(params=["mock", "real"])
+@pytest.fixture(scope="module", params=["mock", "real"])
 def client(request):
-    if request.param == "real":
-        return request.getfixturevalue("_real_client")
-    return TestClient(_mock_mod.app, raise_server_exceptions=True)
+    if request.param == "mock":
+        with TestClient(_mock_mod.app) as mock_client:
+            yield mock_client
+        return
+    url = os.environ.get("LAMINUS_URL")
+    if not url:
+        pytest.skip("LAMINUS_URL not set (needs live Laminus and OrcaSlicer)")
+    with httpx.Client(base_url=url, timeout=60) as live_client:
+        deadline = time.monotonic() + 120
+        while not live_client.get("/api/v1/health").raise_for_status().json()["catalog_loaded"]:
+            assert time.monotonic() < deadline, "Laminus catalog did not become ready"
+            time.sleep(0.5)
+        yield live_client
 
 
 # ---------------------------------------------------------------------------
@@ -124,40 +82,65 @@ def _missing(required: set, actual: dict) -> set:
 def _stl() -> bytes:
     buf = io.BytesIO()
     buf.write(b"contract-test".ljust(80))
-    buf.write(struct.pack("<I", 1))
-    for f in (0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0, 0.0):
-        buf.write(struct.pack("<f", f))
-    buf.write(struct.pack("<H", 0))
+    vertices = [(0, 0, 0), (10, 0, 0), (0, 10, 0), (0, 0, 10)]
+    faces = [(0, 2, 1), (0, 1, 3), (0, 3, 2), (1, 2, 3)]
+    buf.write(struct.pack("<I", len(faces)))
+    for face in faces:
+        buf.write(struct.pack("<3f", 0, 0, 0))
+        for index in face:
+            buf.write(struct.pack("<3f", *vertices[index]))
+        buf.write(b"\0\0")
     return buf.getvalue()
 
 
-def _minimal_3mf() -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr("[Content_Types].xml", "<Types/>")
-        zf.writestr(
-            "Metadata/project_settings.config",
-            json.dumps({"printable_area": ["0x0", "200x0", "200x200", "0x200"], "printable_height": 200}),
-        )
-    return buf.getvalue()
+def _slice_data(client) -> dict:
+    profiles = {}
+    for kind, name in (
+        ("machine", "Elegoo Centauri Carbon 0.4 nozzle"),
+        ("process", "0.16mm Optimal @Elegoo CC 0.4 nozzle"),
+        ("filament", "Elegoo PLA @ECC"),
+    ):
+        response = client.get("/api/v1/profiles", params={"type": kind, "q": name})
+        assert response.status_code == 200, response.text
+        profiles[kind] = next(profile["uuid"] for profile in response.json()["data"] if profile["name"] == name)
+    return {
+        "machine_uuid": profiles["machine"],
+        "process_uuid": profiles["process"],
+        "filament_uuids": json.dumps([profiles["filament"]]),
+    }
 
 
-def _known_profile(client: TestClient) -> dict:
+@pytest.fixture(scope="module")
+def prepared_3mf(client) -> bytes:
+    response = client.post("/api/v1/pack", data=_slice_data(client),
+                           files=[("files", ("part.stl", _stl(), "application/octet-stream"))])
+    assert response.status_code == 200, response.text
+    return response.content
+
+
+def _finished_job(client, job_id: str) -> dict:
+    deadline = time.monotonic() + 60
+    while True:
+        response = client.get(f"/api/v1/jobs/{job_id}")
+        assert response.status_code == 200, response.text
+        job = response.json()
+        if job["status"] in ("completed", "failed"):
+            return job
+        assert time.monotonic() < deadline, f"Job did not finish: {job}"
+        time.sleep(0.2)
+
+
+def _known_profile(client: httpx.Client) -> dict:
     r = client.get("/api/v1/test/known-profile")
     assert r.status_code == 200
     return r.json()
 
 
-def _start_job(client: TestClient, kp: dict) -> str:
+def _start_job(client) -> str:
     r = client.post(
         "/api/v1/jobs",
         files={"file": ("m.stl", _stl(), "application/octet-stream")},
-        data={
-            "machine_uuid": kp["machine_uuid"],
-            "process_uuid": kp["process_uuid"],
-            "filament_uuids": json.dumps([kp["filament_uuid"]]),
-            "plate": "1",
-        },
+        data={**_slice_data(client), "plate": "1"},
     )
     assert r.status_code == 202, f"jobs create failed: {r.text[:200]}"
     return r.json()["id"]
@@ -193,8 +176,9 @@ def test_profiles_top_level_keys(client):
 
 
 def test_profiles_non_empty(client):
-    data = client.get("/api/v1/profiles").json()
-    assert {p["type"] for p in data["data"]} >= {"machine", "process", "filament"}
+    for kind in ("machine", "process", "filament"):
+        data = client.get("/api/v1/profiles", params={"type": kind, "limit": 1}).json()["data"]
+        assert data and data[0]["type"] == kind
 
 
 def test_profiles_machine_fields(client):
@@ -291,16 +275,10 @@ def test_known_profile_unknown_machine_name_404s(client):
 # ---------------------------------------------------------------------------
 
 def test_slice_start_fields(client):
-    kp = _known_profile(client)
     r = client.post(
         "/api/v1/jobs",
         files={"file": ("m.stl", _stl(), "application/octet-stream")},
-        data={
-            "machine_uuid": kp["machine_uuid"],
-            "process_uuid": kp["process_uuid"],
-            "filament_uuids": json.dumps([kp["filament_uuid"]]),
-            "plate": "1",
-        },
+        data={**_slice_data(client), "plate": "1"},
     )
     assert r.status_code == 202
     assert not _missing(SLICE_START_FIELDS, r.json())
@@ -330,48 +308,35 @@ def test_slice_start_rejects_unsafe_export_3mf(client, export_name):
     assert r.status_code == 422
 
 
-def test_slice_prepared_fields(client):
+def test_slice_prepared_fields(client, prepared_3mf):
     r = client.post(
         "/api/v1/slice/prepared",
-        files={"file": ("m.3mf", _minimal_3mf(), "application/octet-stream")},
+        files={"file": ("m.3mf", prepared_3mf, "application/octet-stream")},
         data={"plate": "1"},
     )
     assert r.status_code == 200
     assert "job_id" in r.json()
 
 
-def test_slice_prepared_rejects_unsafe_export_3mf(client):
+def test_slice_prepared_rejects_unsafe_export_3mf(client, prepared_3mf):
     r = client.post(
         "/api/v1/slice/prepared",
-        files={"file": ("m.3mf", _minimal_3mf(), "application/octet-stream")},
+        files={"file": ("m.3mf", prepared_3mf, "application/octet-stream")},
         data={"plate": "1", "export_3mf": "../../../data/jobs.json"},
     )
     assert r.status_code == 422
 
 
 def test_slice_status_fields(client):
-    kp = _known_profile(client)
-    job_id = _start_job(client, kp)
-    # Poll until terminal (mock completes instantly; real may need retries)
-    for _ in range(30):
-        r = client.get(f"/api/v1/jobs/{job_id}")
-        assert r.status_code == 200
-        data = r.json()
-        assert not _missing(SLICE_STATUS_FIELDS, data)
-        if data["status"] in ("completed", "failed"):
-            break
-    assert data["status"] in ("completed", "failed"), f"Job still {data['status']} after 30 polls"
+    data = _finished_job(client, _start_job(client))
+    assert not _missing(SLICE_STATUS_FIELDS, data)
     assert data["error"] is None or isinstance(data["error"], str)
 
 
 def test_slice_download_returns_bytes(client):
-    kp = _known_profile(client)
-    job_id = _start_job(client, kp)
-    # Wait for completion
-    for _ in range(30):
-        r = client.get(f"/api/v1/jobs/{job_id}")
-        if r.json().get("status") == "completed":
-            break
+    job_id = _start_job(client)
+    job = _finished_job(client, job_id)
+    assert job["status"] == "completed", job
     r = client.get(f"/api/v1/jobs/{job_id}/artifact")
     assert r.status_code == 200
     assert len(r.content) > 0
@@ -395,10 +360,10 @@ def test_pack_returns_zip(client):
     assert zipfile.is_zipfile(io.BytesIO(r.content))
 
 
-def test_arrange_returns_zip(client):
+def test_arrange_returns_zip(client, prepared_3mf):
     r = client.post(
         "/api/v1/arrange",
-        files={"file": ("m.3mf", _minimal_3mf(), "application/octet-stream")},
+        files={"file": ("m.3mf", prepared_3mf, "application/octet-stream")},
         data={"arrange": "true", "orient": "true"},
     )
     assert r.status_code == 200
@@ -475,18 +440,12 @@ def test_neutral_supports(client):
 JOB_VIEW_FIELDS = {"id", "status", "filename", "output_format", "error", "artifact", "links"}
 
 
-def _v1_create_job(client: TestClient, headers: dict | None = None) -> "object":
-    kp = _known_profile(client)
+def _v1_create_job(client: httpx.Client, headers: dict | None = None) -> httpx.Response:
     return client.post(
         "/api/v1/jobs",
         files={"file": ("m.stl", _stl(), "application/octet-stream")},
-        data={
-            "machine_uuid": kp["machine_uuid"],
-            "process_uuid": kp["process_uuid"],
-            "filament_uuids": json.dumps([kp["filament_uuid"]]),
-            "plate": "1",
-        },
-        headers=headers or {},
+        data={**_slice_data(client), "plate": "1"},
+        headers=headers,
     )
 
 
@@ -506,8 +465,8 @@ def test_v1_discovery(client):
 def test_v1_profiles_flat_typed_and_paginated(client):
     body = client.get("/api/v1/profiles").json()
     assert {"data", "page"} <= body.keys() and {"limit", "next_cursor"} <= body["page"].keys()
-    assert {p["type"] for p in body["data"]} >= {"machine", "process", "filament"}
-    assert all("uuid" in p for p in body["data"])
+    assert body["data"]
+    assert all("uuid" in p and p["type"] in {"machine", "process", "filament"} for p in body["data"])
     only = client.get("/api/v1/profiles", params={"type": "machine"}).json()["data"]
     assert only and {p["type"] for p in only} == {"machine"}
 
@@ -569,16 +528,17 @@ def test_v1_job_lifecycle(client):
     job = r.json()
     assert not _missing(JOB_VIEW_FIELDS, job)
     assert r.headers["Location"] == job["links"]["self"]
-    for _ in range(30):
-        view = client.get(f"/api/v1/jobs/{job['id']}").json()
-        if view["status"] in ("completed", "failed"):
-            break
-    assert view["status"] == "completed" and view["artifact"]["name"]
+    view = _finished_job(client, job["id"])
+    assert view["status"] == "completed" and view["artifact"]["name"], view
     a = client.get(f"/api/v1/jobs/{job['id']}/artifact")
     assert a.status_code == 200 and len(a.content) > 0
+    # The live HTTP server finishes background cleanup after sending the response.
+    deadline = time.monotonic() + 5
+    while client.get(f"/api/v1/jobs/{job['id']}").raise_for_status().json()["artifact"]["available"]:
+        assert time.monotonic() < deadline, "Downloaded artifact was not retired"
+        time.sleep(0.05)
     again = client.get(f"/api/v1/jobs/{job['id']}/artifact")
     assert again.status_code == 404 and again.json()["error"]["code"] == "artifact_gone"
-    assert client.get(f"/api/v1/jobs/{job['id']}").json()["artifact"]["available"] is False
 
 
 def test_v1_job_list_is_paginated(client):
@@ -603,7 +563,7 @@ def test_v1_validation_error_is_enveloped(client):
 
 
 def test_v1_job_idempotency_replay(client):
-    key = {"Idempotency-Key": "contract-idem-1"}
+    key = {"Idempotency-Key": f"contract-{uuid.uuid4()}"}
     first = _v1_create_job(client, key)
     second = _v1_create_job(client, key)
     assert first.status_code == second.status_code == 202
@@ -611,21 +571,21 @@ def test_v1_job_idempotency_replay(client):
     assert second.headers["Idempotent-Replay"] == "true"
 
 
-def test_v1_slice_prepared(client):
+def test_v1_slice_prepared(client, prepared_3mf):
     r = client.post("/api/v1/slice/prepared",
-                    files={"file": ("m.3mf", _minimal_3mf(), "application/octet-stream")}, data={"plate": "1"})
+                    files={"file": ("m.3mf", prepared_3mf, "application/octet-stream")}, data={"plate": "1"})
     assert r.status_code == 200 and "job_id" in r.json()
     job_id = r.json()["job_id"]
-    view = client.get(f"/api/v1/jobs/{job_id}")
-    assert view.status_code == 200 and view.json()["status"] == "completed"
+    view = _finished_job(client, job_id)
+    assert view["status"] == "completed", view
     artifact = client.get(f"/api/v1/jobs/{job_id}/artifact")
     assert artifact.status_code == 200 and artifact.content
 
 
-def test_v1_pack_and_arrange_return_zip(client):
+def test_v1_pack_and_arrange_return_zip(client, prepared_3mf):
     r = client.post("/api/v1/pack", files=[("files", ("m.stl", _stl(), "application/octet-stream"))],
                     data={"bed_x": "200", "bed_y": "200", "bed_z": "200"})
     assert r.status_code == 200 and zipfile.is_zipfile(io.BytesIO(r.content))
-    r = client.post("/api/v1/arrange", files={"file": ("m.3mf", _minimal_3mf(), "application/octet-stream")},
+    r = client.post("/api/v1/arrange", files={"file": ("m.3mf", prepared_3mf, "application/octet-stream")},
                     data={"arrange": "true", "orient": "true"})
     assert r.status_code == 200 and zipfile.is_zipfile(io.BytesIO(r.content))

@@ -6,6 +6,7 @@ __pycache__/
 # OrcaSlicer runtime artifacts
 config/cache/
 config/log/
+config/orca-desktop/
 app/cache/
 app/log/
 app/user/

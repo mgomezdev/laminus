@@ -92,7 +92,7 @@ async def auto_arrange_3mf(
 
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-            "orcaslicer",
+            main.ORCA_BINARY,
             "--datadir", main.ORCA_DATADIR,
             "--export-3mf", out_file,
         ]
@@ -231,7 +231,7 @@ async def _oracle_arrange_and_transplant(sub_file: str, oracle_in: str, out_file
 
 async def _orca_arrange(oracle_in: str, out_file: str, allow_rotations: bool) -> None:
     """``orcaslicer --arrange 1 --export-3mf out_file oracle_in``; raises HTTPException."""
-    cmd = ["xvfb-run", "-a", "--server-args=-screen 0 1024x768x24", "orcaslicer",
+    cmd = ["xvfb-run", "-a", "--server-args=-screen 0 1024x768x24", main.ORCA_BINARY,
            "--datadir", main.ORCA_DATADIR, "--arrange", "1"]
     if allow_rotations:
         cmd.append("--allow-rotations")

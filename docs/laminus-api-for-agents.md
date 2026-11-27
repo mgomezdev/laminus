@@ -17,7 +17,10 @@ version aliases. Feature-detect using `GET /api/v1` rather than version strings.
    and filament profiles the same way. Follow `page.next_cursor` until null;
    listings return `{data: [...], page: {limit, next_cursor}}`.
 3. `POST /api/v1/jobs` with multipart `file`, `machine_uuid`, `process_uuid`,
-   `filament_uuids` (a JSON array string), and `plate`. A machine may alternatively
+   `filament_uuids` (a JSON array string), and `plate`; optional `extra_config` (a JSON object merged into the
+   resolved project settings — Bambu "-1 = auto" values Orca rejects are then rewritten to Orca's defaults, BIZ-352).
+   Themis sends the bed type + its job and printer overrides + the uploaded 3MF's own process changes here, merged.
+   A machine may alternatively
    be identified with `manufacturer`, `model`, and `nozzle` together. Return:
    **202**, a job view with `id`, and `Location: /api/v1/jobs/{id}`.
 4. Poll `GET /api/v1/jobs/{id}` or connect to
@@ -66,6 +69,43 @@ OrcaSlicer 2.4.2 segfaults in `--export-3mf` without it. Bambu Studio's `-1` ("a
 for `raft_first_layer_expansion` and `tree_support_wall_count`, which Orca rejects
 (`-18`), is replaced with Orca's defaults (`2` and `0`), and each rewrite is logged in
 the job log.
+
+### Object labels and manifest (feature `slice.object_manifest`)
+
+Every slice (`POST /api/v1/jobs`, `/slice/prepared`) emits per-object labels, so a
+consumer can draw the plate and skip objects. **Deliberate override:** Laminus forces
+`exclude_object = 1` and `gcode_label_objects = 1` into the project settings of every
+slice, after the preset and `extra_config` are applied; a preset that turns label
+objects off is ignored. (Pinned Orca 2.5.1: `exclude_object` is what writes
+`EXCLUDE_OBJECT_DEFINE NAME= CENTER= POLYGON=` for Klipper flavor, `M486 A<name>` for
+Marlin flavor, and `label_object_enabled` in the `.gcode.3mf`; `gcode_label_objects`
+adds the `; printing object` comments.)
+
+Labels are opaque, slicer-owned strings, unique within the job. Orca builds them as
+`<object name>_id_<index>_copy_<n>`; the index makes two copies of one model distinct.
+Orca's own `Metadata/plate_N.json` holds the raw object name instead (copies collide),
+so Laminus rewrites those names to the labels. If the output has no labels or they are not unique, `objects` is `null` and the job
+log carries a `WARNING: no object manifest`. Callers must not parse or interpret a label.
+
+`GET /api/v1/jobs/{id}` on a completed job adds `objects` (`null` otherwise; absent from
+list pages; kept after the artifact is downloaded):
+
+```json
+{"version": 1,
+ "plates": [{"plate": 2,
+   "bed": {"origin": [0, 0], "size": [220, 220]},
+   "objects": [{"label": "bracket_id_0_copy_0",
+                "polygon": [[70,100],[90,100],[90,120],[70,120],[70,100]],
+                "bbox": [70, 100, 90, 120]}]}]}
+```
+
+- `plate`: the plate number requested (a job slices exactly one plate).
+- `bed`: `printable_area` bounds in bed mm; all coordinates are bed mm, the same frame as
+  the G-code. `bbox` = `[x0, y0, x1, y1]` of `polygon`.
+- `polygon`: Orca's footprint from `EXCLUDE_OBJECT_DEFINE` (Klipper); for other flavors
+  the bounding rectangle of the object's extrusion moves.
+- Same labels in the artifact: `.gcode` (definitions above), `.gcode.3mf`
+  (`Metadata/plate_1.json` `bbox_objects[].name`, `slice_info.config` objects).
 
 ## Profiles
 

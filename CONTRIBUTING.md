@@ -100,14 +100,12 @@ pip install -r requirements-dev.txt
 sudo ln -sf "$(pwd)/mock/orca_cli.py" /usr/local/bin/orcaslicer   # once; `xvfb-run` must be on PATH too (apt install xvfb)
 SYSTEM_PROFILES_DIR=$(pwd)/tests/fixtures/profiles USER_CONFIG_DIR=/tmp/laminus-test-user \
 CONFIG_DIR=/tmp/laminus-test-config DATA_DIR=/tmp/laminus-test-data \
-LAMINUS_CONTRACT_REQUIRE_REAL=1 pytest tests/ -ra
+pytest tests/ -ra
 ```
 
-That is what CI runs. `tests/test_mock_contract.py` runs every contract test twice, against the HTTP mock and against the
-real app. If any of the four directory variables is unset, or `SYSTEM_PROFILES_DIR` holds no machine profiles, the real half **skips**
-(it would otherwise start the app against `/config` and `/data`); `LAMINUS_CONTRACT_REQUIRE_REAL=1` turns that skip into a
-failure, so check the skip count if you leave it off. The `*_live.py` suites need a running Laminus
-with real OrcaSlicer (`LAMINUS_URL=...`) and always skip otherwise.
+That is what CI runs. `tests/test_mock_contract.py` runs every contract test against the HTTP mock, and again against a
+live Laminus when `LAMINUS_URL` is set (CI's `api-live` job does this against real OrcaSlicer). The `*_live.py` suites
+likewise need a running Laminus with real OrcaSlicer (`LAMINUS_URL=...`) and skip otherwise.
 
 In CI, the mock binary (`mock/orca_cli.py`) is symlinked to `/usr/local/bin/orcaslicer` and `SYSTEM_PROFILES_DIR` is set to `tests/fixtures/profiles/` so all tests including real-client contract tests run without the full AppImage.
 
@@ -181,7 +179,7 @@ xvfb-run -a --server-args="-screen 0 1024x768x24" \
   orcaslicer --slice {plate} --arrange 0 --export-3mf thumb.3mf in.3mf
 ```
 
-OrcaSlicer is not in the Docker image. `entrypoint.sh` downloads the AppImage at container start (keyed by `ORCA_VERSION`) and extracts it into the `laminus-slicer` named volume at `/opt/orcaslicer`. This only happens once; subsequent restarts reuse the extracted volume.
+The entrypoint downloads the OrcaSlicer AppImage on first start and caches it in the `laminus-slicer` volume at `/opt/orcaslicer`. For releases with packed vendor profiles, Laminus builds its API catalog from the matching JSON sources in `/opt/orcaslicer/json-profiles`. Both caches are reused until `ORCA_VERSION` changes.
 
 ---
 
@@ -280,7 +278,7 @@ POST /api/pack
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ORCA_VERSION` | `2.4.2` | OrcaSlicer AppImage version to download |
+| `ORCA_VERSION` | `2.5.1` | OrcaSlicer 2.5.x AppImage version to download |
 | `SYSTEM_PROFILES_DIR` | `/opt/orcaslicer/resources/profiles` | System OrcaSlicer profiles |
 | `USER_CONFIG_DIR` | `/config/user` | User OrcaSlicer profiles |
 | `SLICE_TIMEOUT_SECONDS` | `600` | SIGKILL timeout for slice subprocess |

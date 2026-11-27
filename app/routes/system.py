@@ -15,6 +15,11 @@ from fastapi.responses import HTMLResponse
 import app.main as main
 
 
+@main.app.get("/openapi-v1.json", include_in_schema=False)
+async def get_versioned_openapi():
+    return main.app.openapi()
+
+
 @main.app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def get_dashboard():
     template_path = os.path.join(main.TEMPLATES_DIR, "index.html")
@@ -26,7 +31,7 @@ async def get_dashboard():
 
 
 def _orca_version() -> Optional[str]:
-    """Installed OrcaSlicer release (e.g. "2.4.2"): the version entrypoint.sh actually
+    """Installed OrcaSlicer release (e.g. "2.5.1"): the version entrypoint.sh actually
     extracted, falling back to the ORCA_VERSION env var; None if neither is known."""
     try:
         with open(main.ORCA_VERSION_FILE, encoding="utf-8") as f:
@@ -47,11 +52,10 @@ def _orca_version() -> Optional[str]:
         "slice endpoints return **503** while `catalog_loading` is `true`.\n\n"
         "**Response fields:**\n"
         "- `status` — always `\"healthy\"` when the process is running\n"
-        "- `orcaslicer_installed` — whether the OrcaSlicer binary exists at "
-        "`/usr/local/bin/orcaslicer`\n"
+        "- `orcaslicer_installed` — whether the configured OrcaSlicer binary is executable\n"
         "- `orcaslicer_version` — version string from `orcaslicer --version`, or `null` "
         "if the binary is not installed or timed out\n"
-        "- `orca_version` — installed OrcaSlicer release (e.g. `\"2.4.2\"`), read from the "
+        "- `orca_version` — installed OrcaSlicer release (e.g. `\"2.5.1\"`), read from the "
         "install's `.version` marker, falling back to the `ORCA_VERSION` env var; `null` if "
         "neither is available\n"
         "- `config_mounted` — whether `/config` exists (volume mount check)\n"
@@ -72,7 +76,7 @@ async def health_check():
     active = sum(1 for j in list(main.jobs.values()) if j["status"] == "slicing")
     return {
         "status": "healthy",
-        "orcaslicer_installed": os.path.exists("/usr/local/bin/orcaslicer"),
+        "orcaslicer_installed": shutil.which(main.ORCA_BINARY) is not None,
         "orcaslicer_version": main._orcaslicer_version,
         "orca_version": main._orca_version(),
         "config_mounted": os.path.exists(main.CONFIG_DIR),

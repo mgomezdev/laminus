@@ -69,6 +69,7 @@ THUMBNAIL_TIMEOUT = 120
 
 SYSTEM_PROFILES_DIR = os.environ.get("SYSTEM_PROFILES_DIR", "/opt/orcaslicer/resources/profiles")
 # entrypoint.sh writes the extracted AppImage's version to <install dir>/.version
+ORCA_BINARY = os.environ.get("ORCA_BINARY", "orcaslicer")
 ORCA_VERSION_FILE = os.environ.get("ORCA_VERSION_FILE", "/opt/orcaslicer/.version")
 SLICE_TIMEOUT = int(os.environ.get("SLICE_TIMEOUT_SECONDS", "600"))
 ARRANGE_TIMEOUT = int(os.environ.get("ARRANGE_TIMEOUT_SECONDS", "120"))
@@ -97,7 +98,7 @@ async def lifespan(app: FastAPI):
     _load_history_on_startup()
     try:
         proc = await asyncio.create_subprocess_exec(
-            "orcaslicer", "--version",
+            ORCA_BINARY, "--version",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
         try:

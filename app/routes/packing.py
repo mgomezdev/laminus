@@ -391,7 +391,7 @@ async def pack_stls(
         out_file = os.path.join(output_dir, "packed.3mf")
         cmd = [
             "xvfb-run", "-a", "--server-args=-screen 0 1024x768x24",
-            "orcaslicer",
+            main.ORCA_BINARY,
             "--datadir", main.ORCA_DATADIR,
             "--arrange", "1",
             "--orient", "0",  # --orient tilts parts about X/Y, changing layer-line direction

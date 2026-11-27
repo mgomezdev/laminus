@@ -158,7 +158,7 @@ def install(app: FastAPI, m) -> None:
                          "projects.previews", "pack", "arrange", "health", "slice.prepared",
                          "slice.thumbnail", "profiles.rescan", "profiles.broken", "profiles.upload",
                          "profiles.merged_config", "profiles.neutral", "cleanup",
-                         "slice.plate_isolation", "pack.manifest", "pack.next", "pack.mixed", "projects.measure"],
+                         "slice.plate_isolation", "pack.manifest", "slice.object_manifest", "pack.next", "pack.mixed", "projects.measure"],
             "limits": {"max_concurrent_jobs": m.MAX_CONCURRENT_JOBS,
                        "job_history_limit": m.JOB_HISTORY_LIMIT,
                        "max_page_size": _MAX_PAGE},
@@ -169,7 +169,7 @@ def install(app: FastAPI, m) -> None:
         return {"self": f"{PREFIX}/jobs/{job_id}", "events": f"{PREFIX}/jobs/{job_id}/events",
                 "artifact": f"{PREFIX}/jobs/{job_id}/artifact"}
 
-    def _view(job_id: str) -> Optional[dict]:
+    def _view(job_id: str, objects: bool = False) -> Optional[dict]:
         live, hist = m.jobs.get(job_id), m.job_history.get(job_id)
         if live is None and hist is None:
             return None
@@ -182,13 +182,16 @@ def install(app: FastAPI, m) -> None:
         sliced = src.get("sliced_file")
         available = bool(live is not None and not live.get("_stub") and src.get("status") == "completed"
                          and sliced and os.path.exists(sliced))
-        return {
+        view = {
             "id": job_id, "status": src.get("status"), "filename": src.get("filename"),
             "output_format": src.get("output_format"), "error": src.get("error"),
             "artifact": {"name": os.path.basename(sliced) if sliced else None, "available": available},
             "created_at": src.get("created_at"), "updated_at": src.get("updated_at"),
             "links": _links(job_id),
         }
+        if objects:  # BIZ-407: only on GET /jobs/{id}; list pages stay small
+            view["objects"] = src.get("objects")
+        return view
 
     @app.post(f"{PREFIX}/jobs", tags=["v1 jobs"], status_code=202, summary="Create a slice job",
               description="Upload an STL/3MF and resolved profile UUIDs. Send an "
@@ -271,7 +274,7 @@ def install(app: FastAPI, m) -> None:
     @app.get(f"{PREFIX}/jobs/{{job_id}}", tags=["v1 jobs"], summary="Get a job",
              responses={404: {"description": "Unknown job"}})
     async def get_job(job_id: str):
-        view = _view(job_id)
+        view = _view(job_id, objects=True)
         if view is None:
             raise _err(404, "job_not_found", "Job not found.")
         return view

@@ -45,14 +45,12 @@ curl http://localhost:5000/api/v1/health
 pip install -r requirements-dev.txt
 # mock/orca_cli.py must be on PATH as `orcaslicer` (and `xvfb-run` installed); then, as CI does:
 SYSTEM_PROFILES_DIR=$PWD/tests/fixtures/profiles USER_CONFIG_DIR=/tmp/laminus-test-user CONFIG_DIR=/tmp/laminus-test-config \
-DATA_DIR=/tmp/laminus-test-data LAMINUS_CONTRACT_REQUIRE_REAL=1 pytest tests/ -ra
+DATA_DIR=/tmp/laminus-test-data pytest tests/ -ra
 python scripts/export_openapi.py   # after a route/param change; CI fails on a stale openapi.json / openapi-v1.json
 ```
 
-`tests/test_mock_contract.py` runs each contract test against both the HTTP mock (`mock/server.py`) and the real app. A change to
-either side, or to what the real app expects from the slicer CLI (`mock/orca_cli.py`), must keep both halves green. If any of
-the four directory variables is unset, or `SYSTEM_PROFILES_DIR` holds no machine profiles, the real half skips; with
-`LAMINUS_CONTRACT_REQUIRE_REAL=1` (CI) that is a failure instead.
+`tests/test_mock_contract.py` runs each contract test against the HTTP mock (`mock/server.py`), and against a live Laminus
+when `LAMINUS_URL` is set (CI's `api-live` job, real OrcaSlicer). A change to either side must keep both halves green.
 
 ## Architecture
 

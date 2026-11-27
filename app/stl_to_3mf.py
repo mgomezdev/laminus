@@ -9,6 +9,7 @@ import zipfile
 from app.project_config_builder import (
     ensure_extruder_reset_per_layer, normalize_filament_ids, replace_bambu_auto_sentinels,
 )
+from app.subset_3mf import MODEL_SETTINGS, pack_source_indices
 
 _NS_CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 _NS_PROD = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
@@ -311,12 +312,7 @@ def restore_build_item_z(packed_path: str, z_offsets: list[float]) -> None:
         entries = [(info, src.read(info.filename)) for info in src.infolist()]
     files = {info.filename: data for info, data in entries}
 
-    cfg = files.get("Metadata/model_settings.config", b"").decode("utf-8")
-    source_of: dict[str, int] = {}
-    for obj in re.finditer(r'<object id="(\d+)">(.*?)</object>', cfg, re.S):
-        m = re.search(r'key="source_object_id" value="(\d+)"', obj.group(2))
-        if m:
-            source_of[obj.group(1)] = int(m.group(1))
+    source_of = pack_source_indices(files.get(MODEL_SETTINGS, b"<config/>"))
 
     text = files["3D/3dmodel.model"].decode("utf-8")
     items = list(_BUILD_ITEM_RE.finditer(text))

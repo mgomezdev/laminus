@@ -11,6 +11,7 @@ import zipfile
 
 import pytest
 
+from app.object_labels import FORCED_SETTINGS
 from app.plate_extract import PlateFitError, extract_plate, plate_footprint, retarget_plate
 from tests.test_empty_plate_output import _run
 
@@ -124,7 +125,8 @@ def test_same_plate_identical_layout_on_256_and_350_beds(tmp_path, plate):
         assert job["status"] == "completed", job.get("error")
         sliced = args[-1]
         assert args[args.index("--slice") + 1] == "1" and args[args.index("--arrange") + 1] == "0"
-        assert _settings(sliced) == target  # target settings embedded after extraction
+        # target settings embedded after extraction, plus the forced object-label keys (BIZ-407)
+        assert {k: v for k, v in _settings(sliced).items() if k not in FORCED_SETTINGS} == target
         handed[name] = _positions(sliced)
 
     # identical object set
