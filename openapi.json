@@ -283,6 +283,69 @@
         }
       }
     },
+    "/api/v1/profiles/upload": {
+      "post": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "Upload a user profile JSON",
+        "description": "Upload a flat OrcaSlicer preset JSON into the user config volume at `/config/user/default/{type}/`. A catalog rebuild is triggered in the background automatically \u2014 wait ~5 s and call `GET /api/v1/profiles` to confirm the profile appears before using it in a slice job.\n\n**Requirements for the JSON file:**\n- Must have a `.json` extension\n- `type` must be exactly `machine`, `process`, or `filament`\n\n**Prefer a thin preset over a flattened one.** Declare `inherits` naming the vendor base plus only the keys you are actually changing. Inheritance is resolved against the profile tree as it exists at slice time, so an OrcaSlicer update that improves the vendor base rolls straight through into your profile. A fully-flattened preset (no `inherits`) is frozen at the version it was flattened from and silently misses every later vendor fix \u2014 use it only when you want a permanent fork.\n\nIf the base is renamed or removed by a later OrcaSlicer release the profile is dropped from the catalog rather than served half-resolved; `GET /api/v1/profiles/broken` reports it.\n\n**Profile persistence:** the uploaded file is written to a Docker volume (`/config/user/`). It survives container restarts but is not baked into the image. Re-upload after replacing the container with a clean image.\n\n**UUID stability:** user profiles receive a UUID derived from `(user, rel_path)` so the UUID changes if the file is renamed or moved.",
+        "operationId": "v1_upload_profile",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_v1_upload_profile"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid `type` (must be machine, process, or filament), bad filename (null bytes, semicolons, path traversal), or file does not have a .json extension"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/profiles/rescan": {
+      "post": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "Rescan profiles and rebuild the catalog",
+        "description": "Re-walks the system and user profile trees, re-verifies every `inherits` chain, and rebuilds the catalog dictionary.\n\nThe catalog is normally rebuilt automatically \u2014 the cache key covers the OrcaSlicer version, the vendor profile bundles, and every file under `/config/user/`, so any preset change voids it. Use this endpoint to force the work anyway: after editing profiles in place on a bind mount, or to re-check which profiles are broken after an OrcaSlicer upgrade.\n\nReturns immediately; the rebuild runs in the background. Poll `GET /api/v1/health` until `catalog_building` is `false`, then call `GET /api/v1/profiles/broken` for profiles whose inheritance no longer resolves.",
+        "operationId": "v1_rescan_profiles",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/slice/prepared": {
       "post": {
         "tags": [
@@ -351,51 +414,6 @@
           },
           "422": {
             "description": "OrcaSlicer returned non-zero, no PNG found in output, plate < 1, bad filename, or non-.3mf file uploaded. Also returned on timeout (the OrcaSlicer process is killed)."
-          }
-        }
-      }
-    },
-    "/api/v1/pack": {
-      "post": {
-        "tags": [
-          "arrange"
-        ],
-        "summary": "Pack N STLs onto as many plates as needed (synchronous)",
-        "description": "Distributes STL geometry across build plates via OrcaSlicer `--arrange 1` (no auto-orient). Returns the resulting multi-plate `.3mf` directly as `application/octet-stream`. **Blocks for up to 120 seconds.**\n\n## Bed / settings source (mutually exclusive \u2014 supply exactly one)\n\n**1. Template file** (`template` field)\nUpload a `.3mf` whose `Metadata/project_settings.config` carries the printer and bed configuration. OrcaSlicer reads bed dimensions and settings from that config. Use this when you already have a known-good 3MF template from a previous session.\n\n**2. Profile UUIDs** (`machine_uuid` + `process_uuid` + `filament_uuids`)\nThe container resolves profiles from its catalog, builds the settings internally, and constructs a minimal bed-only template (only `printable_area` and `printable_height` are embedded \u2014 no full machine config that could override the bed size). Templates for a given UUID combination are cached in memory, so repeated calls with the same profiles are fast. This mode requires `catalog_loaded: true`.\n\n**3. Machine UUID alone** (`machine_uuid`, no `process_uuid`/`filament_uuids`)\nShortcut for geometry mode: the bed (`printable_area`, `printable_height`) is read from that machine's catalog profile, so callers need not look up bed_x/bed_y/bed_z first. If `bed_x`/`bed_y`/`bed_z` are all given too, they win. Requires `catalog_loaded: true`.\n\n**4. Explicit bed dimensions** (`bed_x` + `bed_y` + `bed_z`, all in mm)\nLaminus constructs a minimal bed template from the supplied dimensions. `bed_z` is the printable height (not the physical Z travel). No profile catalog or template file needed \u2014 useful when you want geometry-only packing without print settings.\n\n## STL inputs\n\n- `files` \u2014 one or more `.stl` files (max 50 per request)\n- Filenames must not contain null bytes, newlines, or semicolons\n- Duplicate filenames in the same batch are deduplicated with a numeric suffix\n- `items` (optional) \u2014 JSON array of `{\"file\": <uploaded filename>, \"quantity\": <int >= 1>}`, e.g. `[{\"file\":\"a.stl\",\"quantity\":3},{\"file\":\"b.stl\",\"quantity\":1}]`. Each STL yields that many arranged copies sharing one mesh in the 3MF. Omitted = 1 each. When `items` is given, uploaded filenames must be unique and every upload needs exactly one entry; anything else \u2192 422. The 50 cap applies to unique files; total copies are capped at 500. On `/api/v1/pack` a 422 lists each problem in `error.details` with a `loc` such as `[\"body\",\"items\",1,\"quantity\"]`.\n\n## Notes\n\n- Parts are never tilted about X/Y (no auto-orient), so layer-line direction is preserved. Each instance keeps its input STL's min Z (models intentionally above or below the plate stay there); the arranger may rotate about Z.\n- The packed `.3mf` preserves `Metadata/project_settings.config` from the template but discards any geometry or model_settings from it.\n- All temporary files are cleaned up after the response is sent.\n- Embeds `Metadata/laminus_manifest.json`: per plate, which `items` entry each instance came from (feature `pack.manifest`; see docs/laminus-api-for-agents.md).",
-        "operationId": "v1_pack_stls",
-        "requestBody": {
-          "content": {
-            "multipart/form-data": {
-              "schema": {
-                "$ref": "#/components/schemas/Body_v1_pack_stls"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "400": {
-            "description": "Bad filename in STL or template upload, OrcaSlicer arrange process failed (non-zero exit or missing output file), or failed to build the combined 3MF"
-          },
-          "408": {
-            "description": "Pack operation timed out after 120 seconds"
-          },
-          "422": {
-            "description": "No STL files provided, more than 50 STLs, non-.stl file in files list, non-.3mf template, bed dimensions \u2264 0, invalid filament_uuids JSON, invalid `items` (bad JSON/shape, unknown/duplicate/missing file, quantity < 1) or total copies over the cap, UUID not found in catalog, or no settings source provided"
-          },
-          "500": {
-            "description": "Unexpected system error \u2014 check server logs"
-          },
-          "503": {
-            "description": "Profile catalog not yet ready (UUID mode only)"
           }
         }
       }
@@ -612,6 +630,84 @@
         }
       }
     },
+    "/api/v1/projects/measure": {
+      "post": {
+        "tags": [
+          "arrange"
+        ],
+        "summary": "Bounding-box sizes of 3MF objects / plates, or of an STL",
+        "description": "Multipart `file` (`.3mf` or `.stl`) and optional `selection`, a JSON list of `{\"id\": n}` / `{\"name\": s}` (one object) or `{\"plate\": n}` (one plate); `[]` or omitted measures the whole file.\n\n**200:** `{\"items\": [{\"size_mm\": [x, y, z]}, ...]}`, one per selection entry in order (one for the whole file). Sizes are the axis-aligned bounding box of printed parts (modifier/negative/blocker/enforcer parts ignored), after the build transform:\n- object: its first instance as placed (a rotated object reports its placed size);\n- plate: every instance on that plate as authored;\n- whole 3MF: every build item; a multi-plate project needs `plate` selectors;\n- STL: mesh extents (no selection).\n\n**422** (`unprocessable`): unreadable file, bad selection, unknown/ambiguous object, missing or empty plate.",
+        "operationId": "v1_measure",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_v1_measure"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Unreadable file or bad selection"
+          }
+        }
+      }
+    },
+    "/api/v1/pack": {
+      "post": {
+        "tags": [
+          "arrange"
+        ],
+        "summary": "Pack N STLs onto as many plates as needed (synchronous)",
+        "description": "Distributes STL geometry across build plates via OrcaSlicer `--arrange 1` (no auto-orient). Returns the resulting multi-plate `.3mf` directly as `application/octet-stream`. **Blocks for up to 120 seconds.**\n\n## Bed / settings source (mutually exclusive \u2014 supply exactly one)\n\n**1. Template file** (`template` field)\nUpload a `.3mf` whose `Metadata/project_settings.config` carries the printer and bed configuration. OrcaSlicer reads bed dimensions and settings from that config. Use this when you already have a known-good 3MF template from a previous session.\n\n**2. Profile UUIDs** (`machine_uuid` + `process_uuid` + `filament_uuids`)\nThe container resolves profiles from its catalog, builds the settings internally, and constructs a minimal bed-only template (only `printable_area` and `printable_height` are embedded \u2014 no full machine config that could override the bed size). Templates for a given UUID combination are cached in memory, so repeated calls with the same profiles are fast. This mode requires `catalog_loaded: true`.\n\n**3. Machine UUID alone** (`machine_uuid`, no `process_uuid`/`filament_uuids`)\nShortcut for geometry mode: the bed (`printable_area`, `printable_height`) is read from that machine's catalog profile, so callers need not look up bed_x/bed_y/bed_z first. If `bed_x`/`bed_y`/`bed_z` are all given too, they win. Requires `catalog_loaded: true`.\n\n**4. Explicit bed dimensions** (`bed_x` + `bed_y` + `bed_z`, all in mm)\nLaminus constructs a minimal bed template from the supplied dimensions. `bed_z` is the printable height (not the physical Z travel). No profile catalog or template file needed \u2014 useful when you want geometry-only packing without print settings.\n\n## STL inputs\n\n- `files` \u2014 one or more `.stl` files (max 50 per request)\n- Filenames must not contain null bytes, newlines, or semicolons\n- Duplicate filenames in the same batch are deduplicated with a numeric suffix\n- `items` (optional) \u2014 JSON array of `{\"file\": <uploaded filename>, \"quantity\": <int >= 1>}`, e.g. `[{\"file\":\"a.stl\",\"quantity\":3},{\"file\":\"b.stl\",\"quantity\":1}]`. Each STL yields that many arranged copies sharing one mesh in the 3MF. Omitted = 1 each. When `items` is given, uploaded filenames must be unique and every upload needs exactly one entry; anything else \u2192 422. The 50 cap applies to unique files; total copies are capped at 500. On `/api/v1/pack` a 422 lists each problem in `error.details` with a `loc` such as `[\"body\",\"items\",1,\"quantity\"]`.\n\n## Notes\n\n- Parts are never tilted about X/Y (no auto-orient), so layer-line direction is preserved. Each instance keeps its input STL's min Z (models intentionally above or below the plate stay there); the arranger may rotate about Z.\n- The packed `.3mf` preserves `Metadata/project_settings.config` from the template but discards any geometry or model_settings from it.\n- All temporary files are cleaned up after the response is sent.\n- Embeds `Metadata/laminus_manifest.json`: per plate, which `items` entry each instance came from (feature `pack.manifest`; see docs/laminus-api-for-agents.md).",
+        "operationId": "v1_pack_stls",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_v1_pack_stls"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad filename in STL or template upload, OrcaSlicer arrange process failed (non-zero exit or missing output file), or failed to build the combined 3MF"
+          },
+          "408": {
+            "description": "Pack operation timed out after 120 seconds"
+          },
+          "422": {
+            "description": "No STL files provided, more than 50 STLs, non-.stl file in files list, non-.3mf template, bed dimensions \u2264 0, invalid filament_uuids JSON, invalid `items` (bad JSON/shape, unknown/duplicate/missing file, quantity < 1) or total copies over the cap, UUID not found in catalog, or no settings source provided"
+          },
+          "500": {
+            "description": "Unexpected system error \u2014 check server logs"
+          },
+          "503": {
+            "description": "Profile catalog not yet ready (UUID mode only)"
+          }
+        }
+      }
+    },
     "/api/v1/pack/next": {
       "post": {
         "tags": [
@@ -692,102 +788,6 @@
           },
           "503": {
             "description": "machine_uuid given but catalog not ready"
-          }
-        }
-      }
-    },
-    "/api/v1/projects/measure": {
-      "post": {
-        "tags": [
-          "arrange"
-        ],
-        "summary": "Bounding-box sizes of 3MF objects / plates, or of an STL",
-        "description": "Multipart `file` (`.3mf` or `.stl`) and optional `selection`, a JSON list of `{\"id\": n}` / `{\"name\": s}` (one object) or `{\"plate\": n}` (one plate); `[]` or omitted measures the whole file.\n\n**200:** `{\"items\": [{\"size_mm\": [x, y, z]}, ...]}`, one per selection entry in order (one for the whole file). Sizes are the axis-aligned bounding box of printed parts (modifier/negative/blocker/enforcer parts ignored), after the build transform:\n- object: its first instance as placed (a rotated object reports its placed size);\n- plate: every instance on that plate as authored;\n- whole 3MF: every build item; a multi-plate project needs `plate` selectors;\n- STL: mesh extents (no selection).\n\n**422** (`unprocessable`): unreadable file, bad selection, unknown/ambiguous object, missing or empty plate.",
-        "operationId": "v1_measure",
-        "requestBody": {
-          "content": {
-            "multipart/form-data": {
-              "schema": {
-                "$ref": "#/components/schemas/Body_v1_measure"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Unreadable file or bad selection"
-          }
-        }
-      }
-    },
-    "/api/v1/profiles/upload": {
-      "post": {
-        "tags": [
-          "profiles"
-        ],
-        "summary": "Upload a user profile JSON",
-        "description": "Upload a flat OrcaSlicer preset JSON into the user config volume at `/config/user/default/{type}/`. A catalog rebuild is triggered in the background automatically \u2014 wait ~5 s and call `GET /api/v1/profiles` to confirm the profile appears before using it in a slice job.\n\n**Requirements for the JSON file:**\n- Must have a `.json` extension\n- `type` must be exactly `machine`, `process`, or `filament`\n\n**Prefer a thin preset over a flattened one.** Declare `inherits` naming the vendor base plus only the keys you are actually changing. Inheritance is resolved against the profile tree as it exists at slice time, so an OrcaSlicer update that improves the vendor base rolls straight through into your profile. A fully-flattened preset (no `inherits`) is frozen at the version it was flattened from and silently misses every later vendor fix \u2014 use it only when you want a permanent fork.\n\nIf the base is renamed or removed by a later OrcaSlicer release the profile is dropped from the catalog rather than served half-resolved; `GET /api/v1/profiles/broken` reports it.\n\n**Profile persistence:** the uploaded file is written to a Docker volume (`/config/user/`). It survives container restarts but is not baked into the image. Re-upload after replacing the container with a clean image.\n\n**UUID stability:** user profiles receive a UUID derived from `(user, rel_path)` so the UUID changes if the file is renamed or moved.",
-        "operationId": "v1_upload_profile",
-        "requestBody": {
-          "content": {
-            "multipart/form-data": {
-              "schema": {
-                "$ref": "#/components/schemas/Body_v1_upload_profile"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid `type` (must be machine, process, or filament), bad filename (null bytes, semicolons, path traversal), or file does not have a .json extension"
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/profiles/rescan": {
-      "post": {
-        "tags": [
-          "profiles"
-        ],
-        "summary": "Rescan profiles and rebuild the catalog",
-        "description": "Re-walks the system and user profile trees, re-verifies every `inherits` chain, and rebuilds the catalog dictionary.\n\nThe catalog is normally rebuilt automatically \u2014 the cache key covers the OrcaSlicer version, the vendor profile bundles, and every file under `/config/user/`, so any preset change voids it. Use this endpoint to force the work anyway: after editing profiles in place on a bind mount, or to re-check which profiles are broken after an OrcaSlicer upgrade.\n\nReturns immediately; the rebuild runs in the background. Poll `GET /api/v1/health` until `catalog_building` is `false`, then call `GET /api/v1/profiles/broken` for profiles whose inheritance no longer resolves.",
-        "operationId": "v1_rescan_profiles",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
           }
         }
       }

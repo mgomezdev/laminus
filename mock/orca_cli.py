@@ -43,6 +43,42 @@ def _write_3mf(path):
         zf.writestr("3D/3dmodel.model", "<model/>")
 
 
+def _input_object_ids(input_path):
+    """Object ids of the input project's build items, in order ([] when it has no readable model)."""
+    try:
+        with zipfile.ZipFile(input_path) as zf:
+            model = zf.read("3D/3dmodel.model").decode("utf-8", "replace")
+    except (OSError, KeyError, zipfile.BadZipFile, TypeError):
+        return []
+    return re.findall(r'<item\b[^>]*\bobjectid="([^"]+)"', model)
+
+
+def _write_arranged_3mf(path, input_path):
+    """What `--arrange --export-3mf` leaves behind, as far as Laminus reads it: the input's model, and a
+    `Metadata/model_settings.config` naming each object's input position as its part's `source_object_id`,
+    all on one plate. Laminus's pack manifest (app/manifest.py `pack_origin`) is built from that file."""
+    ids = _input_object_ids(input_path)
+    if not ids:
+        _write_3mf(path)
+        return
+    with zipfile.ZipFile(input_path) as zf:
+        model = zf.read("3D/3dmodel.model")
+    settings = ('<?xml version="1.0" encoding="UTF-8"?>\n<config>'
+                + "".join(f'<object id="{oid}"><metadata key="name" value="obj{k}"/>'
+                          f'<part id="1"><metadata key="source_object_id" value="{k}"/></part></object>'
+                          for k, oid in enumerate(ids))
+                + '<plate><metadata key="plater_id" value="1"/>'
+                + "".join(f'<model_instance><metadata key="object_id" value="{oid}"/>'
+                          f'<metadata key="instance_id" value="0"/></model_instance>' for oid in ids)
+                + "</plate></config>")
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("[Content_Types].xml", _CONTENT_TYPES)
+        zf.writestr("Metadata/project_settings.config", _PROJECT_SETTINGS)
+        zf.writestr("3D/3dmodel.model", model)
+        zf.writestr("Metadata/model_settings.config", settings)
+
+
 def _write_thumbnail_3mf(path, plate):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with zipfile.ZipFile(path, "w") as zf:
@@ -89,7 +125,7 @@ def main():
                 f.write("; OrcaSlicer mock\nG28\nM84\n")
     elif export_3mf:
         # Pack / arrange: absolute path
-        _write_3mf(export_3mf)
+        _write_arranged_3mf(export_3mf, args[-1] if args else None)
 
     sys.exit(0)
 
